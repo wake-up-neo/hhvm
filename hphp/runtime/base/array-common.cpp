@@ -19,10 +19,9 @@
 #include "hphp/runtime/base/array-data.h"
 #include "hphp/runtime/base/array-data-defs.h"
 #include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/base/mixed-array-defs.h"
-#include "hphp/runtime/base/packed-array.h"
-#include "hphp/runtime/base/struct-array.h"
-#include "hphp/runtime/base/struct-array-defs.h"
+#include "hphp/runtime/base/packed-array-defs.h"
 #include "hphp/runtime/base/type-variant.h"
 
 namespace HPHP {
@@ -39,13 +38,9 @@ bool ArrayCommon::ValidMArrayIter(const ArrayData* ad, const MArrayIter& fp) {
   if (ad->isPackedLayout()) {
     assert(PackedArray::checkInvariants(ad));
     return fp.m_pos != ad->getSize();
-  } else if (ad->isStruct()) {
-    assert(StructArray::asStructArray(ad));
-    return fp.m_pos != StructArray::asStructArray(ad)->size();
-  } else {
-    assert(MixedArray::asMixed(ad));
-    return fp.m_pos != MixedArray::asMixed(ad)->iterLimit();
   }
+  assert(MixedArray::asMixed(ad));
+  return fp.m_pos != MixedArray::asMixed(ad)->iterLimit();
 }
 
 ArrayData* ArrayCommon::Pop(ArrayData* a, Variant &value) {
@@ -71,18 +66,74 @@ ArrayData* ArrayCommon::Dequeue(ArrayData* a, Variant &value) {
   return a;
 }
 
-ArrayData* ArrayCommon::ToVec(const ArrayData* a) {
+ArrayData* ArrayCommon::ToVec(ArrayData* a, bool) {
   auto const size = a->size();
   if (!size) return staticEmptyVecArray();
   VecArrayInit init{size};
-  for (ArrayIter it{a}; it; ++it) {
-    auto const& value = it.secondRef();
-    if (UNLIKELY(value.isReferenced())) {
-      throwRefInvalidArrayValueException(init.toArray());
+  IterateV(
+    a,
+    [&](const TypedValue* v) {
+      if (UNLIKELY(v->m_type == KindOfRef)) {
+        if (v->m_data.pref->isReferenced()) {
+          throwRefInvalidArrayValueException(init.toArray());
+        }
+      }
+      init.append(tvAsCVarRef(v));
     }
-    init.append(value);
-  }
+  );
   return init.create();
+}
+
+ArrayData* ArrayCommon::ToDict(ArrayData* a, bool) {
+  auto const size = a->size();
+  if (!size) return staticEmptyDictArray();
+  DictInit init{size};
+  IterateKV(
+    a,
+    [&](const TypedValue* k, const TypedValue* v) {
+      if (UNLIKELY(v->m_type == KindOfRef)) {
+        if (v->m_data.pref->isReferenced()) {
+          throwRefInvalidArrayValueException(init.toArray());
+        }
+      }
+      init.setValidKey(tvAsCVarRef(k), tvAsCVarRef(v));
+    }
+  );
+  return init.create();
+}
+
+ArrayData* ArrayCommon::ToKeyset(ArrayData* a, bool) {
+  auto const size = a->size();
+  if (!size) return staticEmptyKeysetArray();
+  KeysetInit init{size};
+  IterateKV(
+    a,
+    [&](const TypedValue* k, const TypedValue*) {
+      assert(isIntType(k->m_type) || isStringType(k->m_type));
+      init.add(tvAsCVarRef(k));
+    }
+  );
+  return init.create();
+}
+
+ArrayCommon::RefCheckResult
+ArrayCommon::CheckForRefs(const ArrayData* ad) {
+  auto result = RefCheckResult::Pass;
+  IterateV(
+    ad,
+    [&](const TypedValue* v) {
+      if (UNLIKELY(v->m_type == KindOfRef)) {
+        auto const ref = v->m_data.pref;
+        if (ref->isReferenced() || ref->tv()->m_data.parr == ad) {
+          result = RefCheckResult::Fail;
+          return true;
+        }
+        result = RefCheckResult::Collapse;
+      }
+      return false;
+    }
+  );
+  return result;
 }
 
 //////////////////////////////////////////////////////////////////////

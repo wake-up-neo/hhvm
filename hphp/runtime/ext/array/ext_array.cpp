@@ -17,6 +17,7 @@
 
 #include "hphp/runtime/ext/array/ext_array.h"
 
+#include "hphp/runtime/base/thread-info.h"
 #include "hphp/runtime/base/actrec-args.h"
 #include "hphp/runtime/base/array-data-defs.h"
 #include "hphp/runtime/base/array-init.h"
@@ -280,7 +281,7 @@ bool HHVM_FUNCTION(array_key_exists,
   const ArrayData *ad;
 
   auto const searchCell = search.asCell();
-  if (LIKELY(isArrayType(searchCell->m_type))) {
+  if (LIKELY(isArrayLikeType(searchCell->m_type))) {
     ad = searchCell->m_data.parr;
   } else if (searchCell->m_type == KindOfObject) {
     ObjectData* obj = searchCell->m_data.pobj;
@@ -303,6 +304,12 @@ bool HHVM_FUNCTION(array_key_exists,
 
     case KindOfBoolean:
     case KindOfDouble:
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
     case KindOfPersistentArray:
     case KindOfArray:
     case KindOfObject:
@@ -378,14 +385,17 @@ static void php_array_merge(Array &arr1, const Array& arr2) {
   arr1.merge(arr2);
 }
 
+static bool couldRecur(const Variant& v, const ArrayData* arr) {
+  return v.isReferenced() ||
+    arr->kind() == ArrayData::kGlobalsKind ||
+    arr->kind() == ArrayData::kProxyKind;
+}
+
 static void php_array_merge_recursive(PointerSet &seen, bool check,
                                       Array &arr1, const Array& arr2) {
-  if (check) {
-    if (seen.find((void*)arr1.get()) != seen.end()) {
-      raise_warning("array_merge_recursive(): recursion detected");
-      return;
-    }
-    seen.insert((void*)arr1.get());
+  if (check && !seen.insert((void*)arr1.get()).second) {
+    raise_warning("array_merge_recursive(): recursion detected");
+    return;
   }
 
   for (ArrayIter iter(arr2); iter; ++iter) {
@@ -398,7 +408,9 @@ static void php_array_merge_recursive(PointerSet &seen, bool check,
       // in the array.
       Variant &v = arr1.lvalAt(key, AccessFlags::Key);
       auto subarr1 = v.toArray().copy();
-      php_array_merge_recursive(seen, v.isReferenced(), subarr1,
+      php_array_merge_recursive(seen,
+                                couldRecur(v, subarr1.get()),
+                                subarr1,
                                 value.toArray());
       v.unset(); // avoid contamination of the value that was strongly bound
       v = subarr1;
@@ -416,6 +428,7 @@ TypedValue HHVM_FUNCTION(array_map,
                          const Variant& callback,
                          const Variant& arr1,
                          const Array& _argv) {
+  VMRegGuard _;
   CallCtx ctx;
   ctx.func = nullptr;
   if (!callback.isNull()) {
@@ -431,14 +444,14 @@ TypedValue HHVM_FUNCTION(array_map,
     // Handle the common case where the caller passed two
     // params (a callback and a container)
     if (!ctx.func) {
-      if (isArrayType(cell_arr1.m_type)) {
+      if (isArrayLikeType(cell_arr1.m_type)) {
         return tvReturn(arr1);
       } else {
         return tvReturn(arr1.toArray());
       }
     }
     ArrayInit ret(getContainerSize(cell_arr1), ArrayInit::Map{});
-    bool keyConverted = isArrayType(cell_arr1.m_type);
+    bool keyConverted = isArrayLikeType(cell_arr1.m_type);
     if (!keyConverted) {
       auto col_type = cell_arr1.m_data.pobj->collectionType();
       keyConverted = !collectionAllowsIntStringKeys(col_type);
@@ -564,12 +577,18 @@ static void php_array_replace(Array &arr1, const Array& arr2) {
 
 static void php_array_replace_recursive(PointerSet &seen, bool check,
                                         Array &arr1, const Array& arr2) {
-  if (check) {
-    if (seen.find((void*)arr1.get()) != seen.end()) {
-      raise_warning("array_replace_recursive(): recursion detected");
-      return;
-    }
-    seen.insert((void*)arr1.get());
+  if (arr1.get() == arr2.get()) {
+    // This is an optimization, but it also avoids an assert in
+    // setWithRef (Variant::setWithRef asserts that its source
+    // and destination are not the same).
+    // If the arrays are self recursive, this does change the behavior
+    // slightly - it skips the "recursion detected" warning.
+    return;
+  }
+
+  if (check && !seen.insert((void*)arr1.get()).second) {
+    raise_warning("array_replace_recursive(): recursion detected");
+    return;
   }
 
   for (ArrayIter iter(arr2); iter; ++iter) {
@@ -580,8 +599,8 @@ static void php_array_replace_recursive(PointerSet &seen, bool check,
       if (v.isArray()) {
         Array subarr1 = v.toArray();
         const ArrNR& arr_value = value.toArrNR();
-        php_array_replace_recursive(seen, v.isReferenced(), subarr1,
-                                    arr_value);
+        php_array_replace_recursive(seen, couldRecur(v, subarr1.get()),
+                                    subarr1, arr_value);
         v = subarr1;
       } else {
         arr1.set(key, value, true);
@@ -668,7 +687,7 @@ TypedValue HHVM_FUNCTION(array_pop,
   if (!getContainerSize(containerRef)) {
     return make_tv<KindOfNull>();
   }
-  if (isArrayType(container->m_type)) {
+  if (isArrayLikeType(container->m_type)) {
     if (auto ref = containerRef.getVariantOrNull()) {
       return tvReturn(ref->asArrRef().pop());
     }
@@ -722,6 +741,12 @@ TypedValue HHVM_FUNCTION(array_product,
         }
       }
 
+      case KindOfPersistentVec:
+      case KindOfVec:
+      case KindOfPersistentDict:
+      case KindOfDict:
+      case KindOfPersistentKeyset:
+      case KindOfKeyset:
       case KindOfPersistentArray:
       case KindOfArray:
       case KindOfObject:
@@ -745,6 +770,9 @@ DOUBLE:
       case KindOfRef:
         d *= entry.toDouble();
 
+      case KindOfVec:
+      case KindOfDict:
+      case KindOfKeyset:
       case KindOfArray:
       case KindOfObject:
       case KindOfResource:
@@ -848,7 +876,7 @@ TypedValue HHVM_FUNCTION(array_shift,
   if (!getContainerSize(array)) {
     return make_tv<KindOfNull>();
   }
-  if (isArrayType(cell_array->m_type)) {
+  if (isArrayLikeType(cell_array->m_type)) {
     if (auto ref = array.getVariantOrNull()) {
       return tvReturn(ref->asArrRef().dequeue());
     }
@@ -900,7 +928,7 @@ TypedValue HHVM_FUNCTION(array_slice,
   // preserve_keys is true, or when preserve_keys is false but the container
   // is packed so we know the keys already map to [0,N].
   if (offset == 0 && len == num_in && (preserve_keys || input_is_packed)) {
-    if (isArrayType(cell_input.m_type)) {
+    if (isArrayLikeType(cell_input.m_type)) {
       return tvReturn(Variant(cell_input.m_data.parr));
     }
     return tvReturn(cell_input.m_data.pobj->toArray());
@@ -990,6 +1018,12 @@ TypedValue HHVM_FUNCTION(array_sum,
         }
       }
 
+      case KindOfPersistentVec:
+      case KindOfVec:
+      case KindOfPersistentDict:
+      case KindOfDict:
+      case KindOfPersistentKeyset:
+      case KindOfKeyset:
       case KindOfPersistentArray:
       case KindOfArray:
       case KindOfObject:
@@ -1013,6 +1047,9 @@ DOUBLE:
       case KindOfRef:
         d += entry.toDouble();
 
+      case KindOfVec:
+      case KindOfDict:
+      case KindOfKeyset:
       case KindOfArray:
       case KindOfObject:
       case KindOfResource:
@@ -1036,7 +1073,7 @@ TypedValue HHVM_FUNCTION(array_unshift,
                   __FUNCTION__+2 /* remove the "f_" prefix */);
     return make_tv<KindOfNull>();
   }
-  if (isArrayType(cell_array->m_type)) {
+  if (isArrayLikeType(cell_array->m_type)) {
     auto ref_array = array.getVariantOrNull();
     if (!ref_array) {
       return make_tv<KindOfInt64>(
@@ -1121,7 +1158,7 @@ TypedValue HHVM_FUNCTION(array_unshift,
 }
 
 Variant array_values(const Variant& input) {
-  if (input.isArray() && input.asCArrRef()->isVecArray()) {
+  if (input.isVecArray()) {
     return input;
   }
 
@@ -1204,11 +1241,19 @@ bool HHVM_FUNCTION(array_walk,
   return true;
 }
 
-static void compact(VarEnv* v, Array &ret, const Variant& var) {
+static void compact(PointerSet& seen,
+                    VarEnv* v, Array &ret, const Variant& var) {
   if (var.isArray()) {
-    for (ArrayIter iter(var.getArrayData()); iter; ++iter) {
-      compact(v, ret, iter.second());
+    auto adata = var.getArrayData();
+    auto check = couldRecur(var, adata);
+    if (check && !seen.insert(adata).second) {
+      raise_warning("compact(): recursion detected");
+      return;
     }
+    for (ArrayIter iter(adata); iter; ++iter) {
+      compact(seen, v, ret, iter.secondRef());
+    }
+    if (check) seen.erase(adata);
   } else {
     String varname = var.toString();
     if (!varname.empty() && v->lookup(varname.get()) != NULL) {
@@ -1224,8 +1269,9 @@ Array HHVM_FUNCTION(compact,
   Array ret = Array::attach(PackedArray::MakeReserve(args.size() + 1));
   VarEnv* v = g_context->getOrCreateVarEnv();
   if (v) {
-    compact(v, ret, varname);
-    compact(v, ret, args);
+    PointerSet seen;
+    compact(seen, v, ret, varname);
+    if (!args.empty()) compact(seen, v, ret, args);
   }
   return ret;
 }
@@ -1237,8 +1283,9 @@ Array HHVM_FUNCTION(__SystemLib_compact_sl,
   Array ret = Array::attach(PackedArray::MakeReserve(args.size() + 1));
   VarEnv* v = g_context->getOrCreateVarEnv();
   if (v) {
-    compact(v, ret, varname);
-    compact(v, ret, args);
+    PointerSet seen;
+    compact(seen, v, ret, varname);
+    if (!args.empty()) compact(seen, v, ret, args);
   }
   return ret;
 }
@@ -1249,6 +1296,7 @@ static int php_count_recursive(const Array& array) {
     Variant value = iter.second();
     if (value.isArray()) {
       const Array& arr_value = value.asCArrRef();
+      check_recursion_throw();
       cnt += php_count_recursive(arr_value);
     }
   }
@@ -1286,6 +1334,12 @@ int64_t HHVM_FUNCTION(count,
     case KindOfResource:
       return 1;
 
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
     case KindOfPersistentArray:
     case KindOfArray:
       if ((CountMode)mode == CountMode::RECURSIVE) {
@@ -1328,7 +1382,7 @@ static Variant iter_op_impl(VRefParam refParam, OpPtr op, const String& objOp,
                             bool(ArrayData::*pred)() const =
                               &ArrayData::isInvalid) {
   auto& cell = *refParam.wrapped().asCell();
-  if (!isArrayType(cell.m_type)) {
+  if (!isArrayLikeType(cell.m_type)) {
     if (cell.m_type == KindOfObject) {
       auto obj = refParam.wrapped().toObject();
       if (obj->instanceof(SystemLib::s_ArrayObjectClass)) {
@@ -1344,9 +1398,9 @@ static Variant iter_op_impl(VRefParam refParam, OpPtr op, const String& objOp,
   if (doCow && ad->cowCheck() && !(ad->*pred)() &&
       !ad->noCopyOnWrite()) {
     ad = ad->copy();
-    if (LIKELY(refParam.isRefData()))
-      cellMove(make_tv<KindOfArray>(ad), *refParam.getRefData()->tv());
-    else {
+    if (LIKELY(refParam.isRefData())) {
+      cellMove(make_array_like_tv(ad), *refParam.getRefData()->tv());
+    } else {
       req::ptr<ArrayData> tmp(ad, req::ptr<ArrayData>::NoIncRef{});
       return (ad->*op)();
     }
@@ -1673,7 +1727,7 @@ static void containerKeysToSetHelper(const req::ptr<c_Set>& st,
                                      const Variant& container) {
   Variant strHolder(empty_string_variant());
   TypedValue* strTv = strHolder.asTypedValue();
-  bool isKey = isArrayType(container.asCell()->m_type);
+  bool isKey = isArrayLikeType(container.asCell()->m_type);
   for (ArrayIter iter(container); iter; ++iter) {
     addToSetHelper(st, *iter.first().asCell(), strTv, !isKey);
   }
@@ -1714,7 +1768,7 @@ static void containerKeysToSetHelper(const req::ptr<c_Set>& st,
   /* If all of the containers (except container1) are empty, we can just \
      return container1 (converting it to an array if needed) */ \
   if (!largestSize) { \
-    if (isArrayType(c1.m_type)) { \
+    if (isArrayLikeType(c1.m_type)) { \
       return tvReturn(container1); \
     } else { \
       return tvReturn(container1.toArray()); \
@@ -1745,7 +1799,7 @@ TypedValue HHVM_FUNCTION(array_diff,
   // we convert int-like strings to integers.
   Variant strHolder(empty_string_variant());
   TypedValue* strTv = strHolder.asTypedValue();
-  bool isKey = isArrayType(c1.m_type);
+  bool isKey = isArrayLikeType(c1.m_type);
   for (ArrayIter iter(container1); iter; ++iter) {
     const auto& val = iter.secondRefPlus();
     const auto& c = *val.asCell();
@@ -1762,7 +1816,9 @@ TypedValue HHVM_FUNCTION(array_diff_key,
   ARRAY_DIFF_PRELUDE()
   // If we're only dealing with two containers and if they are both arrays,
   // we can avoid creating an intermediate Set
-  if (!moreThanTwo && isArrayType(c1.m_type) && isArrayType(c2.m_type)) {
+  if (!moreThanTwo &&
+      isArrayLikeType(c1.m_type) &&
+      isArrayLikeType(c2.m_type)) {
     auto ad2 = c2.m_data.parr;
     for (ArrayIter iter(container1); iter; ++iter) {
       auto key = iter.first();
@@ -1795,7 +1851,7 @@ TypedValue HHVM_FUNCTION(array_diff_key,
   // int-like strings to integers.
   Variant strHolder(empty_string_variant());
   TypedValue* strTv = strHolder.asTypedValue();
-  bool isKey = isArrayType(c1.m_type);
+  bool isKey = isArrayLikeType(c1.m_type);
   for (ArrayIter iter(container1); iter; ++iter) {
     auto key = iter.first();
     const auto& c = *key.asCell();
@@ -2031,7 +2087,7 @@ static void containerKeysIntersectHelper(const req::ptr<c_Set>& st,
   Variant strHolder(empty_string_variant());
   TypedValue* strTv = strHolder.asTypedValue();
   TypedValue intOneTv = make_tv<KindOfInt64>(1);
-  bool isKey = isArrayType(containers[0].m_type);
+  bool isKey = isArrayLikeType(containers[0].m_type);
   for (ArrayIter iter(tvAsCVarRef(&containers[0])); iter; ++iter) {
     auto key = iter.first();
     const auto& c = *key.asCell();
@@ -2042,7 +2098,7 @@ static void containerKeysIntersectHelper(const req::ptr<c_Set>& st,
     addToIntersectMapHelper(mp, c, &intOneTv, strTv, !isKey);
   }
   for (int pos = 1; pos < count; ++pos) {
-    isKey = isArrayType(containers[pos].m_type);
+    isKey = isArrayLikeType(containers[pos].m_type);
     for (ArrayIter iter(tvAsCVarRef(&containers[pos])); iter; ++iter) {
       auto key = iter.first();
       const auto& c = *key.asCell();
@@ -2128,7 +2184,7 @@ TypedValue HHVM_FUNCTION(array_intersect,
   // convert int-like strings to integers.
   Variant strHolder(empty_string_variant());
   TypedValue* strTv = strHolder.asTypedValue();
-  bool isKey = isArrayType(c1.m_type);
+  bool isKey = isArrayLikeType(c1.m_type);
   for (ArrayIter iter(container1); iter; ++iter) {
     const auto& val = iter.secondRefPlus();
     const auto& c = *val.asCell();
@@ -2145,7 +2201,9 @@ TypedValue HHVM_FUNCTION(array_intersect_key,
   ARRAY_INTERSECT_PRELUDE()
   // If we're only dealing with two containers and if they are both arrays,
   // we can avoid creating an intermediate Set
-  if (!moreThanTwo && isArrayType(c1.m_type) && isArrayType(c2.m_type)) {
+  if (!moreThanTwo &&
+      isArrayLikeType(c1.m_type) &&
+      isArrayLikeType(c2.m_type)) {
     auto ad2 = c2.m_data.parr;
     for (ArrayIter iter(container1); iter; ++iter) {
       auto key = iter.first();
@@ -2183,7 +2241,7 @@ TypedValue HHVM_FUNCTION(array_intersect_key,
   // convert int-like strings to integers.
   Variant strHolder(empty_string_variant());
   TypedValue* strTv = strHolder.asTypedValue();
-  bool isKey = isArrayType(c1.m_type);
+  bool isKey = isArrayLikeType(c1.m_type);
   for (ArrayIter iter(container1); iter; ++iter) {
     auto key = iter.first();
     const auto& c = *key.asCell();
@@ -2440,13 +2498,26 @@ php_asort(VRefParam container, int sort_flags,
   if (container.isArray()) {
     auto ref = container.getVariantOrNull();
     if (!ref) return true;
-    Array& arr_array = ref->asArrRef();
-    if (use_zend_sort) {
-      return zend_asort(*ref, sort_flags, ascending);
+    if (ref->isVecArray()) {
+      // Asort on a vec will make it become a dict. So, in order to avoid having
+      // a Variant with an incorrect datatype, sort a copy, then assign it to
+      // the Variant (which will update the datatype to the proper value).
+      Array arr_array = ref->asArrRef();
+      SortFunction sf = getSortFunction(SORTFUNC_ASORT, ascending);
+      {
+        ArraySortTmp ast(arr_array, sf);
+        ast->asort(sort_flags, ascending);
+      }
+      *ref = std::move(arr_array);
+    } else {
+      Array& arr_array = ref->asArrRef();
+      if (use_zend_sort) {
+        return zend_asort(*ref, sort_flags, ascending);
+      }
+      SortFunction sf = getSortFunction(SORTFUNC_ASORT, ascending);
+      ArraySortTmp ast(arr_array, sf);
+      ast->asort(sort_flags, ascending);
     }
-    SortFunction sf = getSortFunction(SORTFUNC_ASORT, ascending);
-    ArraySortTmp ast(arr_array, sf);
-    ast->asort(sort_flags, ascending);
     return true;
   }
   if (container.isObject()) {
@@ -2470,13 +2541,26 @@ php_ksort(VRefParam container, int sort_flags, bool ascending,
   if (container.isArray()) {
     auto ref = container.getVariantOrNull();
     if (!ref) return true;
-    Array& arr_array = ref->asArrRef();
-    if (use_zend_sort) {
-      return zend_ksort(*ref, sort_flags, ascending);
+    if (ref->isVecArray()) {
+      // Krsort on a vec will make it become a dict. So, in order to avoid
+      // having a Variant with an incorrect datatype, sort a copy, then assign
+      // it to the Variant (which will update the datatype to the proper value).
+      Array arr_array = ref->asArrRef();
+      SortFunction sf = getSortFunction(SORTFUNC_KRSORT, ascending);
+      {
+        ArraySortTmp ast(arr_array, sf);
+        ast->ksort(sort_flags, ascending);
+      }
+      *ref = std::move(arr_array);
+    } else {
+      Array& arr_array = ref->asArrRef();
+      if (use_zend_sort) {
+        return zend_ksort(*ref, sort_flags, ascending);
+      }
+      SortFunction sf = getSortFunction(SORTFUNC_KRSORT, ascending);
+      ArraySortTmp ast(arr_array, sf);
+      ast->ksort(sort_flags, ascending);
     }
-    SortFunction sf = getSortFunction(SORTFUNC_KRSORT, ascending);
-    ArraySortTmp ast(arr_array, sf);
-    ast->ksort(sort_flags, ascending);
     return true;
   }
   if (container.isObject()) {
@@ -2790,13 +2874,51 @@ TypedValue* HHVM_FN(array_multisort)(ActRec* ar) {
 }
 
 // HH\\dict
-Array HHVM_FUNCTION(HH_dict, const Array& arr) {
-  return arr.toDict();
+Array HHVM_FUNCTION(HH_dict, const Variant& input) {
+  auto const inputCell = input.asCell();
+  if (LIKELY(isArrayLikeType(inputCell->m_type))) {
+    return ArrNR{inputCell->m_data.parr}.asArray().toDict();
+  } else if (inputCell->m_type == KindOfObject &&
+             inputCell->m_data.pobj->isCollection()) {
+    return HHVM_FN(HH_dict)(toArray(inputCell->m_data.pobj));
+  } else {
+    raise_warning(
+      "Only arrays, vecs, keysets, and collections can be converted into dicts"
+    );
+    return Array::CreateDict();
+  }
+}
+
+// HH\\keyset
+Array HHVM_FUNCTION(HH_keyset, const Variant& input) {
+  auto const inputCell = input.asCell();
+  if (LIKELY(isArrayLikeType(inputCell->m_type))) {
+    return ArrNR{inputCell->m_data.parr}.asArray().toKeyset();
+  } else if (inputCell->m_type == KindOfObject &&
+             inputCell->m_data.pobj->isCollection()) {
+    return HHVM_FN(HH_keyset)(toArray(inputCell->m_data.pobj));
+  } else {
+    raise_warning(
+      "Only arrays, vecs, dicts, and collections can be converted into keysets"
+    );
+    return Array::CreateKeyset();
+  }
 }
 
 // HH\\vec
-Array HHVM_FUNCTION(HH_vec, const Array& arr) {
-  return arr.toVec();
+Array HHVM_FUNCTION(HH_vec, const Variant& input) {
+  auto const inputCell = input.asCell();
+  if (LIKELY(isArrayLikeType(inputCell->m_type))) {
+    return ArrNR{inputCell->m_data.parr}.asArray().toVec();
+  } else if (inputCell->m_type == KindOfObject &&
+             inputCell->m_data.pobj->isCollection()) {
+    return HHVM_FN(HH_vec)(toArray(inputCell->m_data.pobj));
+  } else {
+    raise_warning(
+      "Only arrays, dicts, keysets, and collections can be converted into vecs"
+    );
+    return Array::CreateVec();
+  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -1330,7 +1330,7 @@ pass2_no_dither (j_decompress_ptr cinfo,
 	  /* If the pixel is transparent, we assign it the palette index that
 	   * will later be added at the end of the palette as the transparent
 	   * index. */
-	  if ((oim->transparent >= 0) && (oim->transparent == *(inptr - 1)))
+	  if ((oim->transparent >= 0) && (oim->transparent == *inptr))
 	    {
 	      *outptr++ = nim->colorsTotal;
 	      inptr++;
@@ -1818,6 +1818,10 @@ static void gdImageTrueColorToPaletteBody (gdImagePtr oim, int dither, int color
     {
       colorsWanted = maxColors;
     }
+  if (colorsWanted <= 0) {
+    colorsWanted = 1;
+  }
+
   if (!cimP) {
     nim->pixels = (unsigned char **) gdCalloc (sizeof (unsigned char *), oim->sy);
     if (!nim->pixels)

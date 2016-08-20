@@ -218,7 +218,7 @@ void cgCallBuiltin(IRLS& env, const IRInstruction* inst) {
 
   // Whether `t' is passed in/out of C++ as String&/Array&/Object&.
   auto const isReqPtrRef = [] (MaybeDataType t) {
-    return isStringType(t) || isArrayType(t) ||
+    return isStringType(t) || isArrayLikeType(t) ||
            t == KindOfObject || t == KindOfResource;
   };
 
@@ -256,10 +256,8 @@ void cgCallBuiltin(IRLS& env, const IRInstruction* inst) {
   // Add the this_ or self_ argument for HNI builtins.
   if (callee->isMethod()) {
     if (callee->isStatic()) {
-      if (callee->isNative()) {
-        args.ssa(srcNum);
-        ++srcNum;
-      }
+      args.ssa(srcNum);
+      ++srcNum;
     } else {
       // Note that we don't support objects with vtables here (if they may need
       // a $this pointer adjustment).  This should be filtered out during irgen

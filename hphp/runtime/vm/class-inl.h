@@ -56,6 +56,25 @@ inline const TypedValueAux& Class::PropInitVec::operator[](size_t i) const {
 ///////////////////////////////////////////////////////////////////////////////
 // Pre- and post-allocations.
 
+inline LowPtr<Func>* Class::funcVec() const {
+  return reinterpret_cast<LowPtr<Func>*>(
+    reinterpret_cast<uintptr_t>(this) -
+    m_funcVecLen * sizeof(LowPtr<Func>)
+  );
+}
+
+inline void* Class::mallocPtr() const {
+  return reinterpret_cast<void*>(
+    reinterpret_cast<uintptr_t>(funcVec()) & ~(alignof(Class) - 1)
+  );
+}
+
+inline const void* Class::mallocEnd() const {
+  return reinterpret_cast<const char*>(this)
+         + Class::classVecOff()
+         + classVecLen() * sizeof(*classVec());
+}
+
 inline const LowPtr<Class>* Class::classVec() const {
   return m_classVec;
 }
@@ -481,6 +500,13 @@ Class::TMIOps::errorDuplicateMethod(const Class* cls,
   // No error if the class will override the method.
   if (cls->preClass()->hasMethod(methName)) return;
   raise_error(Strings::METHOD_IN_MULTIPLE_TRAITS, methName->data());
+}
+
+inline void
+Class::TMIOps::errorInconsistentInsteadOf(const Class* cls,
+                                          const StringData* methName) {
+  raise_error(Strings::INCONSISTENT_INSTEADOF, methName->data(),
+              cls->name()->data(), cls->name()->data());
 }
 
 ///////////////////////////////////////////////////////////////////////////////

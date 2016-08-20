@@ -134,21 +134,27 @@ public:
       Array{new_arr, NoIncRef{}} : Array{*this};
   }
 
+  Array toPHPArray() const {
+    if (!m_arr) return Create();
+    auto new_arr = m_arr->toPHPArray(true);
+    return (new_arr != m_arr) ? Array{new_arr, NoIncRef{}} : Array{*this};
+  }
+
   Array toVec() const {
     if (!m_arr) return CreateVec();
-    auto new_arr = m_arr->toVec();
+    auto new_arr = m_arr->toVec(true);
     return (new_arr != m_arr) ? Array{new_arr, NoIncRef{}} : Array{*this};
   }
 
   Array toDict() const {
     if (!m_arr) return CreateDict();
-    auto new_arr = m_arr->toDict();
+    auto new_arr = m_arr->toDict(true);
     return (new_arr != m_arr) ? Array{new_arr, NoIncRef{}} : Array{*this};
   }
 
   Array toKeyset() const {
     if (!m_arr) return CreateKeyset();
-    auto new_arr = m_arr->toKeyset();
+    auto new_arr = m_arr->toKeyset(true);
     return (new_arr != m_arr) ? Array{new_arr, NoIncRef{}} : Array{*this};
   }
 
@@ -194,6 +200,12 @@ public:
     return !m_arr;
   }
   Array values() const;
+
+  bool isVecArray() const { return m_arr && m_arr->isVecArray(); }
+  bool isDict() const { return m_arr && m_arr->isDict(); }
+  bool isKeyset() const { return m_arr && m_arr->isKeyset(); }
+  bool isHackArray() const { return m_arr && m_arr->isHackArray(); }
+  bool isPHPArray() const { return !m_arr || m_arr->isPHPArray(); }
 
   bool useWeakKeys() const {
     // If array isn't set we may implicitly create a mixed array. We never

@@ -40,8 +40,6 @@ enum class AnnotMetaType : uint8_t {
   Callable = 4,
   Number = 5,
   ArrayKey = 6,
-  Dict = 7,
-  Vec = 8,
 };
 
 enum class AnnotType : uint16_t {
@@ -54,6 +52,9 @@ enum class AnnotType : uint16_t {
   Array    = (uint8_t)KindOfArray    | (uint16_t)AnnotMetaType::Precise << 8,
   Object   = (uint8_t)KindOfObject   | (uint16_t)AnnotMetaType::Precise << 8,
   Resource = (uint8_t)KindOfResource | (uint16_t)AnnotMetaType::Precise << 8,
+  Dict     = (uint8_t)KindOfDict     | (uint16_t)AnnotMetaType::Precise << 8,
+  Vec      = (uint8_t)KindOfVec      | (uint16_t)AnnotMetaType::Precise << 8,
+  Keyset   = (uint8_t)KindOfKeyset   | (uint16_t)AnnotMetaType::Precise << 8,
   // Precise is intentionally excluded
   Mixed    = (uint16_t)AnnotMetaType::Mixed << 8    | (uint8_t)KindOfUninit,
   Self     = (uint16_t)AnnotMetaType::Self << 8     | (uint8_t)KindOfUninit,
@@ -61,8 +62,6 @@ enum class AnnotType : uint16_t {
   Callable = (uint16_t)AnnotMetaType::Callable << 8 | (uint8_t)KindOfUninit,
   Number   = (uint16_t)AnnotMetaType::Number << 8   | (uint8_t)KindOfUninit,
   ArrayKey = (uint16_t)AnnotMetaType::ArrayKey << 8 | (uint8_t)KindOfUninit,
-  Dict     = (uint16_t)AnnotMetaType::Dict << 8     | (uint8_t)KindOfUninit,
-  Vec      = (uint16_t)AnnotMetaType::Vec << 8      | (uint8_t)KindOfUninit,
 };
 
 inline AnnotMetaType getAnnotMetaType(AnnotType at) {
@@ -77,6 +76,7 @@ inline DataType getAnnotDataType(AnnotType at) {
 inline AnnotType dataTypeToAnnotType(DataType dt) {
   assert(dt == KindOfUninit || dt == KindOfBoolean || dt == KindOfInt64 ||
          dt == KindOfDouble || dt == KindOfString || dt == KindOfArray ||
+         dt == KindOfVec || dt == KindOfDict || dt == KindOfKeyset ||
          dt == KindOfObject || dt == KindOfResource);
   return (AnnotType)((uint8_t)dt | (uint16_t)AnnotMetaType::Precise << 8);
 }
@@ -96,19 +96,23 @@ bool interface_supports_int(const StringData* s);
 bool interface_supports_double(const StringData* s);
 bool interface_supports_string(const StringData* s);
 bool interface_supports_array(const StringData* s);
+bool interface_supports_vec(const StringData* s);
+bool interface_supports_dict(const StringData* s);
+bool interface_supports_keyset(const StringData* s);
 
 bool interface_supports_int(std::string const&);
 bool interface_supports_double(std::string const&);
 bool interface_supports_string(std::string const&);
 bool interface_supports_array(std::string const&);
+bool interface_supports_vec(std::string const&);
+bool interface_supports_dict(std::string const&);
+bool interface_supports_keyset(std::string const&);
 
 enum class AnnotAction {
   Pass,
   Fail,
   ObjectCheck,
   CallableCheck,
-  DictCheck,
-  VecCheck
 };
 
 /*
@@ -168,15 +172,9 @@ annotCompat(DataType dt, AnnotType at, const StringData* annotClsName) {
     case AnnotMetaType::Callable:
       // For "callable", if `dt' is not string/array/object we know
       // it's not compatible, otherwise more checks are required
-      return (isStringType(dt) || isArrayType(KindOfArray) ||
+      return (isStringType(dt) || isArrayType(dt) ||
               dt == KindOfObject)
         ? AnnotAction::CallableCheck : AnnotAction::Fail;
-    case AnnotMetaType::Dict:
-      // Requires an array specialization check
-      return isArrayType(dt) ? AnnotAction::DictCheck : AnnotAction::Fail;
-    case AnnotMetaType::Vec:
-      // Requires an array specialization check
-      return isArrayType(dt) ? AnnotAction::VecCheck : AnnotAction::Fail;
     case AnnotMetaType::Precise:
       break;
   }
@@ -208,6 +206,18 @@ annotCompat(DataType dt, AnnotType at, const StringData* annotClsName) {
       case KindOfPersistentArray:
       case KindOfArray:
         return interface_supports_array(annotClsName)
+          ? AnnotAction::Pass : AnnotAction::Fail;
+      case KindOfPersistentVec:
+      case KindOfVec:
+        return interface_supports_vec(annotClsName)
+          ? AnnotAction::Pass : AnnotAction::Fail;
+      case KindOfPersistentDict:
+      case KindOfDict:
+        return interface_supports_dict(annotClsName)
+          ? AnnotAction::Pass : AnnotAction::Fail;
+      case KindOfPersistentKeyset:
+      case KindOfKeyset:
+        return interface_supports_keyset(annotClsName)
           ? AnnotAction::Pass : AnnotAction::Fail;
       case KindOfUninit:
       case KindOfNull:

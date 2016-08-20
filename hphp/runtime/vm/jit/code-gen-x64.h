@@ -80,6 +80,8 @@ private:
   bool emitIncDec(Vout& v, Vloc dst, SSATmp* src0, Vloc loc0,
                   SSATmp* src1, Vloc loc1, Vreg& sf);
 
+  Vptr emitPackedLayoutAddr(SSATmp* idx, Vloc idxLoc, Vloc arrLoc);
+
 private:
   Vreg selectScratchReg(IRInstruction* inst);
   RegSet findFreeRegs(IRInstruction* inst);
@@ -92,6 +94,8 @@ private:
   void cgElemArrayImpl(IRInstruction*);
   void cgArraySetImpl(IRInstruction*);
   void cgIssetEmptyElemImpl(IRInstruction*);
+
+  void arrayLikeCountImpl(IRInstruction*);
 
   Vlabel label(Block*);
   void emitFwdJcc(Vout& v, ConditionCode cc, Vreg sf, Block* target);

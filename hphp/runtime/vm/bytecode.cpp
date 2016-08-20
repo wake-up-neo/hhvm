@@ -56,11 +56,9 @@
 #include "hphp/runtime/base/repo-auth-type-codec.h"
 #include "hphp/runtime/base/runtime-error.h"
 #include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/base/shape.h"
 #include "hphp/runtime/base/stat-cache.h"
 #include "hphp/runtime/base/stats.h"
 #include "hphp/runtime/base/strings.h"
-#include "hphp/runtime/base/struct-array.h"
 #include "hphp/runtime/base/tv-arith.h"
 #include "hphp/runtime/base/tv-comparisons.h"
 #include "hphp/runtime/base/tv-conversions.h"
@@ -145,16 +143,6 @@ using jit::TCA;
 #define OPTBLD_INLINE       ALWAYS_INLINE
 #define OPTBLD_FLT_INLINE   INLINE_FLATTEN
 #endif
-
-bool isVMFrame(const ActRec* ar) {
-  assert(ar);
-  // Determine whether the frame pointer is outside the native stack, cleverly
-  // using a single unsigned comparison to do both halves of the bounds check.
-  bool ret = uintptr_t(ar) - s_stackLimit >= s_stackSize;
-  assert(!ret || isValidVMStackAddress(ar) ||
-         (ar->m_func->validate(), ar->resumed()));
-  return ret;
-}
 
 template <>
 Class* arGetContextClassImpl<false>(const ActRec* ar) {
@@ -256,7 +244,7 @@ static inline ActRec* arFromInstr(PC pc) {
 
 ALWAYS_INLINE MOpFlags fpass_flags(ActRec* ar, int paramId) {
   assert(paramId < ar->numArgs());
-  return ar->m_func->byRef(paramId) ? MOpFlags::DefineReffy : MOpFlags::Warn;
+  return ar->m_func->byRef(paramId) ? MOpFlags::Define : MOpFlags::Warn;
 }
 
 // wrapper for local variable LA operand
@@ -722,6 +710,12 @@ static std::string toStringElm(const TypedValue* tv) {
   case KindOfDouble:
   case KindOfPersistentString:
   case KindOfString:
+  case KindOfPersistentVec:
+  case KindOfVec:
+  case KindOfPersistentDict:
+  case KindOfDict:
+  case KindOfPersistentKeyset:
+  case KindOfKeyset:
   case KindOfPersistentArray:
   case KindOfArray:
   case KindOfObject:
@@ -763,8 +757,33 @@ static std::string toStringElm(const TypedValue* tv) {
            << "\"" << (truncated ? "..." : "");
       }
       continue;
+    case KindOfPersistentVec:
+    case KindOfVec:
+      assert(tv->m_data.parr->isVecArray());
+      assert(tv->m_data.parr->checkCount());
+      os << tv->m_data.parr;
+      print_count();
+      os << ":Vec";
+      continue;
+    case KindOfPersistentDict:
+    case KindOfDict:
+      assert(tv->m_data.parr->isDict());
+      assert(tv->m_data.parr->checkCount());
+      os << tv->m_data.parr;
+      print_count();
+      os << ":Dict";
+      continue;
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+      assert(tv->m_data.parr->isKeyset());
+      assert(tv->m_data.parr->checkCount());
+      os << tv->m_data.parr;
+      print_count();
+      os << ":Keyset";
+      continue;
     case KindOfPersistentArray:
     case KindOfArray:
+      assert(tv->m_data.parr->isPHPArray());
       assert(tv->m_data.parr->checkCount());
       os << tv->m_data.parr;
       print_count();
@@ -1756,6 +1775,9 @@ OPTBLD_INLINE void iopHighInvalid() {
 OPTBLD_INLINE void iopNop() {
 }
 
+OPTBLD_INLINE void iopEntryNop() {
+}
+
 OPTBLD_INLINE void iopPopA() {
   vmStack().popA();
 }
@@ -1858,7 +1880,23 @@ OPTBLD_INLINE void iopString(const StringData* s) {
 }
 
 OPTBLD_INLINE void iopArray(const ArrayData* a) {
+  assert(a->isPHPArray());
   vmStack().pushStaticArray(a);
+}
+
+OPTBLD_INLINE void iopDict(const ArrayData* a) {
+  assert(a->isDict());
+  vmStack().pushStaticDict(a);
+}
+
+OPTBLD_INLINE void iopKeyset(const ArrayData* a) {
+  assert(a->isKeyset());
+  vmStack().pushStaticKeyset(a);
+}
+
+OPTBLD_INLINE void iopVec(const ArrayData* a) {
+  assert(a->isVecArray());
+  vmStack().pushStaticVec(a);
 }
 
 OPTBLD_INLINE void iopNewArray(intva_t capacity) {
@@ -1878,7 +1916,11 @@ OPTBLD_INLINE void iopNewMixedArray(intva_t capacity) {
 }
 
 OPTBLD_INLINE void iopNewDictArray(intva_t capacity) {
-  vmStack().pushArrayNoRc(MixedArray::MakeReserveDict(capacity));
+  if (capacity == 0) {
+    vmStack().pushDictNoRc(staticEmptyDictArray());
+  } else {
+    vmStack().pushDictNoRc(MixedArray::MakeReserveDict(capacity));
+  }
 }
 
 OPTBLD_INLINE
@@ -1901,7 +1943,7 @@ OPTBLD_INLINE void iopNewPackedArray(intva_t n) {
 }
 
 OPTBLD_INLINE void iopNewStructArray(int32_t n, imm_array<int32_t> ids) {
-  assert(n > 0 && n <= StructArray::MaxMakeSize);
+  assert(n > 0 && n <= MixedArray::MaxStructMakeSize);
   req::vector<const StringData*> names;
   names.reserve(n);
   auto unit = vmfp()->m_func->unit();
@@ -1911,18 +1953,11 @@ OPTBLD_INLINE void iopNewStructArray(int32_t n, imm_array<int32_t> ids) {
   }
 
   // This constructor moves values, no inc/decref is necessary.
-  ArrayData* a;
-  Shape* shape;
-  if (!RuntimeOption::EvalDisableStructArray &&
-      (shape = Shape::create(names.data(), n))) {
-    a = MixedArray::MakeStructArray(n, vmStack().topC(), shape);
-  } else {
-    a = MixedArray::MakeStruct(
-      n,
-      names.data(),
-      vmStack().topC()
-    )->asArrayData();
-  }
+  auto a = MixedArray::MakeStruct(
+    n,
+    names.data(),
+    vmStack().topC()
+  )->asArrayData();
   vmStack().ndiscard(n);
   vmStack().pushArrayNoRc(a);
 }
@@ -1931,22 +1966,22 @@ OPTBLD_INLINE void iopNewVecArray(intva_t n) {
   // This constructor moves values, no inc/decref is necessary.
   auto* a = PackedArray::MakeVec(n, vmStack().topC());
   vmStack().ndiscard(n);
-  vmStack().pushArrayNoRc(a);
+  vmStack().pushVecNoRc(a);
 }
 
 OPTBLD_INLINE void iopNewKeysetArray(intva_t n) {
   // This constructor moves values, no inc/decref is necessary.
   auto* a = MixedArray::MakeKeyset(n, vmStack().topC());
   vmStack().ndiscard(n);
-  vmStack().pushArrayNoRc(a);
+  vmStack().pushKeysetNoRc(a);
 }
 
 OPTBLD_INLINE void iopAddElemC() {
   Cell* c1 = vmStack().topC();
   Cell* c2 = vmStack().indC(1);
   Cell* c3 = vmStack().indC(2);
-  if (!isArrayType(c3->m_type)) {
-    raise_error("AddElemC: $3 must be an array");
+  if (!isArrayType(c3->m_type) && !isDictType(c3->m_type)) {
+    raise_error("AddElemC: $3 must be an array or dict");
   }
   if (c2->m_type == KindOfInt64) {
     cellAsVariant(*c3).asArrRef().set(c2->m_data.num, tvAsCVarRef(c1));
@@ -1961,8 +1996,8 @@ OPTBLD_INLINE void iopAddElemV() {
   Ref* r1 = vmStack().topV();
   Cell* c2 = vmStack().indC(1);
   Cell* c3 = vmStack().indC(2);
-  if (!isArrayType(c3->m_type)) {
-    raise_error("AddElemV: $3 must be an array");
+  if (!isArrayType(c3->m_type) && !isDictType(c3->m_type)) {
+    raise_error("AddElemV: $3 must be an array or dict");
   }
   if (c2->m_type == KindOfInt64) {
     cellAsVariant(*c3).asArrRef().setRef(c2->m_data.num, tvAsVariant(r1));
@@ -2315,6 +2350,21 @@ OPTBLD_INLINE void iopCastObject() {
   tvCastToObjectInPlace(c1);
 }
 
+OPTBLD_INLINE void iopCastDict() {
+  Cell* c1 = vmStack().topC();
+  tvCastToDictInPlace(c1);
+}
+
+OPTBLD_INLINE void iopCastKeyset() {
+  Cell* c1 = vmStack().topC();
+  tvCastToKeysetInPlace(c1);
+}
+
+OPTBLD_INLINE void iopCastVec() {
+  Cell* c1 = vmStack().topC();
+  tvCastToVecInPlace(c1);
+}
+
 OPTBLD_INLINE bool cellInstanceOf(TypedValue* tv, const NamedEntity* ne) {
   assert(tv->m_type != KindOfRef);
   Class* cls = nullptr;
@@ -2337,6 +2387,21 @@ OPTBLD_INLINE bool cellInstanceOf(TypedValue* tv, const NamedEntity* ne) {
     case KindOfString:
       cls = Unit::lookupClass(ne);
       return cls && interface_supports_string(cls->name());
+
+    case KindOfPersistentVec:
+    case KindOfVec:
+      cls = Unit::lookupClass(ne);
+      return cls && interface_supports_vec(cls->name());
+
+    case KindOfPersistentDict:
+    case KindOfDict:
+      cls = Unit::lookupClass(ne);
+      return cls && interface_supports_dict(cls->name());
+
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+      cls = Unit::lookupClass(ne);
+      return cls && interface_supports_keyset(cls->name());
 
     case KindOfPersistentArray:
     case KindOfArray:
@@ -2587,6 +2652,12 @@ void iopSwitch(PC origpc, PC& pc, SwitchKind kind, int64_t base, int veclen,
             case KindOfBoolean:
             case KindOfPersistentString:
             case KindOfString:
+            case KindOfPersistentVec:
+            case KindOfVec:
+            case KindOfPersistentDict:
+            case KindOfDict:
+            case KindOfPersistentKeyset:
+            case KindOfKeyset:
             case KindOfPersistentArray:
             case KindOfArray:
             case KindOfObject:
@@ -2598,6 +2669,24 @@ void iopSwitch(PC origpc, PC& pc, SwitchKind kind, int64_t base, int veclen,
           tvRefcountedDecRef(val);
           return;
         }
+
+        case KindOfVec:
+          tvDecRef(val);
+        case KindOfPersistentVec:
+          match = SwitchMatch::DEFAULT;
+          return;
+
+        case KindOfDict:
+          tvDecRef(val);
+        case KindOfPersistentDict:
+          match = SwitchMatch::DEFAULT;
+          return;
+
+        case KindOfKeyset:
+          tvDecRef(val);
+        case KindOfPersistentKeyset:
+          match = SwitchMatch::DEFAULT;
+          return;
 
         case KindOfArray:
           tvDecRef(val);
@@ -3195,8 +3284,6 @@ static OPTBLD_INLINE void propDispatch(MOpFlags flags, TypedValue key) {
         return Prop<MOpFlags::Warn>(mstate.tvRef, ctx, mstate.base, key);
       case MOpFlags::Define:
         return Prop<MOpFlags::Define>(mstate.tvRef, ctx, mstate.base, key);
-      case MOpFlags::DefineReffy:
-        return Prop<MOpFlags::DefineReffy>(mstate.tvRef, ctx, mstate.base, key);
       case MOpFlags::Unset:
         return Prop<MOpFlags::Unset>(mstate.tvRef, ctx, mstate.base, key);
     }
@@ -3206,7 +3293,8 @@ static OPTBLD_INLINE void propDispatch(MOpFlags flags, TypedValue key) {
   mstate.base = ratchetRefs(result, mstate.tvRef, mstate.tvRef2);
 }
 
-static OPTBLD_INLINE void propQDispatch(MOpFlags flags, TypedValue key) {
+static OPTBLD_INLINE void propQDispatch(MOpFlags flags, TypedValue key,
+                                        bool reffy) {
   auto& mstate = vmMInstrState();
   auto ctx = arGetContextClass(vmfp());
 
@@ -3218,10 +3306,8 @@ static OPTBLD_INLINE void propQDispatch(MOpFlags flags, TypedValue key) {
       result = nullSafeProp(mstate.tvRef, ctx, mstate.base, key.m_data.pstr);
       break;
 
-    case MOpFlags::DefineReffy:
-      raise_error(Strings::NULLSAFE_PROP_WRITE_ERROR);
-
     case MOpFlags::Define:
+      if (reffy) raise_error(Strings::NULLSAFE_PROP_WRITE_ERROR);
     case MOpFlags::Unset:
       always_assert(false);
   }
@@ -3229,7 +3315,7 @@ static OPTBLD_INLINE void propQDispatch(MOpFlags flags, TypedValue key) {
   mstate.base = ratchetRefs(result, mstate.tvRef, mstate.tvRef2);
 }
 
-static OPTBLD_INLINE void elemDispatch(MOpFlags flags, TypedValue key) {
+static OPTBLD_INLINE void elemDispatch(MOpFlags flags, TypedValue key, bool reffy) {
   auto& mstate = vmMInstrState();
 
   auto result = [&] {
@@ -3245,9 +3331,9 @@ static OPTBLD_INLINE void elemDispatch(MOpFlags flags, TypedValue key) {
           Elem<MOpFlags::Warn>(mstate.tvRef, mstate.base, key)
         );
       case MOpFlags::Define:
-        return ElemD<MOpFlags::Define>(mstate.tvRef, mstate.base, key);
-      case MOpFlags::DefineReffy:
-        return ElemD<MOpFlags::DefineReffy>(mstate.tvRef, mstate.base, key);
+        return reffy
+          ? ElemD<MOpFlags::Define, true>(mstate.tvRef, mstate.base, key)
+          : ElemD<MOpFlags::Define, false>(mstate.tvRef, mstate.base, key);
       case MOpFlags::Unset:
         return ElemU(mstate.tvRef, mstate.base, key);
     }
@@ -3279,32 +3365,40 @@ static inline TypedValue key_tv(MemberKey key) {
   not_reached();
 }
 
-static OPTBLD_INLINE void dimDispatch(MOpFlags flags, MemberKey mk) {
+static OPTBLD_INLINE void dimDispatch(MOpFlags flags, MemberKey mk,
+                                      bool reffy) {
   auto const key = key_tv(mk);
   if (mk.mcode == MQT) {
-    propQDispatch(flags, key);
+    propQDispatch(flags, key, reffy);
   } else if (mcodeIsProp(mk.mcode)) {
     propDispatch(flags, key);
   } else if (mcodeIsElem(mk.mcode)) {
-    elemDispatch(flags, key);
+    elemDispatch(flags, key, reffy);
   } else {
     if (flags == MOpFlags::Warn) raise_error("Cannot use [] for reading");
 
     auto& mstate = vmMInstrState();
-    auto result = flags == MOpFlags::DefineReffy
-      ? NewElem<true>(mstate.tvRef, mstate.base)
-      : NewElem<false>(mstate.tvRef, mstate.base);
+
+    TypedValue* result;
+    if (reffy) {
+      if (UNLIKELY(isHackArrayType(mstate.base->m_type))) {
+        throwRefInvalidArrayValueException(mstate.base->m_data.parr);
+      }
+      result = NewElem<true>(mstate.tvRef, mstate.base);
+    } else {
+      result = NewElem<false>(mstate.tvRef, mstate.base);
+    }
     mstate.base = ratchetRefs(result, mstate.tvRef, mstate.tvRef2);
   }
 }
 
 OPTBLD_INLINE void iopDim(MOpFlags flags, MemberKey mk) {
-  dimDispatch(flags, mk);
+  dimDispatch(flags, mk, false);
 }
 
 OPTBLD_INLINE void iopFPassDim(ActRec* ar, intva_t paramId, MemberKey mk) {
   auto const flags = fpass_flags(ar, paramId);
-  dimDispatch(flags, mk);
+  dimDispatch(flags, mk, false);
 }
 
 static OPTBLD_INLINE void mFinal(MInstrState& mstate,
@@ -3326,7 +3420,7 @@ void queryMImpl(MemberKey mk, int32_t nDiscard, QueryMOp op) {
   switch (op) {
     case QueryMOp::CGet:
     case QueryMOp::CGetQuiet:
-      dimDispatch(getQueryMOpFlags(op), mk);
+      dimDispatch(getQueryMOpFlags(op), mk, false);
       tvDup(*tvToCell(mstate.base), result);
       break;
 
@@ -3356,7 +3450,7 @@ OPTBLD_INLINE void iopQueryM(intva_t nDiscard, QueryMOp subop, MemberKey mk) {
 static OPTBLD_INLINE void vGetMImpl(MemberKey mk, int32_t nDiscard) {
   auto& mstate = vmMInstrState();
   TypedValue result;
-  dimDispatch(MOpFlags::DefineReffy, mk);
+  dimDispatch(MOpFlags::Define, mk, true);
   if (mstate.base->m_type != KindOfRef) tvBox(mstate.base);
   refDup(*mstate.base, result);
   mFinal(mstate, nDiscard, result);
@@ -3372,7 +3466,6 @@ void iopFPassM(ActRec* ar, intva_t paramId, intva_t nDiscard, MemberKey mk) {
   if (flags == MOpFlags::Warn) {
     return queryMImpl(mk, nDiscard, QueryMOp::CGet);
   }
-  assert(flags == MOpFlags::DefineReffy);
   vGetMImpl(mk, nDiscard);
 }
 
@@ -3443,7 +3536,7 @@ OPTBLD_INLINE void iopBindM(intva_t nDiscard, MemberKey mk) {
   auto& mstate = vmMInstrState();
   auto const rhs = *vmStack().topV();
 
-  dimDispatch(MOpFlags::DefineReffy, mk);
+  dimDispatch(MOpFlags::Define, mk, true);
   tvBind(&rhs, mstate.base);
 
   vmStack().discard();
@@ -3467,8 +3560,8 @@ OPTBLD_INLINE void iopUnsetM(intva_t nDiscard, MemberKey mk) {
 static OPTBLD_INLINE void setWithRefImpl(TypedValue key, TypedValue* value) {
   auto& mstate = vmMInstrState();
   mstate.base = UNLIKELY(value->m_type == KindOfRef)
-    ? ElemD<MOpFlags::DefineReffy>(mstate.tvRef, mstate.base, key)
-    : ElemD<MOpFlags::Define>(mstate.tvRef, mstate.base, key);
+    ? ElemD<MOpFlags::Define, true>(mstate.tvRef, mstate.base, key)
+    : ElemD<MOpFlags::Define, false>(mstate.tvRef, mstate.base, key);
   tvAsVariant(mstate.base).setWithRef(tvAsVariant(value));
 
   mFinal(mstate, 0, folly::none);
@@ -3580,6 +3673,9 @@ OPTBLD_INLINE static bool isTypeHelper(TypedValue* tv, IsTypeOp op) {
   case IsTypeOp::Int:    return is_int(tvAsCVarRef(tv));
   case IsTypeOp::Dbl:    return is_double(tvAsCVarRef(tv));
   case IsTypeOp::Arr:    return is_array(tvAsCVarRef(tv));
+  case IsTypeOp::Vec:    return is_vec(tvAsCVarRef(tv));
+  case IsTypeOp::Dict:   return is_dict(tvAsCVarRef(tv));
+  case IsTypeOp::Keyset: return is_keyset(tvAsCVarRef(tv));
   case IsTypeOp::Obj:    return is_object(tvAsCVarRef(tv));
   case IsTypeOp::Str:    return is_string(tvAsCVarRef(tv));
   case IsTypeOp::Scalar: return HHVM_FN(is_scalar)(tvAsCVarRef(tv));
@@ -3730,7 +3826,7 @@ OPTBLD_INLINE void iopIdx() {
   TypedValue* arr = vmStack().indTV(2);
 
   TypedValue result;
-  if (isArrayType(arr->m_type)) {
+  if (isArrayLikeType(arr->m_type)) {
     result = HHVM_FN(hphp_array_idx)(tvAsCVarRef(arr),
                                      tvAsCVarRef(key),
                                      tvAsCVarRef(def));
@@ -4035,7 +4131,7 @@ OPTBLD_INLINE void iopFPushFunc(intva_t numArgs) {
 
     vmStack().discard();
     ActRec* ar = fPushFuncImpl(func, numArgs);
-    if (func->attrs() & AttrStatic && !func->isClosureBody()) {
+    if (func->isStaticInProlog()) {
       ar->setClass(origObj->getVMClass());
       decRefObj(origObj);
     } else {
@@ -4065,7 +4161,7 @@ OPTBLD_INLINE void iopFPushFunc(intva_t numArgs) {
       thiz,
       cls,
       invName,
-      /* warn */ false
+      DecodeFlags::NoWarn
     );
     if (func == nullptr) {
       if (isArrayType(origCell.m_type)) {
@@ -4235,6 +4331,9 @@ void pushClsMethodImpl(Class* cls, StringData* name, ObjectData* obj,
                                      arGetContextClass(vmfp()), true);
   if (res == LookupResult::MethodFoundNoThis ||
       res == LookupResult::MagicCallStaticFound) {
+    if (!f->isStaticInProlog()) {
+      raise_missing_this(f);
+    }
     obj = nullptr;
   } else {
     assert(obj);
@@ -4383,7 +4482,7 @@ void iopDecodeCufIter(PC& pc, Iter* it, PC takenpc) {
   const Func* f = vm_decode_function(tvAsVariant(func),
                                      ar, false,
                                      obj, cls, invName,
-                                     false);
+                                     DecodeFlags::NoWarn);
 
   if (f == nullptr) {
     pc = takenpc;
@@ -4426,10 +4525,9 @@ OPTBLD_INLINE void doFPushCuf(int32_t numArgs, bool forward, bool safe) {
   HPHP::Class* cls = nullptr;
   StringData* invName = nullptr;
 
-  const Func* f = vm_decode_function(tvAsVariant(&func), vmfp(),
-                                     forward,
-                                     obj, cls, invName,
-                                     !safe);
+  const Func* f = vm_decode_function(
+    tvAsVariant(&func), vmfp(), forward, obj, cls, invName,
+    safe ? DecodeFlags::NoWarn : DecodeFlags::Warn);
 
   if (safe) vmStack().topTV()[1] = vmStack().topTV()[0];
   vmStack().ndiscard(1);
@@ -4796,7 +4894,7 @@ iopWIterInitK(PC& pc, Iter* it, PC targetpc, local_var val, local_var key) {
 
 inline bool initIteratorM(Iter* it, Ref* r1, TypedValue *val, TypedValue *key) {
   TypedValue* rtv = r1->m_data.pref->tv();
-  if (isArrayType(rtv->m_type)) {
+  if (isArrayLikeType(rtv->m_type)) {
     return new_miter_array_key(it, r1->m_data.pref, val, key);
   }
   if (rtv->m_type == KindOfObject)  {
@@ -4981,7 +5079,7 @@ OPTBLD_INLINE void iopEval(PC& pc) {
     "%s(%d)(%s" EVAL_FILENAME_SUFFIX,
     vm->getContainingFileName()->data(),
     vm->getLine(),
-    string_md5(code.data(), code.size()).c_str()
+    string_md5(code.slice()).c_str()
   );
   Unit* unit = vm->compileEvalString(prefixedCode.get(), evalFilename.c_str());
   if (!RuntimeOption::EvalJitEvaledCode) {

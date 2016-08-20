@@ -26,22 +26,23 @@
 #include "hphp/runtime/base/program-functions.h"
 #include "hphp/runtime/base/rds.h"
 #include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/timestamp.h"
 #include "hphp/runtime/base/thread-hooks.h"
 #include "hphp/runtime/base/unit-cache.h"
-#include "hphp/runtime/vm/repo.h"
 
 #include "hphp/runtime/vm/debug/debug.h"
 #include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/prof-data.h"
 #include "hphp/runtime/vm/jit/recycle-tc.h"
 #include "hphp/runtime/vm/jit/relocation.h"
 #include "hphp/runtime/vm/jit/tc-info.h"
+#include "hphp/runtime/vm/repo.h"
 #include "hphp/runtime/vm/type-profile.h"
 
 #include "hphp/runtime/ext/apc/ext_apc.h"
 #include "hphp/runtime/ext/json/ext_json.h"
-#ifdef ENABLE_EXTENSION_MYSQL
-#include "hphp/runtime/ext/mysql/mysql_stats.h"
-#endif
+#include "hphp/runtime/ext/xenon/ext_xenon.h"
+
 #include "hphp/runtime/server/http-request-handler.h"
 #include "hphp/runtime/server/http-server.h"
 #include "hphp/runtime/server/memory-stats.h"
@@ -50,6 +51,7 @@
 #include "hphp/runtime/server/server-stats.h"
 
 #include "hphp/util/alloc.h"
+#include "hphp/util/hphp-config.h"
 #include "hphp/util/logger.h"
 #include "hphp/util/mutex.h"
 #include "hphp/util/process.h"
@@ -57,11 +59,13 @@
 #include "hphp/util/stacktrace-profiler.h"
 #include "hphp/util/timer.h"
 
+#ifdef ENABLE_EXTENSION_MYSQL
+#include "hphp/runtime/ext/mysql/mysql_stats.h"
+#endif
+
 #include <folly/Conv.h>
 #include <folly/Random.h>
 #include <folly/portability/Unistd.h>
-
-#include <boost/lexical_cast.hpp>
 
 #include <fstream>
 #include <string>
@@ -232,6 +236,8 @@ void AdminRequestHandler::handleRequest(Transport *transport) {
         "/stats.html:      show server stats in HTML\n"
         "    (same as /stats.xml)\n"
 
+        "/xenon-snap:      generate a Xenon snapshot, which is logged later\n"
+
         "/const-ss:        get const_map_size\n"
         "/static-strings:  get number of static strings\n"
         "/static-strings-rds: ... that correspond to defined constants\n"
@@ -364,7 +370,7 @@ void AdminRequestHandler::handleRequest(Transport *transport) {
       break;
     }
     if (cmd == "free-mem") {
-      pid_t pid = Process::GetProcessId();
+      auto pid = getpid();
       const auto before = Process::GetProcessRSS(pid);
       std::string errStr;
       if (purge_all(&errStr)) {
@@ -478,6 +484,16 @@ void AdminRequestHandler::handleRequest(Transport *transport) {
     }
     if (strncmp(cmd.c_str(), "dump-apc", 8) == 0 &&
         handleDumpCacheRequest(cmd, transport)) {
+      break;
+    }
+    if (strncmp(cmd.c_str(), "xenon-snap", 10) == 0) {
+      static int64_t s_lastSampleTime = 0;
+      auto const current = TimeStamp::Current();
+      if (current > s_lastSampleTime) {
+        s_lastSampleTime = current;
+        Xenon::getInstance().surpriseAll();
+      }
+      transport->sendString("a Xenon sample will be collected\n", 200);
       break;
     }
     if (strncmp(cmd.c_str(), "const-ss", 8) == 0 &&
@@ -866,6 +882,18 @@ bool AdminRequestHandler::handleCheckRequest(const std::string &cmd,
     appendStat("funcs", Func::nextFuncId());
     appendStat("request-count", requestCount());
     appendStat("single-jit-requests", singleJitRequestCount());
+
+    /*
+     * We're only using globalProfData() here because admin requests don't call
+     * requestInitProfData(). Normal request threads should always use
+     * profData() which provides much better guarantees about the lifetime of
+     * the returned object.
+     */
+    if (auto profData = jit::globalProfData()) {
+      appendStat("prof-funcs", profData->profilingFuncs());
+      appendStat("prof-bc", profData->profilingBCSize());
+      appendStat("opt-funcs", profData->optimizedFuncs());
+    }
 
     if (RuntimeOption::EvalEnableReusableTC) {
       mcg->code().forEachBlock([&](const char* name, const CodeBlock& a) {

@@ -18,8 +18,11 @@ type error_code = int
  * before sending it to the client *)
 type 'a message = 'a * string
 
-module Common = struct
 
+module Common = struct
+  type error_flags = {
+    lazy_decl_err: bool;
+  }
   let try_with_result f1 f2 error_list accumulate_errors =
     let error_list_copy = !error_list in
     let accumulate_errors_copy = !accumulate_errors in
@@ -33,20 +36,27 @@ module Common = struct
     | [] -> result
     | l :: _ -> f2 result l
 
-  let do_ f error_list accumulate_errors applied_fixmes =
+  let do_ f error_list accumulate_errors applied_fixmes has_lazy_decl_error  =
     let error_list_copy = !error_list in
     let accumulate_errors_copy = !accumulate_errors in
     let applied_fixmes_copy = !applied_fixmes in
+    let has_lazy_decl_error_copy = !has_lazy_decl_error in
     error_list := [];
     applied_fixmes := [];
     accumulate_errors := true;
+    has_lazy_decl_error := false;
     let result = f () in
     let out_errors = !error_list in
     let out_applied_fixmes = !applied_fixmes in
+    let lazy_decl_err = !has_lazy_decl_error in
     error_list := error_list_copy;
     applied_fixmes := applied_fixmes_copy;
     accumulate_errors := accumulate_errors_copy;
-    (List.rev out_errors, out_applied_fixmes), result
+    has_lazy_decl_error := has_lazy_decl_error_copy;
+    (List.rev out_errors, out_applied_fixmes), result, {lazy_decl_err;}
+
+  let get_lazy_decl_flag err_flags =
+    err_flags.lazy_decl_err
 
   (*****************************************************************************)
   (* Error code printing. *)
@@ -76,11 +86,13 @@ module type Errors_modes = sig
   type 'a error_
   type error = Pos.t error_
   type applied_fixme = Pos.t * int
+  type error_flags = Common.error_flags
+
   val applied_fixmes: applied_fixme list ref
 
   val try_with_result: (unit -> 'a) -> ('a -> error -> 'a) -> 'a
-  val do_: (unit -> 'a) -> (error list * applied_fixme list) * 'a
-
+  val do_: (unit -> 'a) -> (error list * applied_fixme list) * 'a * error_flags
+  val run_in_decl_mode: (unit -> 'a) -> 'a
   val add_error: error -> unit
   val make_error: error_code -> (Pos.t message) list -> error
 
@@ -100,23 +112,30 @@ module NonTracingErrors: Errors_modes = struct
   type 'a error_ = error_code * 'a message list
   type error = Pos.t error_
   type applied_fixme = Pos.t * int
-  let applied_fixmes: applied_fixme list ref = ref []
+  type error_flags = Common.error_flags
 
+  let applied_fixmes: applied_fixme list ref = ref []
   let (error_list: error list ref) = ref []
   let accumulate_errors = ref false
-
-  let add_error error =
-    if !accumulate_errors
-    then error_list := error :: !error_list
-    else
-      (* We have an error, but haven't handled it in any way *)
-      assert_false_log_backtrace ()
+  let in_lazy_decl = ref false
+  let has_lazy_decl_error = ref false
 
   let try_with_result f1 f2 =
     Common.try_with_result f1 f2 error_list accumulate_errors
 
   let do_ f =
-    Common.do_ f error_list accumulate_errors applied_fixmes
+    Common.do_ f error_list accumulate_errors applied_fixmes has_lazy_decl_error
+
+
+  (* Turn on lazy decl mode for the duration of the closure.
+     This runs without returning the original state,
+     since we collect it later in do_with_lazy_decls_
+  *)
+  let run_in_decl_mode f =
+    in_lazy_decl := true;
+    let result = f () in
+    in_lazy_decl := false;
+    result
 
   and make_error code (x: (Pos.t * string) list) = ((code, x): error)
 
@@ -155,6 +174,17 @@ module NonTracingErrors: Errors_modes = struct
       Pos.compare (get_pos x) (get_pos y)
     end err
 
+  let add_error error =
+    if !accumulate_errors then
+      begin
+        error_list := error :: !error_list;
+        has_lazy_decl_error := !has_lazy_decl_error || !in_lazy_decl
+      end
+    else
+      (* We have an error, but haven't handled it in any way *)
+      let msg = error |> to_absolute |> to_string in
+      assert_false_log_backtrace (Some msg)
+
 end
 
 (** Errors with backtraces embedded. They are revealed with to_string. *)
@@ -162,23 +192,31 @@ module TracingErrors: Errors_modes = struct
   type 'a error_ = (Printexc.raw_backtrace * error_code * 'a message list)
   type error = Pos.t error_
   type applied_fixme = Pos.t * int
+  type error_flags = Common.error_flags
+
   let applied_fixmes: applied_fixme list ref = ref []
-
   let (error_list: error list ref) = ref []
-  let accumulate_errors = ref false
 
-  let add_error error =
-    if !accumulate_errors
-    then error_list := error :: !error_list
-    else
-      (* We have an error, but haven't handled it in any way *)
-      assert_false_log_backtrace ()
+  let accumulate_errors = ref false
+  let in_lazy_decl = ref false
+  let has_lazy_decl_error = ref false
 
   let try_with_result f1 f2 =
     Common.try_with_result f1 f2 error_list accumulate_errors
 
   let do_ f =
-    Common.do_ f error_list accumulate_errors applied_fixmes
+    Common.do_ f error_list accumulate_errors applied_fixmes has_lazy_decl_error
+
+  (* Turn on lazy decl mode for the duration of the closure.
+     This runs without returning the original state,
+     since we collect it later in do_with_lazy_decls_
+  *)
+  let run_in_decl_mode f =
+    in_lazy_decl := true;
+    let result = f () in
+    in_lazy_decl := false;
+    result
+
 
   let make_error code (x: (Pos.t * string) list) =
     let bt = Printexc.get_callstack 25 in
@@ -219,6 +257,17 @@ module TracingErrors: Errors_modes = struct
     );
     Buffer.contents buf
 
+  let add_error error =
+    if !accumulate_errors then
+      begin
+        error_list := error :: !error_list;
+        has_lazy_decl_error := !has_lazy_decl_error || !in_lazy_decl
+      end
+    else
+    (* We have an error, but haven't handled it in any way *)
+      let msg = error |> to_absolute |> to_string in
+      assert_false_log_backtrace (Some msg)
+
   let get_sorted_error_list (err,_) =
     List.sort ~cmp:begin fun x y ->
       Pos.compare (get_pos x) (get_pos y)
@@ -238,6 +287,7 @@ type 'a error_ = 'a M.error_
 type error = Pos.t error_
 type applied_fixme = M.applied_fixme
 type t = error list * applied_fixme list
+type error_flags = Common.error_flags
 
 (*****************************************************************************)
 (* HH_FIXMEs hook *)
@@ -577,6 +627,8 @@ module Typing                               = struct
   let attribute_too_few_arguments           = 4153 (* DONT MODIFY!!!! *)
   let reference_expr                        = 4154 (* DONT MODIFY!!!! *)
   let unification_cycle                     = 4155 (* DONT MODIFY!!!! *)
+  let keyset_set                            = 4156 (* DONT MODIFY!!!! *)
+  let eq_incompatible_types                 = 4157 (* DONT MODIFY!!!! *)
   (* EXTEND HERE WITH NEW VALUES IF NEEDED *)
 end
 
@@ -1523,7 +1575,8 @@ let isset_empty_in_strict pos name =
 
 let unset_nonidx_in_strict pos msgs =
   add_list Typing.unset_nonidx_in_strict
-    ([pos, "In strict mode, unset is banned except on array or dict indexing"] @
+    ([pos, "In strict mode, unset is banned except on array, keyset, "^
+           "or dict indexing"] @
      msgs)
 
 let unpacking_disallowed_builtin_function pos name =
@@ -1547,11 +1600,18 @@ let undefined_field p name =
   add Typing.undefined_field p ("The field "^name^" is undefined")
 
 let array_access pos1 pos2 ty =
-  add_list Typing.array_access ((pos1,
-    "This is not an object of type KeyedContainer, this is "^ty) ::
-            if pos2 != Pos.none
-            then [pos2, "You might want to check this out"]
-            else [])
+  add_list Typing.array_access
+    ((pos1, "This is not an object of type KeyedContainer, this is "^ty) ::
+     if pos2 != Pos.none
+     then [pos2, "You might want to check this out"]
+     else [])
+
+let keyset_set pos1 pos2 =
+  add_list Typing.keyset_set
+    ((pos1, "Keysets entries cannot be set, use append instead.") ::
+     if pos2 != Pos.none
+     then [pos2, "You might want to check this out"]
+     else [])
 
 let array_append pos1 pos2 ty =
   add_list Typing.array_append
@@ -1944,6 +2004,11 @@ let trivial_strict_not_nullable_compare_null p result type_reason =
   add_list Typing.not_nullable_compare_null_trivial
     ((p, msg) :: type_reason)
 
+let eq_incompatible_types p left right =
+  let msg = "This equality test has incompatible types" in
+  add_list Typing.eq_incompatible_types
+    ((p, msg) :: left @ right)
+
 let void_usage p void_witness =
   let msg = "You are using the return value of a void function" in
   add_list Typing.void_usage ((p, msg) :: void_witness)
@@ -2107,8 +2172,11 @@ let has_no_errors f =
 
 let do_ = M.do_
 
+let run_in_decl_mode = M.run_in_decl_mode
+
 let ignore_ f =
-  snd (do_ f)
+  let _, result, _ =  (do_ f) in
+  result
 
 let try_when f ~when_ ~do_ =
   M.try_with_result f begin fun result (error: error) ->
@@ -2117,6 +2185,8 @@ let try_when f ~when_ ~do_ =
     else add_error error;
     result
   end
+
+let get_lazy_decl_flag = Common.get_lazy_decl_flag
 
 (* Runs the first function that is expected to produce an error. If it doesn't
  * then we run the second function we are given

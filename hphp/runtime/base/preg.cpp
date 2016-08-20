@@ -40,6 +40,8 @@
 #include "hphp/runtime/ext/string/ext_string.h"
 #include "hphp/runtime/vm/treadmill.h"
 #include "hphp/runtime/vm/vm-regs.h"
+#include "hphp/runtime/vm/jit/types.h"
+#include "hphp/runtime/vm/jit/vtune-jit.h"
 #include "hphp/util/logger.h"
 #include "hphp/util/concurrent-scalable-cache.h"
 
@@ -49,6 +51,8 @@
 #endif
 
 namespace HPHP {
+
+using jit::TCA;
 
 ///////////////////////////////////////////////////////////////////////////////
 // PCREglobals definition
@@ -732,6 +736,32 @@ pcre_get_compiled_regex_cache(PCRECache::Accessor& accessor,
         throw;
       }
     }
+    if (!RuntimeOption::EvalJitNoGdb ||
+        RuntimeOption::EvalJitUseVtuneAPI ||
+        RuntimeOption::EvalPerfPidMap) {
+      unsigned int size;
+      pcre_fullinfo(re, extra, PCRE_INFO_JITSIZE, &size);
+
+      TCA start = *(TCA *)(extra->executable_jit);
+      TCA end = start + size;
+      std::string name = folly::sformat("HHVM::pcre_jit::{}", pattern);
+
+      if (!RuntimeOption::EvalJitNoGdb && jit::mcg) {
+        jit::mcg->debugInfo()->recordStub(Debug::TCRange(start, end, false),
+                                          name);
+      }
+      if (RuntimeOption::EvalJitUseVtuneAPI) {
+        HPHP::jit::reportHelperToVtune(name.c_str(), start, end);
+      }
+      if (RuntimeOption::EvalPerfPidMap && jit::mcg) {
+        jit::mcg->debugInfo()->recordPerfMap(Debug::TCRange(start, end, false),
+                                             SrcKey{},
+                                             nullptr,
+                                             false,
+                                             false,
+                                             name);
+      }
+    }
   }
 
   /* Store the compiled pattern and extra info in the cache. */
@@ -990,7 +1020,8 @@ static Variant preg_match_impl(const String& pattern, const String& subject,
 
       if (subpats) {
         // Try to get the list of substrings and display a warning if failed.
-        if (pcre_get_substring_list(subject.data(), offsets, count,
+        if (offsets[1] < offsets[0] ||
+            pcre_get_substring_list(subject.data(), offsets, count,
                                     &stringlist) < 0) {
           raise_warning("Get subpatterns list failed");
           return false;
@@ -1273,7 +1304,8 @@ static Variant php_pcre_replace(const String& pattern, const String& subject,
       }
 
       const char* piece = subject.data() + start_offset;
-      if (count > 0 && (limit == -1 || limit > 0)) {
+      if (count > 0 && offsets[1] >= offsets[0] &&
+          (limit == -1 || limit > 0)) {
         if (replace_count) {
           ++*replace_count;
         }
@@ -1389,12 +1421,14 @@ static Variant php_pcre_replace(const String& pattern, const String& subject,
             prefixedCode += ";";
             Unit* unit = g_context->compileEvalString(prefixedCode.get());
             Variant v;
-            Func* func = unit->getMain();
+            auto const ar = GetCallerFrame();
+            auto const thiz = ar->hasThis() ? ar->getThis() : nullptr;
+            auto const cls = thiz ? thiz->getVMClass() :
+              ar->hasClass() ? ar->getClass() : nullptr;
+            Func* func = unit->getMain(ar->func()->cls());
             g_context->invokeFunc(v.asTypedValue(), func, init_null_variant,
-                                    g_context->getThis(),
-                                    g_context->getContextClass(), nullptr,
-                                    nullptr,
-                                    ExecutionContext::InvokePseudoMain);
+                                  thiz, cls, nullptr, nullptr,
+                                  ExecutionContext::InvokePseudoMain);
             eval_result = std::move(v).toString();
 
             result.resize(result_len);
@@ -1666,7 +1700,7 @@ Variant preg_split(const String& pattern, const String& subject,
     }
 
     /* If something matched */
-    if (count > 0) {
+    if (count > 0 && offsets[1] >= offsets[0]) {
       if (!no_empty || subject.data() + offsets[0] != last_match) {
         if (offset_capture) {
           /* Add (match, offset) pair to the return value */

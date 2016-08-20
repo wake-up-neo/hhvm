@@ -29,9 +29,12 @@ type t =
 | Classname
 | Clone
 | Const
+| Construct
 | Continue
 | Default
+| Destruct
 | Do
+| Double
 | Echo
 | Else
 | Elseif
@@ -56,7 +59,9 @@ type t =
 | Newtype
 | Noreturn
 | Num
+| Object
 | Parent
+| Print
 | Private
 | Protected
 | Public
@@ -68,6 +73,7 @@ type t =
 | Shape
 | Static
 | String
+| Super
 | Switch
 | This
 | Throw
@@ -75,6 +81,7 @@ type t =
 | Try
 | Tuple
 | Type
+| Unset
 | Use
 | Void
 | While
@@ -157,6 +164,7 @@ type t =
 | XHPElementName
 | XHPStringLiteral
 | XHPBody
+| XHPComment
 | SlashGreaterThan
 | LessThanSlash
 
@@ -177,9 +185,12 @@ let from_string keyword =
   | "classname" -> Some Classname
   | "clone" -> Some Clone
   | "const" -> Some Const
+  | "__construct" -> Some Construct
   | "continue" -> Some Continue
   | "default" -> Some Default
+  | "__destruct" -> Some Destruct
   | "do" -> Some Do
+  | "double" -> Some Double
   | "echo" -> Some Echo
   | "else" -> Some Else
   | "elseif" -> Some Elseif
@@ -206,7 +217,9 @@ let from_string keyword =
   | "noreturn" -> Some Noreturn
   | "null" -> Some NullLiteral
   | "num" -> Some Num
+  | "object" -> Some Object
   | "parent" -> Some Parent
+  | "print" -> Some Print
   | "private" -> Some Private
   | "protected" -> Some Protected
   | "public" -> Some Public
@@ -218,6 +231,7 @@ let from_string keyword =
   | "shape" -> Some Shape
   | "static" -> Some Static
   | "string" -> Some String
+  | "super" -> Some Super
   | "switch" -> Some Switch
   | "this" -> Some This
   | "throw" -> Some Throw
@@ -226,6 +240,7 @@ let from_string keyword =
   | "try" -> Some Try
   | "tuple" -> Some Tuple
   | "type" -> Some Type
+  | "unset" -> Some Unset
   | "use" -> Some Use
   | "void" -> Some Void
   | "while" -> Some While
@@ -248,9 +263,12 @@ let to_string kind =
   | Classname -> "classname"
   | Clone -> "clone"
   | Const -> "const"
+  | Construct -> "__construct"
   | Continue -> "continue"
   | Default -> "default"
+  | Destruct -> "__destruct"
   | Do -> "do"
+  | Double -> "double"
   | Echo -> "echo"
   | Else -> "else"
   | Elseif -> "elseif"
@@ -275,7 +293,9 @@ let to_string kind =
   | Newtype -> "newtype"
   | Noreturn -> "noreturn"
   | Num -> "num"
+  | Object -> "object"
   | Parent -> "parent"
+  | Print -> "print"
   | Private -> "private"
   | Protected -> "protected"
   | Public -> "public"
@@ -287,6 +307,7 @@ let to_string kind =
   | Shape -> "shape"
   | Static -> "static"
   | String -> "string"
+  | Super -> "super"
   | Switch -> "switch"
   | This -> "this"
   | Throw -> "throw"
@@ -294,6 +315,7 @@ let to_string kind =
   | Try -> "try"
   | Tuple -> "tuple"
   | Type -> "type"
+  | Unset -> "unset"
   | Use -> "use"
   | Void -> "void"
   | While -> "while"
@@ -378,5 +400,6 @@ let to_string kind =
   | XHPElementName -> "XHP_element_name"
   | XHPStringLiteral -> "XHP_string_literal"
   | XHPBody -> "XHP_body"
+  | XHPComment -> "XHP_comment"
   | SlashGreaterThan -> "/>"
   | LessThanSlash -> "</"

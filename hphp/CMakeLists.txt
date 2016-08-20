@@ -19,7 +19,7 @@ if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/facebook")
   # I'm sorry, but facebook's internal repo has the top level dir stored inside
   # of hphp/, so we need to pull that one in first if it exists
   CMAKE_MINIMUM_REQUIRED(VERSION 2.8.7 FATAL_ERROR)
-  set(HPHP_HOME ${CMAKE_CURRENT_SOURCE_DIR}/..)
+  get_filename_component(HPHP_HOME "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
   set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/facebook/CMake"
                         "${CMAKE_CURRENT_SOURCE_DIR}/public_tld/CMake"
                         ${CMAKE_MODULE_PATH})
@@ -28,6 +28,9 @@ endif()
 
 include(HPHPSetup)
 include(FollySetup)
+include(HHVMGenerateConfig)
+HHVM_GENERATE_CONFIG("${CMAKE_CURRENT_BINARY_DIR}/util/hphp-config.h")
+
 if (ENABLE_COTIRE)
   include(cotire)
   FIND_PATH(LIBC_INCLUDE_PATH stdlib.h)
@@ -50,6 +53,7 @@ if (ENABLE_COTIRE)
       "${LIBC_INCLUDE_PATH}/libelf.h"
       "${LIBC_INCLUDE_PATH}/elf.h"
       "${LIBC_INCLUDE_PATH}/gelf.h"
+      "${LIBC_INCLUDE_PATH}/resolv.h"
       "${ARCH_INCLUDE_PATH}"
       "${CCLIENT_INCLUDE_PATH}"
       "${JEMALLOC_INCLUDE_DIR}/jemalloc"
@@ -60,6 +64,13 @@ if (ENABLE_COTIRE)
       "${LIBSQLITE3_INCLUDE_DIR}/sqlite3ext.h"
       "${CMAKE_SOURCE_DIR}"
       "${CMAKE_BINARY_DIR}")
+
+  # XED headers need to be wrapped in extern "C"
+  if (LibXed_INCLUDE_DIR)
+    set_property(DIRECTORY
+      APPEND PROPERTY COTIRE_PREFIX_HEADER_IGNORE_PATH
+        "${LibXed_INCLUDE_DIR}")
+  endif()
 endif()
 
 # Only thing to do directly in tools is install this one script. Tools also has

@@ -19,6 +19,7 @@
 #include <folly/Likely.h>
 
 #include "hphp/util/logger.h"
+#include "hphp/util/hphp-config.h"
 #include "hphp/runtime/base/variable-serializer.h"
 #include "hphp/runtime/base/variable-unserializer.h"
 #include "hphp/runtime/base/builtin-functions.h"
@@ -43,8 +44,6 @@ const StaticString
   s_string("string"),
   s_object("object"),
   s_array("array"),
-  s_dict("dict"),
-  s_vec("vec"),
   s_NULL("NULL"),
   s_null("null");
 
@@ -57,10 +56,6 @@ String HHVM_FUNCTION(gettype, const Variant& v) {
    * gettype(). So we make an exception here. */
   if (v.isNull()) {
     return s_NULL;
-  }
-  if (v.isArray()) {
-    if (v.toArray()->isDict()) return s_dict;
-    if (v.toArray()->isVecArray()) return s_vec;
   }
   return getDataTypeString(v.getType());
 }
@@ -140,6 +135,10 @@ bool HHVM_FUNCTION(HH_is_vec, const Variant& v) {
 
 bool HHVM_FUNCTION(HH_is_dict, const Variant& v) {
   return is_dict(v);
+}
+
+bool HHVM_FUNCTION(HH_is_keyset, const Variant& v) {
+  return is_keyset(v);
 }
 
 bool HHVM_FUNCTION(is_object, const Variant& v) {
@@ -228,7 +227,8 @@ const StaticString
   s_Res("i:0;"),
   s_EmptyArray("a:0:{}"),
   s_EmptyVecArray("v:0:{}"),
-  s_EmptyDictArray("D:0:{}");
+  s_EmptyDictArray("D:0:{}"),
+  s_EmptyKeysetArray("k:0:{}");
 
 String HHVM_FUNCTION(serialize, const Variant& value) {
   switch (value.getType()) {
@@ -257,15 +257,41 @@ String HHVM_FUNCTION(serialize, const Variant& value) {
     }
     case KindOfResource:
       return s_Res;
+
+    case KindOfPersistentVec:
+    case KindOfVec: {
+      ArrayData* arr = value.getArrayData();
+      assert(arr->isVecArray());
+      if (arr->empty()) return s_EmptyVecArray;
+      VariableSerializer vs(VariableSerializer::Type::Serialize);
+      return vs.serialize(value, true);
+    }
+
+    case KindOfPersistentDict:
+    case KindOfDict: {
+      ArrayData* arr = value.getArrayData();
+      assert(arr->isDict());
+      if (arr->empty()) return s_EmptyDictArray;
+      VariableSerializer vs(VariableSerializer::Type::Serialize);
+      return vs.serialize(value, true);
+    }
+
+    case KindOfPersistentKeyset:
+    case KindOfKeyset: {
+      ArrayData* arr = value.getArrayData();
+      assert(arr->isKeyset());
+      if (arr->empty()) return s_EmptyKeysetArray;
+      VariableSerializer vs(VariableSerializer::Type::Serialize);
+      return vs.serialize(value, true);
+    }
+
     case KindOfPersistentArray:
     case KindOfArray: {
       ArrayData *arr = value.getArrayData();
-      if (arr->empty()) {
-        if (arr->isVecArray()) return s_EmptyVecArray;
-        if (arr->isDict()) return s_EmptyDictArray;
-        return s_EmptyArray;
-      }
-      // fall-through
+      assert(arr->isPHPArray());
+      if (arr->empty()) return s_EmptyArray;
+      VariableSerializer vs(VariableSerializer::Type::Serialize);
+      return vs.serialize(value, true);
     }
     case KindOfDouble:
     case KindOfObject: {
@@ -375,8 +401,7 @@ static bool modify_extract_name(VarEnv* v,
     if (name == s_this) {
       // Only disallow $this when inside a non-static method, or a static method
       // that has defined $this (matches Zend)
-      CallerFrame cf;
-      const Func* func = arGetContextFunc(cf());
+      auto const func = arGetContextFunc(GetCallerFrame());
 
       if (func && func->isMethod() && v->lookup(s_this.get()) != nullptr) {
         return false;
@@ -400,7 +425,7 @@ int64_t extract_impl(VRefParam vref_array,
     arr_tv = arr_tv->m_data.pref->tv();
     arrByRef = true;
   }
-  if (!isArrayType(arr_tv->m_type)) {
+  if (!isArrayLikeType(arr_tv->m_type)) {
     raise_warning("extract() expects parameter 1 to be array");
     return 0;
   }
@@ -492,18 +517,15 @@ void HHVM_FUNCTION(SystemLib_parse_str,
 
 /////////////////////////////////////////////////////////////////////////////
 
-#define EXTR_CONST(v) Native::registerConstant<KindOfInt64> \
-                                   (makeStaticString("EXTR_" #v), EXTR_##v);
-
 void StandardExtension::initVariable() {
-  EXTR_CONST(IF_EXISTS);
-  EXTR_CONST(OVERWRITE);
-  EXTR_CONST(PREFIX_ALL);
-  EXTR_CONST(PREFIX_IF_EXISTS);
-  EXTR_CONST(PREFIX_INVALID);
-  EXTR_CONST(PREFIX_SAME);
-  EXTR_CONST(REFS);
-  EXTR_CONST(SKIP);
+  HHVM_RC_INT_SAME(EXTR_IF_EXISTS);
+  HHVM_RC_INT_SAME(EXTR_OVERWRITE);
+  HHVM_RC_INT_SAME(EXTR_PREFIX_ALL);
+  HHVM_RC_INT_SAME(EXTR_PREFIX_IF_EXISTS);
+  HHVM_RC_INT_SAME(EXTR_PREFIX_INVALID);
+  HHVM_RC_INT_SAME(EXTR_PREFIX_SAME);
+  HHVM_RC_INT_SAME(EXTR_REFS);
+  HHVM_RC_INT_SAME(EXTR_SKIP);
 
   HHVM_FE(is_null);
   HHVM_FE(is_bool);
@@ -519,6 +541,7 @@ void StandardExtension::initVariable() {
   HHVM_FE(is_array);
   HHVM_FALIAS(HH\\is_vec, HH_is_vec);
   HHVM_FALIAS(HH\\is_dict, HH_is_dict);
+  HHVM_FALIAS(HH\\is_keyset, HH_is_keyset);
   HHVM_FE(is_object);
   HHVM_FE(is_resource);
   HHVM_FE(boolval);

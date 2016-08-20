@@ -36,7 +36,15 @@ void implAGet(IRGS& env, SSATmp* classSrc) {
 }
 
 const StaticString s_FATAL_NULL_THIS(Strings::FATAL_NULL_THIS);
-void checkThis(IRGS& env, SSATmp* ctx) {
+bool checkThis(IRGS& env, SSATmp* ctx) {
+  auto fail = [&] {
+    auto const err = cns(env, s_FATAL_NULL_THIS.get());
+    gen(env, RaiseError, err);
+  };
+  if (!ctx->type().maybe(TObj)) {
+    fail();
+    return false;
+  }
   ifThen(
     env,
     [&] (Block* taken) {
@@ -44,10 +52,10 @@ void checkThis(IRGS& env, SSATmp* ctx) {
     },
     [&] {
       hint(env, Block::Hint::Unlikely);
-      auto const err = cns(env, s_FATAL_NULL_THIS.get());
-      gen(env, RaiseError, err);
+      fail();
     }
   );
+  return true;
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -222,18 +230,21 @@ void emitSetL(IRGS& env, int32_t id) {
 }
 
 void emitInitThisLoc(IRGS& env, int32_t id) {
-  if (!curClass(env)) {
+  if (!curFunc(env)->mayHaveThis()) {
     // Do nothing if this is null
     return;
   }
   auto const ldrefExit = makeExit(env);
-  auto const oldLoc    = ldLoc(env, id, ldrefExit, DataTypeCountness);
-  auto const ctx       = gen(env, LdCtx, fp(env));
-  gen(env, CheckCtxThis, makeExitSlow(env), ctx);
-  auto const this_     = gen(env, CastCtxThis, ctx);
-  gen(env, IncRef, this_);
-  stLocRaw(env, id, fp(env), this_);
-  decRef(env, oldLoc);
+  auto const ctx       = ldCtx(env);
+  ifElse(env,
+         [&] (Block* skip) { gen(env, CheckCtxThis, skip, ctx); },
+         [&] {
+           auto const oldLoc = ldLoc(env, id, ldrefExit, DataTypeCountness);
+           auto const this_  = gen(env, CastCtxThis, ctx);
+           gen(env, IncRef, this_);
+           stLocRaw(env, id, fp(env), this_);
+           decRef(env, oldLoc);
+         });
 }
 
 void emitPrint(IRGS& env) {
@@ -272,28 +283,56 @@ void emitUnbox(IRGS& env) {
 }
 
 void emitThis(IRGS& env) {
-  auto const ctx = gen(env, LdCtx, fp(env));
-  checkThis(env, ctx);
+  auto const ctx = ldCtx(env);
+  if (!checkThis(env, ctx)) {
+    // Unreachable
+    push(env, cns(env, TInitNull));
+    return;
+  }
   auto const this_ = gen(env, CastCtxThis, ctx);
   pushIncRef(env, this_);
 }
 
 void emitCheckThis(IRGS& env) {
-  auto const ctx = gen(env, LdCtx, fp(env));
+  auto const ctx = ldCtx(env);
   checkThis(env, ctx);
 }
 
 void emitBareThis(IRGS& env, BareThisOp subop) {
-  if (!curClass(env)) {
+  auto const ctx = ldCtx(env);
+  if (!ctx->type().maybe(TObj)) {
+    if (subop == BareThisOp::NoNotice) {
+      push(env, cns(env, TInitNull));
+      return;
+    }
+    assertx(subop != BareThisOp::NeverNull);
     interpOne(env, TInitNull, 0); // will raise notice and push null
     return;
   }
-  auto const ctx = gen(env, LdCtx, fp(env));
+
+  if (subop == BareThisOp::NoNotice) {
+    auto thiz = cond(env,
+                     [&](Block* taken) {
+                       gen(env, CheckCtxThis, taken, ctx);
+                     },
+                     [&] {
+                       auto t = gen(env, CastCtxThis, ctx);
+                       gen(env, IncRef, t);
+                       return t;
+                     },
+                     [&] {
+                       return cns(env, TInitNull);
+                     });
+    push(env, thiz);
+    return;
+  }
+
   if (subop == BareThisOp::NeverNull) {
     env.irb->fs().setThisAvailable();
   } else {
     gen(env, CheckCtxThis, makeExitSlow(env), ctx);
   }
+
   pushIncRef(env, gen(env, CastCtxThis, ctx));
 }
 
@@ -341,47 +380,110 @@ void emitNameA(IRGS& env) {
 
 void emitCastArray(IRGS& env) {
   auto const src = popC(env);
+  push(env, gen(env, ConvCellToArr, src));
+}
+
+void emitCastVec(IRGS& env) {
+  auto const src = popC(env);
+
+  auto const raise = [&](const char* type) {
+    gen(
+      env,
+      RaiseWarning,
+      cns(
+        env,
+        makeStaticString(folly::sformat("{} to vec conversion", type))
+      )
+    );
+    decRef(env, src);
+    return cns(env, staticEmptyVecArray());
+  };
+
   push(
     env,
     [&] {
-      if (src->isA(TArr)) {
-        return cond(
-          env,
-          [&](Block* taken) {
-            return gen(
-              env,
-              CheckType,
-              Type::Array(ArrayData::kVecKind),
-              taken,
-              src
-            );
-          },
-          [&](SSATmp* vec) { return gen(env, ConvVecToArr, vec); },
-          [&] {
-            return cond(
-              env,
-              [&](Block* taken) {
-                return gen(
-                  env,
-                  CheckType,
-                  Type::Array(ArrayData::kDictKind),
-                  taken,
-                  src
-                );
-              },
-              [&](SSATmp* dict) { return gen(env, ConvDictToArr, dict); },
-              [&] { return src; }
-            );
-          }
-        );
-      }
-      if (src->isA(TNull)) return cns(env, staticEmptyArray());
-      if (src->isA(TBool)) return gen(env, ConvBoolToArr, src);
-      if (src->isA(TDbl))  return gen(env, ConvDblToArr, src);
-      if (src->isA(TInt))  return gen(env, ConvIntToArr, src);
-      if (src->isA(TStr))  return gen(env, ConvStrToArr, src);
-      if (src->isA(TObj))  return gen(env, ConvObjToArr, src);
-      return gen(env, ConvCellToArr, src);
+      if (src->isA(TVec))    return src;
+      if (src->isA(TArr))    return gen(env, ConvArrToVec, src);
+      if (src->isA(TDict))   return gen(env, ConvDictToVec, src);
+      if (src->isA(TKeyset)) return gen(env, ConvKeysetToVec, src);
+      if (src->isA(TObj))    return gen(env, ConvObjToVec, src);
+      if (src->isA(TNull))   return raise("Null");
+      if (src->isA(TBool))   return raise("Bool");
+      if (src->isA(TInt))    return raise("Int");
+      if (src->isA(TDbl))    return raise("Double");
+      if (src->isA(TStr))    return raise("String");
+      if (src->isA(TRes))    return raise("Resource");
+      not_reached();
+    }()
+  );
+}
+
+void emitCastDict(IRGS& env) {
+  auto const src = popC(env);
+
+  auto const raise = [&](const char* type) {
+    gen(
+      env,
+      RaiseWarning,
+      cns(
+        env,
+        makeStaticString(folly::sformat("{} to dict conversion", type))
+      )
+    );
+    decRef(env, src);
+    return cns(env, staticEmptyDictArray());
+  };
+
+  push(
+    env,
+    [&] {
+      if (src->isA(TDict))    return src;
+      if (src->isA(TArr))     return gen(env, ConvArrToDict, src);
+      if (src->isA(TVec))     return gen(env, ConvVecToDict, src);
+      if (src->isA(TKeyset))  return gen(env, ConvKeysetToDict, src);
+      if (src->isA(TObj))     return gen(env, ConvObjToDict, src);
+      if (src->isA(TNull))    return raise("Null");
+      if (src->isA(TBool))    return raise("Bool");
+      if (src->isA(TInt))     return raise("Int");
+      if (src->isA(TDbl))     return raise("Double");
+      if (src->isA(TStr))     return raise("String");
+      if (src->isA(TRes))     return raise("Resource");
+      not_reached();
+    }()
+  );
+}
+
+void emitCastKeyset(IRGS& env) {
+  auto const src = popC(env);
+
+  auto const raise = [&](const char* type) {
+    gen(
+      env,
+      RaiseWarning,
+      cns(
+        env,
+        makeStaticString(folly::sformat("{} to keyset conversion", type))
+      )
+    );
+    decRef(env, src);
+    return cns(env, staticEmptyKeysetArray());
+  };
+
+  push(
+    env,
+    [&] {
+      if (src->isA(TKeyset))  return src;
+      if (src->isA(TArr))     return gen(env, ConvArrToKeyset, src);
+      if (src->isA(TVec))     return gen(env, ConvVecToKeyset, src);
+      if (src->isA(TDict))    return gen(env, ConvDictToKeyset, src);
+      if (src->isA(TObj))     return gen(env, ConvObjToKeyset, src);
+      if (src->isA(TNull))    return raise("Null");
+      if (src->isA(TBool))    return raise("Bool");
+      if (src->isA(TInt))     return raise("Int");
+      if (src->isA(TDbl))     return raise("Double");
+      if (src->isA(TStr))     return raise("String");
+      if (src->isA(TRes))     return raise("Resource");
+      not_reached();
     }()
   );
 }
@@ -434,7 +536,26 @@ void emitDup(IRGS& env) { pushIncRef(env, topC(env)); }
 
 //////////////////////////////////////////////////////////////////////
 
-void emitArray(IRGS& env, const ArrayData* x)   { push(env, cns(env, x)); }
+void emitArray(IRGS& env, const ArrayData* x) {
+  assertx(x->isPHPArray());
+  push(env, cns(env, x));
+}
+
+void emitVec(IRGS& env, const ArrayData* x) {
+  assertx(x->isVecArray());
+  push(env, cns(env, x));
+}
+
+void emitDict(IRGS& env, const ArrayData* x) {
+  assertx(x->isDict());
+  push(env, cns(env, x));
+}
+
+void emitKeyset(IRGS& env, const ArrayData* x) {
+  assertx(x->isKeyset());
+  push(env, cns(env, x));
+}
+
 void emitString(IRGS& env, const StringData* s) { push(env, cns(env, s)); }
 void emitInt(IRGS& env, int64_t val)            { push(env, cns(env, val)); }
 void emitDouble(IRGS& env, double val)          { push(env, cns(env, val)); }
@@ -447,6 +568,7 @@ void emitNullUninit(IRGS& env) { push(env, cns(env, TUninit)); }
 //////////////////////////////////////////////////////////////////////
 
 void emitNop(IRGS&)                {}
+void emitEntryNop(IRGS&)           {}
 void emitBoxRNop(IRGS& env) {
   assertTypeStack(env, BCSPRelOffset{0}, TBoxedCell);
 }

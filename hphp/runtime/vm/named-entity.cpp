@@ -21,6 +21,7 @@
 #include "hphp/runtime/base/string-data.h"
 #include "hphp/runtime/base/type-string.h"
 #include "hphp/runtime/vm/class.h"
+#include "hphp/runtime/vm/reverse-data-map.h"
 #include "hphp/runtime/vm/type-alias.h"
 #include "hphp/runtime/vm/unit-util.h"
 
@@ -70,7 +71,6 @@ void NamedEntity::setCachedTypeAlias(const TypeAliasReq& td) {
 }
 
 const TypeAliasReq* NamedEntity::getCachedTypeAlias() const {
-  // TODO(#2103214): Support persistent type aliases.
   return m_cachedTypeAlias.bound() &&
          m_cachedTypeAlias.isInit() &&
          m_cachedTypeAlias->name
@@ -128,7 +128,12 @@ NamedEntity* insertNamedEntity(const StringData* str) {
     str = makeStaticString(str);
   }
   auto res = s_namedDataMap->insert(str, NamedEntity());
-  return &res.first->second;
+  auto const ne = &res.first->second;
+
+  if (res.second && RuntimeOption::EvalEnableReverseDataMap) {
+    data_map::register_start(ne);
+  }
+  return ne;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

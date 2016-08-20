@@ -358,13 +358,31 @@ Variant HHVM_FUNCTION(hphp_invoke, const String& name, const Variant& params) {
   return invoke(name.data(), params);
 }
 
-Variant HHVM_FUNCTION(hphp_invoke_method, const Variant& obj, const String& cls,
-                                          const String& name, const Variant& params) {
+Variant HHVM_FUNCTION(hphp_invoke_method, const Variant& obj,
+                                          const String& cls,
+                                          const String& name,
+                                          const Variant& params) {
   if (obj.isNull()) {
     return invoke_static_method(cls, name, params);
   }
-  ObjectData *o = obj.toObject().get();
-  return o->o_invoke(name, params);
+
+  // Get the CallCtx this way instead of using vm_decode_function() because
+  // vm_decode_function() has no way to specify a class independent from the
+  // class::function being called.
+  // Note that this breaks the rules for name lookup (for protected and private)
+  // but that's okay because so does Zend's implementation.
+  CallCtx ctx;
+  ctx.cls = Unit::loadClass(cls.get());
+  ctx.this_ = obj.toObject().get();
+  ctx.invName = nullptr;
+  ctx.func = ctx.cls->lookupMethod(name.get());
+  if (!ctx.func) {
+    raise_error("Call to undefined method %s::%s()", cls.data(), name.data());
+  }
+
+  Variant ret;
+  g_context->invokeFunc(ret.asTypedValue(), ctx, params);
+  return ret;
 }
 
 Object HHVM_FUNCTION(hphp_create_object, const String& name, const Variant& params) {
@@ -505,7 +523,7 @@ Array HHVM_FUNCTION(type_structure,
     }
   }
 
-  assert(isArrayType(typeCns.m_type));
+  assert(isArrayLikeType(typeCns.m_type));
   assert(typeCns.m_data.parr->isStatic());
   return Array::attach(typeCns.m_data.parr);
 }
@@ -1615,7 +1633,7 @@ static String HHVM_METHOD(ReflectionTypeConstant, getAssignedTypeHint) {
     return String(cns->val.m_data.pstr);
   }
 
-  if (isArrayType(cns->val.m_type)) {
+  if (isArrayLikeType(cns->val.m_type)) {
     auto const cls = cns->cls;
     // go to the preclass to find the unresolved TypeStructure to get
     // the original assigned type text
@@ -1623,7 +1641,7 @@ static String HHVM_METHOD(ReflectionTypeConstant, getAssignedTypeHint) {
     auto typeCns = preCls->lookupConstant(cns->name);
     assert(typeCns->isType());
     assert(!typeCns->isAbstract());
-    assert(isArrayType(typeCns->val().m_type));
+    assert(isArrayLikeType(typeCns->val().m_type));
     return TypeStructure::toString(Array::attach(typeCns->val().m_data.parr));
   }
 

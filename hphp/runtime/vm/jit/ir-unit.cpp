@@ -20,7 +20,7 @@
 #include "hphp/runtime/vm/jit/cfg.h"
 #include "hphp/runtime/vm/jit/frame-state.h"
 #include "hphp/runtime/vm/jit/mc-generator.h"
-#include "hphp/runtime/vm/jit/timer.h"
+#include "hphp/util/timer.h"
 
 namespace HPHP { namespace jit {
 ///////////////////////////////////////////////////////////////////////////////
@@ -36,6 +36,7 @@ IRUnit::IRUnit(TransContext context) : m_context(context)
   // For Optimize translations, the entry block's profCount is
   // adjusted later in translateRegion.
   m_entry = defBlock();
+  m_startNanos = HPHP::Timer::GetThreadCPUTimeNanos();
 }
 
 IRInstruction* IRUnit::defLabel(unsigned numDst, BCMarker marker) {
@@ -119,10 +120,12 @@ static bool endsUnitAtSrcKey(const Block* block, SrcKey sk) {
     case JmpSwitchDest:
     case RaiseError:
     case ThrowOutOfBounds:
+    case ThrowInvalidArrayKey:
     case ThrowInvalidOperation:
     case ThrowArithmeticError:
     case ThrowDivisionByZeroError:
     case VerifyParamFailHard:
+    case Halt:
       return instSk == sk;
 
     // The RetCtrl is generally ending a bytecode instruction, with the

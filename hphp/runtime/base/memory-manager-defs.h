@@ -18,13 +18,13 @@
 #define incl_HPHP_MEMORY_MANAGER_DEFS_H
 
 #include "hphp/runtime/base/apc-local-array.h"
-#include "hphp/runtime/base/proxy-array.h"
-#include "hphp/runtime/vm/native-data.h"
-#include "hphp/runtime/base/packed-array-defs.h"
 #include "hphp/runtime/base/mixed-array-defs.h"
-#include "hphp/runtime/base/struct-array.h"
+#include "hphp/runtime/base/packed-array-defs.h"
+#include "hphp/runtime/base/proxy-array.h"
 #include "hphp/runtime/vm/globals-array.h"
+#include "hphp/runtime/vm/native-data.h"
 #include "hphp/runtime/vm/resumable.h"
+
 #include "hphp/runtime/ext/asio/ext_asio.h"
 #include "hphp/runtime/ext/asio/ext_await-all-wait-handle.h"
 #include "hphp/runtime/ext/collections/ext_collections-pair.h"
@@ -35,37 +35,27 @@
 
 namespace HPHP {
 
+///////////////////////////////////////////////////////////////////////////////
+
 // union of all the possible header types, and some utilities
 struct Header {
-  size_t size() const;
   HeaderKind kind() const {
     assert(unsigned(hdr_.kind) <= NumHeaderKinds);
     return hdr_.kind;
   }
-  union {
-    struct {
-      uint64_t q;
-      HeaderWord<> hdr_;
-    };
-    StringData str_;
-    ArrayData arr_;
-    MixedArray mixed_;
-    StructArray struct_;
-    APCLocalArray apc_;
-    ProxyArray proxy_;
-    GlobalsArray globals_;
-    ObjectData obj_;
-    c_Pair pair_;
-    BaseVector vector_;
-    HashCollection hashcoll_;
-    ResourceHdr res_;
-    RefData ref_;
-    MallocNode malloc_;
-    FreeNode free_;
-    ResumableNode resumable_;
-    NativeNode native_;
-    c_AwaitAllWaitHandle awaitall_;
-  };
+
+  size_t size() const;
+
+  size_t allocSize() const {
+    // Hole and Free have exact sizes, so don't round them.
+    auto const sz = hdr_.kind == HeaderKind::Hole ||
+                    hdr_.kind == HeaderKind::Free
+      ? free_.size()
+      : MemoryManager::smallSizeClass(size());
+
+    assertx(sz % 16 == 0);
+    return sz;
+  }
 
   const Resumable* resumable() const {
     assert(kind() == HeaderKind::ResumableFrame);
@@ -114,6 +104,31 @@ struct Header {
            kind() == HeaderKind::NativeData ? nativeObj() :
            nullptr;
   }
+
+public:
+  union {
+    struct {
+      uint64_t q;
+      HeaderWord<> hdr_;
+    };
+    StringData str_;
+    ArrayData arr_;
+    MixedArray mixed_;
+    APCLocalArray apc_;
+    ProxyArray proxy_;
+    GlobalsArray globals_;
+    ObjectData obj_;
+    c_Pair pair_;
+    BaseVector vector_;
+    HashCollection hashcoll_;
+    ResourceHdr res_;
+    RefData ref_;
+    MallocNode malloc_;
+    FreeNode free_;
+    ResumableNode resumable_;
+    NativeNode native_;
+    c_AwaitAllWaitHandle awaitall_;
+  };
 };
 
 inline size_t Header::size() const {
@@ -121,8 +136,6 @@ inline size_t Header::size() const {
     case HeaderKind::Packed:
     case HeaderKind::VecArray:
       return PackedArray::heapSize(&arr_);
-    case HeaderKind::Struct:
-      return StructArray::heapSize(&arr_);
     case HeaderKind::Mixed:
     case HeaderKind::Dict:
     case HeaderKind::Keyset:
@@ -181,58 +194,60 @@ inline size_t Header::size() const {
   return 0;
 }
 
-// Iterate over all the slabs and bigs
+///////////////////////////////////////////////////////////////////////////////
+
 template<class Fn> void BigHeap::iterate(Fn fn) {
   auto in_slabs = !m_slabs.empty();
-  auto slab = begin(m_slabs);
-  auto big = begin(m_bigs);
-  Header *hdr, *slab_end;
+  auto slab = std::begin(m_slabs);
+  auto big = std::begin(m_bigs);
+
+  auto const bounds_from_slab = [] (const MemBlock& slab) {
+    return std::make_pair(
+      reinterpret_cast<Header*>(slab.ptr),
+      reinterpret_cast<Header*>(static_cast<char*>(slab.ptr) + slab.size)
+    );
+  };
+
+  Header* hdr;
+  Header* slab_end;
+
   if (in_slabs) {
-    hdr = (Header*)slab->ptr;
-    slab_end = (Header*)(static_cast<char*>(slab->ptr) + slab->size);
+    std::tie(hdr, slab_end) = bounds_from_slab(*slab);
   } else {
-    hdr = big != end(m_bigs) ? (Header*)*big : nullptr;
-    slab_end = nullptr;
+    hdr = slab_end = nullptr;
+    if (big != std::end(m_bigs)) hdr = reinterpret_cast<Header*>(*big);
   }
   while (in_slabs || big != end(m_bigs)) {
-    auto h = hdr;
+    auto const h = hdr;
+
     if (in_slabs) {
-      // move to next header in slab. Hole and Free have exact sizes,
-      // so don't round them.
-      auto size = hdr->hdr_.kind == HeaderKind::Hole ||
-                  hdr->hdr_.kind == HeaderKind::Free ? hdr->free_.size() :
-                  MemoryManager::smallSizeClass(hdr->size());
-      assert(size % 16 == 0);
-      hdr = (Header*)((char*)hdr + size);
+      // Move to the next header in the slab.
+      hdr = reinterpret_cast<Header*>(reinterpret_cast<char*>(hdr) +
+                                      hdr->allocSize());
       if (hdr >= slab_end) {
         assert(hdr == slab_end && "hdr > slab_end indicates corruption");
         // move to next slab
         if (++slab != m_slabs.end()) {
-          hdr = (Header*)slab->ptr;
-          slab_end = (Header*)(static_cast<char*>(slab->ptr) + slab->size);
+          std::tie(hdr, slab_end) = bounds_from_slab(*slab);
         } else {
           // move to first big block
           in_slabs = false;
-          if (big != end(m_bigs)) hdr = (Header*)*big;
+          if (big != std::end(m_bigs)) hdr = reinterpret_cast<Header*>(*big);
         }
       }
     } else {
       // move to next big block
-      if (++big != end(m_bigs)) hdr = (Header*)*big;
+      if (++big != std::end(m_bigs)) hdr = reinterpret_cast<Header*>(*big);
     }
     fn(h);
   }
 }
 
-// Raw iterator loop over the headers of everything in the heap.  Skips BigObj
-// because it's just a detail of which sub-heap we used to allocate something
-// based on its size, and it can prefix almost any other header kind.  Clients
-// can call this directly to avoid unnecessary initFree()s.
 template<class Fn> void MemoryManager::iterate(Fn fn) {
   m_heap.iterate([&](Header* h) {
     if (h->kind() == HeaderKind::BigObj) {
       // skip MallocNode
-      h = reinterpret_cast<Header*>((&h->malloc_)+1);
+      h = reinterpret_cast<Header*>((&h->malloc_) + 1);
     } else if (h->kind() == HeaderKind::Hole) {
       // no valid pointer can point here.
       return; // continue iterating
@@ -241,14 +256,11 @@ template<class Fn> void MemoryManager::iterate(Fn fn) {
   });
 }
 
-// same as iterate(), but calls initFree first.
 template<class Fn> void MemoryManager::forEachHeader(Fn fn) {
   initFree();
   iterate(fn);
 }
 
-// iterate just the ObjectDatas, including the kinds with prefixes.
-// (NativeData and ResumableFrame).
 template<class Fn> void MemoryManager::forEachObject(Fn fn) {
   if (debug) checkHeap("MM::forEachObject");
   std::vector<ObjectData*> ptrs;
@@ -274,7 +286,6 @@ template<class Fn> void MemoryManager::forEachObject(Fn fn) {
         ptrs.push_back(h->nativeObj());
         break;
       case HeaderKind::Packed:
-      case HeaderKind::Struct:
       case HeaderKind::Mixed:
       case HeaderKind::Dict:
       case HeaderKind::Empty:
@@ -300,6 +311,8 @@ template<class Fn> void MemoryManager::forEachObject(Fn fn) {
     fn(ptr);
   }
 }
+
+///////////////////////////////////////////////////////////////////////////////
 
 // information about heap objects, indexed by valid object starts.
 struct PtrMap {
@@ -382,6 +395,8 @@ private:
   std::vector<std::pair<const Header*, std::size_t>> regions_;
   bool sorted_ = false;
 };
+
+///////////////////////////////////////////////////////////////////////////////
 
 }
 

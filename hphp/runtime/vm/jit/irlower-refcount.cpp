@@ -76,13 +76,20 @@ void ifNonPersistent(Vout& v, Type ty, Vloc loc, Then then) {
 template<class Then>
 void ifRefCountedType(Vout& v, Vout& vtaken, Type ty, Vloc loc, Then then) {
   if (!ty.maybe(TCounted)) return;
-  if (ty.isKnownDataType()) {
+  if (ty <= TStkElem && ty.isKnownDataType()) {
     if (isRefcountedType(ty.toDataType())) then(v);
     return;
   }
   auto const sf = v.makeReg();
-  emitCmpTVType(v, sf, KindOfRefCountThreshold, loc.reg(1));
-  unlikelyIfThen(v, vtaken, CC_NLE, sf, then);
+  auto cond = CC_NLE;
+  if (ty <= TCtx) {
+    v << testqi{ActRec::kHasClassBit, loc.reg(0), sf};
+    cond = CC_E;
+  } else {
+    assert(ty <= TStkElem);
+    emitCmpTVType(v, sf, KindOfRefCountThreshold, loc.reg(1));
+  }
+  unlikelyIfThen(v, vtaken, cond, sf, then);
 }
 
 template<class Then>
@@ -124,8 +131,19 @@ void cgIncRef(IRLS& env, const IRInstruction* inst) {
   auto const ty = inst->src(0)->type();
   if (!ty.maybe(TCounted)) return;
 
+  auto const loc = srcLoc(env, inst, 0);
+  auto& v = vmain(env);
+
+  if (ty.maybe(TCctx)) {
+    always_assert(ty <= TCtx && ty.maybe(TObj));
+    auto const sf = v.makeReg();
+    v << testqi{ActRec::kHasClassBit, loc.reg(), sf};
+    ifThen(v, CC_Z, sf, [&] (Vout& v) { emitIncRef(v, loc.reg()); });
+    return;
+  }
+
   folly::Optional<rds::Handle> profHandle;
-  auto vtaken = &vmain(env);
+  auto vtaken = &v;
 
   // We profile generic IncRefs to see which ones are unlikely to see
   // refcounted values.
@@ -150,9 +168,6 @@ void cgIncRef(IRLS& env, const IRInstruction* inst) {
     }
   }
 
-  auto const loc = srcLoc(env, inst, 0);
-  auto& v = vmain(env);
-
   ifRefCountedType(v, *vtaken, ty, loc, [&] (Vout& v) {
     if (profHandle) {
       v << incwm{rvmtl()[*profHandle + offsetof(IncRefProfile, tryinc)],
@@ -162,32 +177,6 @@ void cgIncRef(IRLS& env, const IRInstruction* inst) {
       emitIncRef(v, loc.reg());
     });
   });
-}
-
-void cgIncRefCtx(IRLS& env, const IRInstruction* inst) {
-  auto const ty = inst->src(0)->type();
-
-  if (ty <= TObj) return cgIncRef(env, inst);
-  if (ty <= TCctx || ty <= TNullptr) return;
-
-  auto const src = srcLoc(env, inst, 0).reg();
-  auto& v = vmain(env);
-
-  auto const sf = v.makeReg();
-
-  if (ty.maybe(TNullptr)) {
-    auto const shifted = v.makeReg();
-    v << shrqi{1, src, shifted, sf};
-
-    ifThen(v, CC_NBE, sf, [&] (Vout& v) {
-      auto const unshifted = v.makeReg();
-      v << shlqi{1, shifted, unshifted, v.makeReg()};
-      emitIncRef(v, unshifted);
-    });
-  } else {
-    v << testqi{0x1, src, sf};
-    ifThen(v, CC_Z, sf, [&] (Vout& v) { emitIncRef(v, src); });
-  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -215,7 +204,7 @@ struct DecRefProfile {
 
   /*
    * The number of times this DecRef was executed.
-   * */
+   */
   uint16_t hits;
   /*
    * The number of times this DecRef made it at least as far as the static
@@ -279,6 +268,12 @@ CallSpec getDtorCallSpec(DataType type) {
       return CallSpec::method(&StringData::release);
     case KindOfArray:
       return CallSpec::method(&ArrayData::release);
+    case KindOfVec:
+      return CallSpec::direct(PackedArray::Release);
+    case KindOfDict:
+      return CallSpec::direct(MixedArray::Release);
+    case KindOfKeyset:
+      return CallSpec::direct(MixedArray::Release);
     case KindOfObject:
       return CallSpec::method(
         RuntimeOption::EnableObjDestructCall
@@ -298,14 +293,10 @@ CallSpec getDtorCallSpec(DataType type) {
 
 CallSpec makeDtorCall(Type ty, Vloc loc, ArgGroup& args) {
   static auto const TPackedArr = Type::Array(ArrayData::kPackedKind);
-  static auto const TVecArr = Type::Array(ArrayData::kVecKind);
-  static auto const TDictArr = Type::Array(ArrayData::kDictKind);
   static auto const TMixedArr = Type::Array(ArrayData::kMixedKind);
   static auto const TAPCArr = Type::Array(ArrayData::kApcKind);
 
   if (ty <= TPackedArr) return CallSpec::direct(PackedArray::Release);
-  if (ty <= TVecArr)    return CallSpec::direct(PackedArray::Release);
-  if (ty <= TDictArr)   return CallSpec::direct(MixedArray::Release);
   if (ty <= TMixedArr)  return CallSpec::direct(MixedArray::Release);
   if (ty <= TAPCArr)    return CallSpec::direct(APCLocalArray::Release);
   if (ty <= TArr)       return CallSpec::array(&g_array_funcs.release);
@@ -352,9 +343,9 @@ CallSpec makeDtorCall(Type ty, Vloc loc, ArgGroup& args) {
  *  skip_dec:
  *    // ....
  */
-void implDecRef(Vout& v, IRLS& env, const IRInstruction* inst,
+void implDecRef(Vout& v, IRLS& env,
+                const IRInstruction* inst, Type ty,
                 const OptDecRefProfile& profile, bool unlikelyDestroy) {
-  auto const ty = inst->src(0)->type();
   auto const base = srcLoc(env, inst, 0).reg(0);
 
   auto const destroy = [&] (Vout& v) {
@@ -409,13 +400,30 @@ void cgDecRef(IRLS& env, const IRInstruction *inst) {
   if (!ty.maybe(TCounted)) return;
 
   auto& v = vmain(env);
+  OptDecRefProfile profile;
 
   emitDecRefTypeStat(v, env, inst);
 
-  OptDecRefProfile profile;
   auto const destroyRate = decRefDestroyRate(v, env, inst, profile, ty);
   FTRACE(3, "irlower-inc-dec: destroyPercent {:.2%} for {}\n",
          destroyRate, *inst);
+
+  auto impl = [&] (Vout& v, Type t) {
+    implDecRef(
+      v, env, inst, t, profile,
+      destroyRate * 100 < RuntimeOption::EvalJitUnlikelyDecRefPercent);
+  };
+
+  if (ty.maybe(TCctx)) {
+    always_assert(ty <= TCtx && ty.maybe(TObj));
+    auto const loc = srcLoc(env, inst, 0);
+    auto const sf = v.makeReg();
+    v << testqi{ActRec::kHasClassBit, loc.reg(), sf};
+    ifThen(v, CC_Z, sf, [&] (Vout& v) {
+        impl(v, TObj);
+      });
+    return;
+  }
 
   if (RuntimeOption::EvalHHIROutlineGenericIncDecRef &&
       profile &&
@@ -444,21 +452,29 @@ void cgDecRef(IRLS& env, const IRInstruction *inst) {
   }
 
   ifRefCountedType(v, v, ty, srcLoc(env, inst, 0), [&] (Vout& v) {
-    implDecRef(
-      v, env, inst, profile,
-      destroyRate * 100 < RuntimeOption::EvalJitUnlikelyDecRefPercent
-    );
+      impl(v, ty);
   });
 }
 
 void cgDecRefNZ(IRLS& env, const IRInstruction* inst) {
   auto& v = vmain(env);
+  auto const ty = inst->src(0)->type();
+
+  if (ty.maybe(TCctx)) {
+    always_assert(ty <= TCtx);
+    if (ty.maybe(TObj)) {
+      auto const loc = srcLoc(env, inst, 0);
+      auto const sf = v.makeReg();
+      v << testqi{ActRec::kHasClassBit, loc.reg(), sf};
+      ifThen(v, CC_Z, sf, [&] (Vout& v) { emitDecRef(v, loc.reg()); });
+    }
+    return;
+  }
 
   emitIncStat(v, Stats::TC_DecRef_NZ);
   emitDecRefTypeStat(v, env, inst);
 
   auto const src = srcLoc(env, inst, 0);
-  auto const ty = inst->src(0)->type();
 
   ifRefCountedNonPersistent(v, ty, src, [&] (Vout& v) {
     emitDecRef(v, src.reg());

@@ -42,6 +42,7 @@
 #include "hphp/util/hdf.h"
 #include "hphp/util/logger.h"
 #include "hphp/util/process.h"
+#include "hphp/util/process-exec.h"
 #include "hphp/util/text-util.h"
 #include "hphp/util/timer.h"
 
@@ -222,7 +223,8 @@ int prepareOptions(CompilerOptions &po, int argc, char **argv) {
     ("program", value<std::string>(&po.program)->default_value("program"),
      "final program name to use")
     ("args", value<std::string>(&po.programArgs), "program arguments")
-    ("inputs,i", value<std::vector<std::string>>(&po.inputs), "input file names")
+    ("inputs,i", value<std::vector<std::string>>(&po.inputs),
+     "input file names")
     ("input-list", value<std::string>(&po.inputList),
      "file containing list of file names, one per line")
     ("include-path",
@@ -822,6 +824,7 @@ int hhbcTarget(const CompilerOptions &po, AnalysisResultPtr&& ar,
   }
 
   Timer timer(Timer::WallTime, type);
+  // NOTE: Repo errors are ignored!
   Compiler::emitAllHHBC(std::move(ar));
 
   if (!po.syncDir.empty()) {
@@ -847,7 +850,7 @@ int hhbcTarget(const CompilerOptions &po, AnalysisResultPtr&& ar,
     const char *argv[] = { "objcopy", "--add-section", repo.c_str(),
                            buf.c_str(), exe.c_str(), 0 };
     std::string out;
-    ret = Process::Exec(argv[0], argv, nullptr, out, nullptr) ? 0 : 1;
+    ret = proc::exec(argv[0], argv, nullptr, out, nullptr) ? 0 : 1;
   }
 
   return ret;

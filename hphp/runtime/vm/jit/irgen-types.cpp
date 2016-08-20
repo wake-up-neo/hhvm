@@ -44,13 +44,11 @@ const StaticString s_WaitHandle("HH\\WaitHandle");
  */
 SSATmp* ldClassSafe(IRGS& env, const StringData* className,
                     const Class* knownCls = nullptr) {
-  if (!knownCls) knownCls = Unit::lookupClassOrUniqueClass(className);
+  if (!knownCls) {
+    knownCls = Unit::lookupUniqueClassInContext(className, curClass(env));
+  }
 
-  // We can only burn in the Class* if it's unique or in the inheritance
-  // hierarchy of our context.  If we can't burn in the class, use
-  // LdClsCachedSafe---InstanceOfD and Verify(Ret|Param)Type don't invoke
-  // autoload.
-  if (classIsUniqueOrCtxParent(env, knownCls)) {
+  if (knownCls) {
     return cns(env, knownCls);
   }
 
@@ -187,28 +185,6 @@ void verifyTypeImpl(IRGS& env, int32_t const id) {
     }
   };
 
-  auto checkSpecializedArray = [&] (const Type arrTy) {
-    if (valType <= arrTy) {
-      env.irb->constrainValue(
-        val,
-        TypeConstraint(DataTypeSpecialized).setWantArrayKind()
-      );
-    } else if (valType.maybe(arrTy)) {
-      ifThen(
-        env,
-        [&] (Block* taken) {
-          gen(env, CheckType, Type::Array(ArrayData::kDictKind), taken, val);
-        },
-        [&] {
-          hint(env, Block::Hint::Unlikely);
-          genFail();
-        }
-      );
-    } else {
-      genFail();
-    }
-  };
-
   auto result = annotCompat(valType.toDataType(), tc.type(), tc.typeName());
   switch (result) {
     case AnnotAction::Pass: return;
@@ -220,14 +196,6 @@ void verifyTypeImpl(IRGS& env, int32_t const id) {
         gen(env, VerifyParamCallable, val, cns(env, id));
       }
       return;
-    case AnnotAction::DictCheck: {
-      checkSpecializedArray(Type::Array(ArrayData::kDictKind));
-      return;
-    }
-    case AnnotAction::VecCheck: {
-      checkSpecializedArray(Type::Array(ArrayData::kVecKind));
-      return;
-    }
     case AnnotAction::ObjectCheck:
       break;
   }
@@ -268,11 +236,11 @@ void verifyTypeImpl(IRGS& env, int32_t const id) {
     if (RuntimeOption::RepoAuthoritative && td &&
         tc.namedEntity()->isPersistentTypeAlias() &&
         td->klass) {
+      assertx(classHasPersistentRDS(td->klass));
       clsName = td->klass->name();
       knownConstraint = td->klass;
     } else {
       clsName = tc.typeName();
-      knownConstraint = Unit::lookupClassOrUniqueClass(clsName);
     }
   } else {
     if (tc.isSelf()) {
@@ -322,13 +290,16 @@ void verifyTypeImpl(IRGS& env, int32_t const id) {
 
 DataType typeOpToDataType(IsTypeOp op) {
   switch (op) {
-  case IsTypeOp::Null:  return KindOfNull;
-  case IsTypeOp::Int:   return KindOfInt64;
-  case IsTypeOp::Dbl:   return KindOfDouble;
-  case IsTypeOp::Bool:  return KindOfBoolean;
-  case IsTypeOp::Str:   return KindOfString;
-  case IsTypeOp::Arr:   return KindOfArray;
-  case IsTypeOp::Obj:   return KindOfObject;
+  case IsTypeOp::Null:   return KindOfNull;
+  case IsTypeOp::Int:    return KindOfInt64;
+  case IsTypeOp::Dbl:    return KindOfDouble;
+  case IsTypeOp::Bool:   return KindOfBoolean;
+  case IsTypeOp::Str:    return KindOfString;
+  case IsTypeOp::Vec:    return KindOfVec;
+  case IsTypeOp::Dict:   return KindOfDict;
+  case IsTypeOp::Keyset: return KindOfKeyset;
+  case IsTypeOp::Arr:    return KindOfArray;
+  case IsTypeOp::Obj:    return KindOfObject;
   case IsTypeOp::Scalar: not_reached();
   }
   not_reached();
@@ -375,23 +346,23 @@ folly::Optional<Type> ratToAssertType(IRGS& env, RepoAuthType rat) {
     case T::Obj:
     case T::SArr:
     case T::Arr:
+    case T::SVec:
+    case T::Vec:
+    case T::SDict:
+    case T::Dict:
+    case T::SKeyset:
+    case T::Keyset:
     case T::Cell:
     case T::Ref:
     case T::InitUnc:
     case T::Unc:
-      return typeFromRAT(rat);
+      return typeFromRAT(rat, nullptr);
 
     case T::OptExactObj:
     case T::OptSubObj:
     case T::ExactObj:
     case T::SubObj: {
-      auto ty = typeFromRAT(rat);
-      auto const cls = Unit::lookupClassOrUniqueClass(rat.clsName());
-
-      if (!classIsUniqueOrCtxParent(env, cls)) {
-        ty |= TObj; // Kill specialization.
-      }
-      return ty;
+      return typeFromRAT(rat, curClass(env));
     }
 
     // Type assertions can't currently handle Init-ness.
@@ -414,6 +385,12 @@ folly::Optional<Type> ratToAssertType(IRGS& env, RepoAuthType rat) {
 
     case T::OptSArr:
     case T::OptArr:
+    case T::OptSVec:
+    case T::OptVec:
+    case T::OptSDict:
+    case T::OptDict:
+    case T::OptSKeyset:
+    case T::OptKeyset:
       // TODO(#4205897): optional array types.
       return folly::none;
   }
@@ -435,6 +412,9 @@ SSATmp* implInstanceOfD(IRGS& env, SSATmp* src, const StringData* className) {
   }
   if (!src->isA(TObj)) {
     bool res = ((src->isA(TArr) && interface_supports_array(className))) ||
+      (src->isA(TVec) && interface_supports_vec(className)) ||
+      (src->isA(TDict) && interface_supports_dict(className)) ||
+      (src->isA(TKeyset) && interface_supports_keyset(className)) ||
       (src->isA(TStr) && interface_supports_string(className)) ||
       (src->isA(TInt) && interface_supports_int(className)) ||
       (src->isA(TDbl) && interface_supports_double(className));
@@ -481,14 +461,22 @@ void emitInstanceOf(IRGS& env) {
     return;
   }
 
-  push(
-    env,
-    t2->isA(TArr) ? gen(env, InterfaceSupportsArr, t1) :
-    t2->isA(TInt) ? gen(env, InterfaceSupportsInt, t1) :
-    t2->isA(TStr) ? gen(env, InterfaceSupportsStr, t1) :
-    t2->isA(TDbl) ? gen(env, InterfaceSupportsDbl, t1) :
-    cns(env, false)
-  );
+  auto const res = [&]() -> SSATmp* {
+    if (t2->isA(TArr))    return gen(env, InterfaceSupportsArr, t1);
+    if (t2->isA(TVec))    return gen(env, InterfaceSupportsVec, t1);
+    if (t2->isA(TDict))   return gen(env, InterfaceSupportsDict, t1);
+    if (t2->isA(TKeyset)) return gen(env, InterfaceSupportsKeyset, t1);
+    if (t2->isA(TInt))    return gen(env, InterfaceSupportsInt, t1);
+    if (t2->isA(TStr))    return gen(env, InterfaceSupportsStr, t1);
+    if (t2->isA(TDbl))    return gen(env, InterfaceSupportsDbl, t1);
+    if (!t2->type().maybe(TObj|TArr|TVec|TDict|TKeyset|
+                          TInt|TStr|TDbl)) return cns(env, false);
+    return nullptr;
+  }();
+
+  if (!res) PUNT(InstanceOf-Unknown);
+
+  push(env, res);
   decRef(env, t2);
   decRef(env, t1);
 }

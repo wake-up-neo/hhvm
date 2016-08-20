@@ -85,6 +85,7 @@
 #include <caml/alloc.h>
 #include <caml/fail.h>
 #include <caml/unixsupport.h>
+#include <caml/intext.h>
 
 #include <assert.h>
 
@@ -382,6 +383,9 @@ static char* heap_init;
 /* This should only be used by the master */
 static size_t heap_init_size = 0;
 
+/* Size of the heap since the last garbage collect*/
+static size_t latest_heap_size = 0;
+
 static size_t used_heap_size(void) {
   return *heap - heap_init;
 }
@@ -399,14 +403,23 @@ CAMLprim value hh_log_level(void) {
 
 CAMLprim value hh_hash_used_slots(void) {
   CAMLparam0();
-  uint64_t count = 0;
+  uint64_t filled_slots = 0;
+  uint64_t nonempty_slots = 0;
   uintptr_t i = 0;
   for (i = 0; i < hashtbl_size; ++i) {
     if (hashtbl[i].addr != NULL) {
-      count++;
+      filled_slots++;
+    }
+    if (hashtbl[i].hash != 0) {
+      nonempty_slots++;
     }
   }
-  CAMLreturn(Val_long(count));
+
+  value connector = caml_alloc_tuple(2);
+  Field(connector, 0) = Val_long(filled_slots);
+  Field(connector, 1) = Val_long(nonempty_slots);
+
+  CAMLreturn(connector);
 }
 
 CAMLprim value hh_hash_slots(void) {
@@ -539,6 +552,17 @@ void memfd_init(char *shm_dir, size_t shared_mem_size, uint64_t minimum_avail) {
       if (memfd < 0) {
           uerror("shm_open", Nothing);
       }
+
+      // shm_open sets FD_CLOEXEC automatically. This is undesirable, because
+      // we want this fd to be open for other processes, so that they can
+      // reconnect to the shared memory.
+      int fcntl_flags = fcntl(memfd, F_GETFD);
+      if (fcntl_flags == -1) {
+        printf("Error with fcntl(memfd): %s\n", strerror(errno));
+        uerror("fcntl", Nothing);
+      }
+      // Unset close-on-exec
+      fcntl(memfd, F_SETFD, fcntl_flags & ~FD_CLOEXEC);
     }
 #endif
     if (memfd < 0) {
@@ -627,11 +651,20 @@ static void raise_out_of_shared_memory()
 
 #ifdef _WIN32
 
-static void memfd_reserve(char * mem, size_t sz) {
+/* Reserves memory. This is required on Windows */
+static void win_reserve(char * mem, size_t sz) {
   if (!VirtualAlloc(mem, sz, MEM_COMMIT, PAGE_READWRITE)) {
     win32_maperr(GetLastError());
     raise_out_of_shared_memory();
   }
+}
+
+/* On Linux, memfd_reserve is only used to reserve memory that is mmap'd to the
+ * memfd file. Memory outside of that mmap does not need to be reserved, so we
+ * don't call memfd_reserve on things like the temporary mmap used by
+ * hh_collect. Instead, they use win_reserve() */
+static void memfd_reserve(char * mem, size_t sz) {
+  win_reserve(mem, sz);
 }
 
 #elif defined(__APPLE__)
@@ -649,7 +682,8 @@ static void memfd_reserve(char * mem, size_t sz) {
 #else
 
 static void memfd_reserve(char *mem, size_t sz) {
-  if(posix_fallocate(memfd, (uint64_t)(mem - shared_mem), sz)) {
+  off_t offset = (off_t)(mem - shared_mem);
+  if(posix_fallocate(memfd, offset, sz)) {
     raise_out_of_shared_memory();
   }
 }
@@ -1282,6 +1316,7 @@ static void temp_memory_unmap(char * tmp_heap) {
 void hh_call_after_init() {
   CAMLparam0();
   heap_init_size = used_heap_size();
+  latest_heap_size = heap_init_size;
   if(2 * heap_init_size >= heap_size) {
     caml_failwith("Heap init size is too close to max heap size; "
       "GC will never get triggered!");
@@ -1311,8 +1346,16 @@ void hh_collect(value aggressive_val) {
   size_t mem_size = 0;
 
   float space_overhead = aggressive ? 1.2 : 2.0;
-  if(used_heap_size() < (size_t)(space_overhead * heap_init_size)) {
-    // We have not grown past twice the size of the initial size
+  size_t used = used_heap_size();
+  if(used < (size_t)(space_overhead * latest_heap_size)) {
+    // We have not grown past twice the size since we last gc'd
+
+    /* We maintain the invariant that the latest_heap_size
+      is at most the current heap size, to make sure the GC
+      always collects */
+    if (used < latest_heap_size) {
+      latest_heap_size = used;
+    }
     return;
   }
 
@@ -1328,7 +1371,9 @@ void hh_collect(value aggressive_val) {
       size_t aligned_size = ALIGNED(bl_size);
       char* addr          = Get_buf(hashtbl[i].addr);
 
-      memfd_reserve(dest, bl_size);
+#ifdef _WIN32
+      win_reserve(dest, bl_size);
+#endif
       memcpy(dest, addr, bl_size);
       // This is where the data ends up after the copy
       hashtbl[i].addr = heap_init + mem_size + sizeof(size_t);
@@ -1342,7 +1387,7 @@ void hh_collect(value aggressive_val) {
   *heap = heap_init + mem_size;
 
   temp_memory_unmap(tmp_heap);
-
+  latest_heap_size = used_heap_size();
 }
 
 /*****************************************************************************/
@@ -1506,19 +1551,33 @@ value hh_mem(value key) {
 }
 
 /*****************************************************************************/
-/* Returns the value associated to a given key. The key MUST be present. */
+/* Returns the value associated to a given key, and deserialize it. */
+/* The key MUST be present. */
 /*****************************************************************************/
-CAMLprim value hh_get(value key) {
+CAMLprim value hh_get_and_deserialize(value key) {
   CAMLparam1(key);
   CAMLlocal1(result);
 
   unsigned int slot = find_slot(key);
   assert(hashtbl[slot].hash == get_hash(key));
   size_t size = *(size_t*)(hashtbl[slot].addr - sizeof(size_t));
-  result = caml_alloc_string(size);
-  memcpy(String_val(result), hashtbl[slot].addr, size);
+  result = caml_input_value_from_block(hashtbl[slot].addr, size);
 
   CAMLreturn(result);
+}
+
+/*****************************************************************************/
+/* Returns the size of the value associated to a given key. */
+/* The key MUST be present. */
+/*****************************************************************************/
+CAMLprim value hh_get_size(value key) {
+  CAMLparam1(key);
+
+  unsigned int slot = find_slot(key);
+  assert(hashtbl[slot].hash == get_hash(key));
+  size_t size = *(size_t*)(hashtbl[slot].addr - sizeof(size_t));
+
+  CAMLreturn(Long_val(size));
 }
 
 /*****************************************************************************/

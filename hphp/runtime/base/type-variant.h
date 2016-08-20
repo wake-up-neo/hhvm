@@ -134,10 +134,10 @@ struct Variant : private TypedValue {
     if (v) {
       m_data.parr = v;
       if (v->isRefCounted()) {
-        m_type = KindOfArray;
+        m_type = v->toDataType();
         v->rawIncRefCount();
       } else {
-        m_type = KindOfPersistentArray;
+        m_type = v->toPersistentDataType();
       }
     } else {
       m_type = KindOfNull;
@@ -172,16 +172,18 @@ struct Variant : private TypedValue {
    * Creation constructor from ArrayInit that avoids a null check and an
    * inc-ref.
    */
-  explicit Variant(ArrayData* ad, ArrayInitCtor) noexcept {
-    m_type = KindOfArray;
+  explicit Variant(ArrayData* ad, DataType dt, ArrayInitCtor) noexcept {
+    assert(ad->toDataType() == dt);
+    m_type = dt;
     m_data.parr = ad;
   }
 
   enum class PersistentArrInit {};
-  Variant(ArrayData* ad, PersistentArrInit) noexcept {
+  Variant(ArrayData* ad, DataType dt, PersistentArrInit) noexcept {
+    assert(ad->toPersistentDataType() == dt);
     assert(!ad->isRefCounted());
     m_data.parr = ad;
-    m_type = KindOfPersistentArray;
+    m_type = dt;
   }
 
   // for persistent strings only
@@ -271,7 +273,7 @@ struct Variant : private TypedValue {
     ArrayData *a = v.get();
     if (LIKELY(a != nullptr)) {
       m_data.parr = a;
-      m_type = a->isRefCounted() ? KindOfArray : KindOfPersistentArray;
+      m_type = a->isRefCounted() ? a->toDataType() : a->toPersistentDataType();
       v.detach();
     } else {
       m_type = KindOfNull;
@@ -481,28 +483,28 @@ struct Variant : private TypedValue {
 // array
 
   ALWAYS_INLINE const Array& asCArrRef() const {
-    assert(isArrayType(m_type) && m_data.parr);
+    assert(isArrayLikeType(m_type) && m_data.parr);
     return *reinterpret_cast<const Array*>(&m_data.parr);
   }
 
   ALWAYS_INLINE const Array& toCArrRef() const {
     assert(isArray());
     assert(m_type == KindOfRef ? m_data.pref->var()->m_data.parr : m_data.parr);
-    return *reinterpret_cast<const Array*>(LIKELY(isArrayType(m_type)) ?
+    return *reinterpret_cast<const Array*>(LIKELY(isArrayLikeType(m_type)) ?
         &m_data.parr : &m_data.pref->tv()->m_data.parr);
   }
 
   ALWAYS_INLINE Array& asArrRef() {
-    assert(isArrayType(m_type) && m_data.parr);
-    m_type = KindOfArray;
+    assert(isArrayLikeType(m_type) && m_data.parr);
+    m_type = m_data.parr->toDataType();
     return *reinterpret_cast<Array*>(&m_data.parr);
   }
 
   ALWAYS_INLINE Array& toArrRef() {
     assert(isArray());
     assert(m_type == KindOfRef ? m_data.pref->var()->m_data.parr : m_data.parr);
-    auto tv = LIKELY(isArrayType(m_type)) ? this : m_data.pref->tv();
-    tv->m_type = KindOfArray;
+    auto tv = LIKELY(isArrayLikeType(m_type)) ? this : m_data.pref->tv();
+    tv->m_type = tv->m_data.parr->toDataType();
     return *reinterpret_cast<Array*>(&tv->m_data.parr);
   }
 
@@ -581,7 +583,19 @@ struct Variant : private TypedValue {
     return isStringType(getType());
   }
   bool isArray() const {
+    return isArrayLikeType(getType());
+  }
+  bool isPHPArray() const {
     return isArrayType(getType());
+  }
+  bool isVecArray() const {
+    return isVecType(getType());
+  }
+  bool isDict() const {
+    return isDictType(getType());
+  }
+  bool isKeyset() const {
+    return isKeysetType(getType());
   }
   bool isObject() const {
     return getType() == KindOfObject;
@@ -606,6 +620,12 @@ struct Variant : private TypedValue {
       case KindOfDouble:
       case KindOfPersistentString:
       case KindOfString:
+      case KindOfPersistentVec:
+      case KindOfVec:
+      case KindOfPersistentDict:
+      case KindOfDict:
+      case KindOfPersistentKeyset:
+      case KindOfKeyset:
       case KindOfPersistentArray:
       case KindOfArray:
         return false;
@@ -616,10 +636,9 @@ struct Variant : private TypedValue {
     }
     not_reached();
   }
+
   // Is "define('CONSTANT', <this value>)" legal?
-  bool isAllowedAsConstantValue() const {
-    return (m_type & kNotConstantValueTypeMask) == 0;
-  }
+  bool isAllowedAsConstantValue() const;
 
   /**
    * Whether or not there are at least two variables that are strongly bound.
@@ -1029,7 +1048,8 @@ struct Variant : private TypedValue {
   }
   Variant(ArrayData* var, Attach) noexcept {
     if (var) {
-      m_type = var->isRefCounted() ? KindOfArray : KindOfPersistentArray;
+      m_type =
+        var->isRefCounted() ? var->toDataType() : var->toPersistentDataType();
       m_data.parr = var;
     } else {
       m_type = KindOfNull;
@@ -1397,6 +1417,9 @@ private:
       case KindOfString:
         assert(m_data.pstr->checkCount());
         return;
+      case KindOfVec:
+      case KindOfDict:
+      case KindOfKeyset:
       case KindOfArray:
         assert(m_data.parr->checkCount());
         return;
@@ -1422,6 +1445,12 @@ private:
  * is already at the maximum integer.)
  */
 Variant& lvalBlackHole();
+
+/*
+ * The lvalBlackHole has request lifetime.
+ */
+void initBlackHole();
+void clearBlackHole();
 
 ///////////////////////////////////////////////////////////////////////////////
 // breaking circular dependencies
@@ -1548,6 +1577,12 @@ inline VarNR Variant::toKey(const ArrayData* ad) const {
   case KindOfResource:
     return VarNR(toInt64());
 
+  case KindOfPersistentVec:
+  case KindOfVec:
+  case KindOfPersistentDict:
+  case KindOfDict:
+  case KindOfPersistentKeyset:
+  case KindOfKeyset:
   case KindOfPersistentArray:
   case KindOfArray:
   case KindOfObject:

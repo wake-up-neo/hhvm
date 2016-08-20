@@ -37,6 +37,7 @@
 #include "hphp/runtime/vm/jit/ir-opcode.h"
 #include "hphp/runtime/vm/jit/ssa-tmp.h"
 #include "hphp/runtime/vm/jit/target-cache.h"
+#include "hphp/runtime/vm/jit/target-profile.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/translator-runtime.h"
 #include "hphp/runtime/vm/jit/type.h"
@@ -132,6 +133,10 @@ void cgLdObjMethod(IRLS& env, const IRInstruction* inst) {
   v = done;
 }
 
+///////////////////////////////////////////////////////////////////////////////
+
+IMPL_OPCODE_CALL(LdClsCtor)
+
 void lookupClsMethodHelper(Class* cls, StringData* meth,
                            ActRec* ar, ActRec* fp) {
   try {
@@ -142,6 +147,9 @@ void lookupClsMethodHelper(Class* cls, StringData* meth,
 
     if (res == LookupResult::MethodFoundNoThis ||
         res == LookupResult::MagicCallStaticFound) {
+      if (!f->isStaticInProlog()) {
+        raise_missing_this(f);
+      }
       ar->setClass(cls);
     } else {
       assertx(obj);
@@ -166,14 +174,29 @@ void lookupClsMethodHelper(Class* cls, StringData* meth,
 
 void cgLookupClsMethod(IRLS& env, const IRInstruction* inst) {
   auto const extra = inst->extra<LookupClsMethod>();
+  auto const sp = srcLoc(env, inst, 2).reg();
+
   auto const args = argGroup(env, inst)
     .ssa(0)
     .ssa(1)
-    .addr(srcLoc(env, inst, 2).reg(), cellsToBytes(extra->offset.offset))
+    .addr(sp, cellsToBytes(extra->offset.offset))
     .ssa(3);
 
   cgCallHelper(vmain(env), env, CallSpec::direct(lookupClsMethodHelper),
                callDest(env, inst), SyncOptions::Sync, args);
+}
+
+void cgProfileMethod(IRLS& env, const IRInstruction* inst) {
+  auto const extra = inst->extra<ProfileMethodData>();
+  auto const sp = srcLoc(env, inst, 0).reg();
+
+  auto const args = argGroup(env, inst)
+    .addr(rvmtl(), safe_cast<int32_t>(extra->handle))
+    .addr(sp, cellsToBytes(extra->spOffset.offset))
+    .ssa(1);
+
+  cgCallHelper(vmain(env), env, CallSpec::method(&MethProfile::reportMeth),
+               kVoidDest, SyncOptions::None, args);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -305,16 +328,29 @@ void cgLdClsMethodFCacheFunc(IRLS& env, const IRInstruction* inst) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-namespace {
+void cgCheckFuncStatic(IRLS& env, const IRInstruction* inst) {
+  auto const funcPtrReg = srcLoc(env, inst, 0).reg();
+  auto& v = vmain(env);
 
-template<class FromThisFn>
-void implGetCtxFwdCall(IRLS& env, const IRInstruction* inst,
-                       FromThisFn ctx_from_this) {
+  auto const sf = v.makeReg();
+  v << testlim{AttrStatic, funcPtrReg[Func::attrsOff()], sf};
+  v << jcc{CC_NZ, sf, {label(env, inst->next()), label(env, inst->taken())}};
+}
+
+void cgFwdCtxStaticCall(IRLS& env, const IRInstruction* inst) {
   auto const dstCtx = dstLoc(env, inst, 0).reg();
   auto const srcCtx = srcLoc(env, inst, 0).reg();
   auto const ty = inst->src(0)->type();
 
   auto& v = vmain(env);
+
+  auto ctx_from_this =  [] (Vout& v, Vreg rthis, Vreg dst) {
+    // Load (this->m_cls | 0x1) into `dst'.
+    auto const cls = v.makeReg();
+    emitLdObjClass(v, rthis, cls);
+    v << orqi{ActRec::kHasClassBit, cls, dst, v.makeReg()};
+    return dst;
+  };
 
   if (ty <= TCctx) {
     v << copy{srcCtx, dstCtx};
@@ -323,64 +359,12 @@ void implGetCtxFwdCall(IRLS& env, const IRInstruction* inst,
   } else {
     // If we don't know whether we have a $this, we need to check dynamically.
     auto const sf = v.makeReg();
-    v << testqi{1, srcCtx, sf};
+    v << testqi{ActRec::kHasClassBit, srcCtx, sf};
     cond(v, CC_Z, sf, dstCtx,
-      [&] (Vout& v) { return ctx_from_this(v, srcCtx, v.makeReg()); },
-      [&] (Vout& v) { return srcCtx; }
+         [&] (Vout& v) { return ctx_from_this(v, srcCtx, v.makeReg()); },
+         [&] (Vout& v) { return srcCtx; }
     );
   }
-}
-
-}
-
-void cgGetCtxFwdCall(IRLS& env, const IRInstruction* inst) {
-  implGetCtxFwdCall(env, inst, [&] (Vout& v, Vreg rthis, Vreg dst) {
-    auto const callee = inst->src(1)->funcVal();
-
-    if (callee->isStatic()) {
-      // Load (this->m_cls | 0x1) into `dst'.
-      auto const cls = v.makeReg();
-      emitLdObjClass(v, rthis, cls);
-      v << orqi{1, cls, dst, v.makeReg()};
-    } else {
-      // Just incref $this.
-      emitIncRef(v, rthis);
-      v << copy{rthis, dst};
-    }
-    return dst;
-  });
-}
-
-void cgGetCtxFwdCallDyn(IRLS& env, const IRInstruction* inst) {
-  implGetCtxFwdCall(env, inst, [&] (Vout& v, Vreg rthis, Vreg dst) {
-    auto const extra = inst->extra<ClsMethodData>();
-    auto const ch = StaticMethodFCache::alloc(
-      extra->clsName,
-      extra->methodName,
-      ctxName(inst->marker())
-    );
-
-    // The StaticMethodFCache here is guaranteed to already be initialized in
-    // RDS by the pre-conditions of this instruction.
-    auto const sf = v.makeReg();
-    v << cmplim{1, rvmtl()[ch + offsetof(StaticMethodFCache, m_static)], sf};
-
-    return cond(v, CC_E, sf, dst,
-      [&] (Vout& v) {
-        // Load (this->m_cls | 0x1) into `dst'.
-        auto cls = v.makeReg();
-        auto tmp = v.makeReg();
-        emitLdObjClass(v, rthis, cls);
-        v << orqi{1, cls, tmp, v.makeReg()};
-        return tmp;
-      },
-      [&] (Vout& v) {
-        // Just incref $this.
-        emitIncRef(v, rthis);
-        return rthis;
-      }
-    );
-  });
 }
 
 ///////////////////////////////////////////////////////////////////////////////

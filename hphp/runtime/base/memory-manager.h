@@ -46,7 +46,9 @@
 #define       MAP_UNINITIALIZED 0x4000000 /* XXX Fragile. */
 
 namespace HPHP {
+
 struct APCLocalArray;
+struct Header;
 struct MemoryManager;
 struct ObjectData;
 struct ResourceData;
@@ -358,6 +360,8 @@ struct FreeNode {
   HeaderWord<> hdr;
   uint32_t& size() { return hdr.hi32; }
   uint32_t size() const { return hdr.hi32; }
+  static FreeNode* InitFrom(void* addr, uint32_t size, HeaderKind);
+  static FreeNode* UninitFrom(void* addr, FreeNode* next);
 };
 
 // header for HNI objects with NativeData payloads. see native-data.h
@@ -387,34 +391,55 @@ struct MemBlock {
  */
 struct BigHeap {
   BigHeap() {}
-  ~BigHeap() {
-    reset();
-  }
-  bool empty() const {
-    return m_slabs.empty() && m_bigs.empty();
-  }
+  ~BigHeap();
 
-  // return true if ptr points into one of the slabs
+  /*
+   * Is the heap empty?
+   */
+  bool empty() const;
+
+  /*
+   * Whether `ptr' refers to slab-allocated memory.
+   *
+   * Note that memory in big blocks is explicitly excluded.
+   */
   bool contains(void* ptr) const;
 
-  // allocate a MemBlock of at least size bytes, track in m_slabs.
+  /*
+   * Allocate a MemBlock of at least size bytes, track in m_slabs.
+   */
   MemBlock allocSlab(size_t size);
 
-  // allocation api for big blocks. These get a MallocNode header and
-  // are tracked in m_bigs
+  /*
+   * Allocation API for big blocks.
+   */
   MemBlock allocBig(size_t size, HeaderKind kind, type_scan::Index tyindex);
   MemBlock callocBig(size_t size, HeaderKind kind, type_scan::Index tyindex);
   MemBlock resizeBig(void* p, size_t size);
   void freeBig(void*);
 
-  // free all slabs and big blocks
+  /*
+   * Free all slabs and big blocks.
+   */
   void reset();
 
-  // Release auxiliary structures to prepare to be idle for a while
+  /*
+   * Release auxiliary structures to prepare to be idle for a while.
+   *
+   * @requires: empty()
+   */
   void flush();
 
-  // allow whole-heap iteration
+  /*
+   * Iterate over all the slabs and bigs.
+   */
   template<class Fn> void iterate(Fn);
+
+  /*
+   * Find the Header* in the heap which contains `p', else nullptr if `p' is
+   * not contained in any heap allocation.
+   */
+  Header* find(const void* p);
 
  protected:
   void enlist(MallocNode*, HeaderKind kind, size_t size, type_scan::Index);
@@ -422,49 +447,6 @@ struct BigHeap {
  protected:
   std::vector<MemBlock> m_slabs;
   std::vector<MallocNode*> m_bigs;
-};
-
-///////////////////////////////////////////////////////////////////////////////
-
-/*
- * ContiguousHeap handles allocations and provides a contiguous address space
- * for requests.
- *
- * To turn on build with CONTIGUOUS_HEAP = 1.
- */
-struct ContiguousHeap : BigHeap {
-  bool contains(void* ptr) const;
-
-  MemBlock allocSlab(size_t size);
-
-  MemBlock allocBig(size_t size, HeaderKind kind, type_scan::Index tyindex);
-  MemBlock callocBig(size_t size, HeaderKind kind, type_scan::Index tyindex);
-  MemBlock resizeBig(void* p, size_t size);
-  void freeBig(void*);
-
-  void reset();
-
-  void flush();
-
-  ~ContiguousHeap();
-
- private:
-  // Contiguous Heap Pointers
-  char* m_base = nullptr;
-  char* m_used;
-  char* m_end;
-  char* m_peak;
-  char* m_OOMMarker;
-  FreeNode m_freeList;
-
-  // Contiguous Heap Counters
-  uint32_t m_requestCount;
-  size_t m_heapUsage;
-  size_t m_contiguousHeapSize;
-
- private:
-  void* heapAlloc(size_t nbytes, size_t &cap);
-  void  createRequestHeap();
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -635,9 +617,36 @@ struct MemoryManager {
   /*
    * Whether `p' points into memory owned by `m_heap'.  checkContains() will
    * assert that it does.
+   *
+   * Note that this explicitly excludes allocations that are made through the
+   * big alloc API.
    */
   bool contains(void* p) const;
   bool checkContains(void* p) const;
+
+  /*
+   * Heap iterator methods.  `fn' takes a Header* argument.
+   *
+   * initFree(): prepare to iterate by initializing free block headers.
+   * iterate(): Raw iterator loop over the headers of everything in the heap.
+   *            Skips BigObj because it's just a detail of which sub-heap we
+   *            used to allocate something based on its size, and it can prefix
+   *            almost any other header kind.  (Also skips Hole.)  Clients can
+   *            call this directly to avoid unnecessary initFree()s.
+   * forEachHeader(): Like iterate(), but with an eager initFree().
+   * forEachObject(): Iterate just the ObjectDatas, including the kinds with
+   *                  prefixes (NativeData and ResumableFrame).
+   */
+  void initFree();
+  template<class Fn> void iterate(Fn fn);
+  template<class Fn> void forEachHeader(Fn fn);
+  template<class Fn> void forEachObject(Fn fn);
+
+  /*
+   * Find the Header* in the heap which contains `p', else nullptr if `p' is
+   * not contained in any heap allocation.
+   */
+  Header* find(const void* p);
 
   /////////////////////////////////////////////////////////////////////////////
   // Stats.
@@ -787,6 +796,7 @@ struct MemoryManager {
   static void teardownProfiling();
 
   /////////////////////////////////////////////////////////////////////////////
+  // Garbage collection.
 
   /*
    * Returns ptr to head node of m_strings linked list. This used by
@@ -811,16 +821,10 @@ struct MemoryManager {
   template <typename F> void scanSweepLists(F& m) const;
 
   /*
-   * Heap iterator methods.
-   */
-  template<class Fn> void iterate(Fn);
-  template<class Fn> void forEachHeader(Fn);
-  template<class Fn> void forEachObject(Fn);
-
-  /*
    * Run the experimental collector.
    */
   void collect(const char* phase);
+  void resetGC();
   void updateNextGc();
 
   /*
@@ -896,7 +900,6 @@ private:
 
   void initHole(void* ptr, uint32_t size);
   void initHole();
-  void initFree();
 
   void dropRootMaps();
   void deleteRootMaps();
@@ -961,11 +964,7 @@ private:
   std::vector<APCLocalArray*> m_apc_arrays;
   int64_t m_nextGc; // request gc when heap usage reaches this size
   MemoryUsageStats m_stats;
-#if CONTIGUOUS_HEAP
-  ContiguousHeap m_heap;
-#else
   BigHeap m_heap;
-#endif
   std::vector<NativeNode*> m_natives;
   SweepableList m_sweepables;
 

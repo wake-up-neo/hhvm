@@ -209,6 +209,10 @@ void requestExitProfData() {
   tl_profData = nullptr;
 }
 
+const ProfData* globalProfData() {
+  return s_profData.load(std::memory_order_relaxed);
+}
+
 void discardProfData() {
   if (s_profData.load(std::memory_order_relaxed) == nullptr) return;
 
@@ -233,6 +237,22 @@ void ProfData::maybeResetCounters() {
   if (m_countersReset.load(std::memory_order_relaxed)) return;
   m_counters.resetAllCounters(RuntimeOption::EvalJitPGOThreshold);
   m_countersReset.store(true, std::memory_order_release);
+}
+
+void ProfData::addTargetProfile(const ProfData::TargetProfileInfo& info) {
+  WriteLock lock{m_targetProfilesLock};
+  m_targetProfiles[info.key.transId].push_back(info);
+}
+
+std::vector<ProfData::TargetProfileInfo> ProfData::getTargetProfiles(
+  TransID transID) const {
+  ReadLock lock{m_targetProfilesLock};
+  auto it = m_targetProfiles.find(transID);
+  if (it != m_targetProfiles.end()) {
+    return it->second;
+  } else {
+    return std::vector<TargetProfileInfo>{};
+  }
 }
 
 }}

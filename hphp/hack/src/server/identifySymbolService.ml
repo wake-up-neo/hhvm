@@ -12,6 +12,9 @@ open Core
 open SymbolOccurrence
 open Typing_defs
 
+type cache = (Relative_path.t * FileInfo.t * Ast.def list *
+  Relative_path.t SymbolOccurrence.t list) SMap.t
+
 let is_target target_line target_char pos =
   let l, start, end_ = Pos.info_pos pos in
   l = target_line && start <= target_char && target_char - 1 <= end_
@@ -102,9 +105,14 @@ let process_typeconst result_ref is_target_fun class_name tconst_name pos =
   end
 
 let process_taccess result_ref is_target_fun class_ typeconst pos =
+  (* In typing phase, this hook ends up being called for type constants
+   * in other (than the one being checked) files. We need to filter out
+   * by filename too, in order to avoid spurious results *)
+  if (Pos.filename pos = ServerIdeUtils.path) then begin
     let class_name = class_.tc_name in
     let tconst_name = (snd typeconst.ttc_name) in
     process_typeconst result_ref is_target_fun class_name tconst_name pos
+  end
 
 let process_named_class result_ref is_target_fun class_ =
   process_class_id result_ref is_target_fun class_.Nast.c_name ();
@@ -146,8 +154,7 @@ let process_named_class result_ref is_target_fun class_ =
 let process_named_fun result_ref is_target_fun fun_ =
   process_fun_id result_ref is_target_fun fun_.Nast.f_name
 
-let attach_hooks result_ref line char =
-  let is_target_fun = is_target line char in
+let really_attach_hooks result_ref is_target_fun =
   let process_method_id = process_method_id result_ref is_target_fun in
   Typing_hooks.attach_cmethod_hook process_method_id;
   Typing_hooks.attach_smethod_hook process_method_id;
@@ -163,6 +170,14 @@ let attach_hooks result_ref line char =
     (process_named_class result_ref is_target_fun);
   Naming_hooks.attach_fun_named_hook
     (process_named_fun result_ref is_target_fun)
+
+let attach_hooks result_ref line char =
+  let is_target_fun = is_target line char in
+  really_attach_hooks result_ref is_target_fun
+
+let attach_full_hooks result_ref =
+  let is_target_fun = fun _ -> true in
+  really_attach_hooks result_ref is_target_fun
 
 let detach_hooks () =
   Naming_hooks.remove_all_hooks ();

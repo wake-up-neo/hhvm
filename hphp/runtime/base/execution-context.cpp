@@ -50,6 +50,7 @@
 #include "hphp/runtime/base/apc-stats.h"
 #include "hphp/runtime/base/apc-typed-value.h"
 #include "hphp/runtime/base/extended-logger.h"
+#include "hphp/runtime/base/zend-math.h"
 #include "hphp/runtime/debugger/debugger.h"
 #include "hphp/runtime/ext/std/ext_std_output.h"
 #include "hphp/runtime/ext/string/ext_string.h"
@@ -739,7 +740,9 @@ private:
 };
 
 const StaticString
+  s_class("class"),
   s_file("file"),
+  s_function("function"),
   s_line("line"),
   s_php_errormsg("php_errormsg");
 
@@ -1184,7 +1187,7 @@ LookupResult ExecutionContext::lookupObjMethod(const Func*& f,
     }
     return LookupResult::MagicCallFound;
   }
-  if (f->attrs() & AttrStatic && !f->isClosureBody()) {
+  if (f->isStaticInProlog()) {
     return LookupResult::MethodFoundNoThis;
   }
   return LookupResult::MethodFoundWithThis;
@@ -1365,35 +1368,46 @@ int ExecutionContext::getLine() {
 
 Array ExecutionContext::getCallerInfo() {
   VMRegAnchor _;
-  Array result = Array::Create();
-  ActRec* ar = vmfp();
+  auto ar = vmfp();
   if (ar->skipFrame()) {
     ar = getPrevVMState(ar);
   }
-  while (ar->m_func->name()->isame(s_call_user_func.get())
-         || ar->m_func->name()->isame(s_call_user_func_array.get())) {
+  while (ar->func()->name()->isame(s_call_user_func.get())
+         || ar->func()->name()->isame(s_call_user_func_array.get())) {
     ar = getPrevVMState(ar);
     if (ar == nullptr) {
-      return result;
+      return empty_array();
     }
   }
 
   Offset pc = 0;
   ar = getPrevVMState(ar, &pc);
   while (ar != nullptr) {
-    if (!ar->m_func->name()->isame(s_call_user_func.get())
-        && !ar->m_func->name()->isame(s_call_user_func_array.get())) {
-      Unit* unit = ar->m_func->unit();
+    if (!ar->func()->name()->isame(s_call_user_func.get())
+        && !ar->func()->name()->isame(s_call_user_func_array.get())) {
+      auto const unit = ar->func()->unit();
       int lineNumber;
       if ((lineNumber = unit->getLineNumber(pc)) != -1) {
-        result.set(s_file, unit->filepath()->data(), true);
-        result.set(s_line, lineNumber);
-        return result;
+        auto const cls = ar->func()->cls();
+        if (cls != nullptr && !ar->func()->isClosureBody()) {
+          return make_map_array(
+            s_class, const_cast<StringData*>(cls->name()),
+            s_file, const_cast<StringData*>(unit->filepath()),
+            s_function, const_cast<StringData*>(ar->func()->name()),
+            s_line, lineNumber
+          );
+        } else {
+          return make_map_array(
+            s_file, const_cast<StringData*>(unit->filepath()),
+            s_function, const_cast<StringData*>(ar->func()->name()),
+            s_line, lineNumber
+          );
+        }
       }
     }
     ar = getPrevVMState(ar, &pc);
   }
-  return result;
+  return empty_array();
 }
 
 ActRec* ExecutionContext::getFrameAtDepth(int frame) {
@@ -1467,7 +1481,7 @@ bool ExecutionContext::setHeaderCallback(const Variant& callback) {
 void ExecutionContext::invokeUnit(TypedValue* retval, const Unit* unit) {
   checkHHConfig(unit);
 
-  auto const func = unit->getMain();
+  auto const func = unit->getMain(nullptr);
   invokeFunc(retval, func, init_null_variant, nullptr, nullptr,
              m_globalVarEnv, nullptr, InvokePseudoMain);
 }
@@ -1570,7 +1584,7 @@ StaticString
 void ExecutionContext::requestInit() {
   assert(SystemLib::s_unit);
 
-  EnvConstants::requestInit(req::make_raw<EnvConstants>());
+  initBlackHole();
   VarEnv::createGlobal();
   vmStack().requestInit();
   ObjectData::resetMaxId();
@@ -1632,11 +1646,11 @@ void ExecutionContext::requestExit() {
 
   manageAPCHandle();
   syncGdbState();
-  jit::mcg->requestExit();
   vmStack().requestExit();
   profileRequestEnd();
   EventHook::Disable();
-  EnvConstants::requestExit();
+  zend_rand_unseed();
+  clearBlackHole();
   tl_miter_table.clear();
 
   if (m_globalVarEnv) {
@@ -1677,7 +1691,7 @@ void ExecutionContext::invokeFuncImpl(TypedValue* retptr, const Func* f,
   // If `f' is a method, either `thiz' or `cls' must be non-null.
   assert(IMPLIES(f->preClass(), thiz || cls));
   // If `f' is a static method, thiz must be null.
-  assert(IMPLIES(f->isStatic(), f->isClosureBody() || !thiz));
+  assert(IMPLIES(f->isStaticInProlog(), !thiz));
   // invName should only be non-null if we are calling __call or __callStatic.
   assert(IMPLIES(invName, f->name()->isame(s___call.get()) ||
                           f->name()->isame(s___callStatic.get())));
@@ -2084,7 +2098,7 @@ const Variant& ExecutionContext::getEvaledArg(const StringData* val,
   assert(unit != nullptr);
   Variant v;
   // Default arg values are not currently allowed to depend on class context.
-  g_context->invokeFunc((TypedValue*)&v, unit->getMain(),
+  g_context->invokeFunc((TypedValue*)&v, unit->getMain(nullptr),
                           init_null_variant, nullptr, nullptr, nullptr, nullptr,
                           InvokePseudoMain);
   Variant &lv = m_evaledArgs.lvalAt(key, AccessFlags::Key);
@@ -2111,8 +2125,7 @@ void ExecutionContext::clearLastError() {
 }
 
 void ExecutionContext::enqueueAPCHandle(APCHandle* handle, size_t size) {
-  assert(handle->kind() == APCKind::UncountedString ||
-         handle->kind() == APCKind::UncountedArray);
+  assert(handle->isUncounted());
   m_apcHandles.push_back(handle);
   m_apcMemSize += size;
 }
@@ -2227,7 +2240,7 @@ StrNR ExecutionContext::createFunction(const String& args,
   //
   // We have to eval now to emulate this behavior.
   TypedValue retval;
-  invokeFunc(&retval, unit->getMain(), init_null_variant,
+  invokeFunc(&retval, unit->getMain(nullptr), init_null_variant,
              nullptr, nullptr, nullptr, nullptr,
              InvokePseudoMain);
 
@@ -2362,7 +2375,7 @@ void ExecutionContext::enterDebuggerDummyEnv() {
   assert(m_nesting == 0);
   assert(vmStack().count() == 0);
   ActRec* ar = vmStack().allocA();
-  ar->m_func = s_debuggerDummy->getMain();
+  ar->m_func = s_debuggerDummy->getMain(nullptr);
   ar->initNumArgs(0);
   ar->setThis(nullptr);
   ar->setReturnVMExit();

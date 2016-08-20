@@ -17,12 +17,15 @@
 #define incl_HPHP_TARGET_PROFILE_H_
 
 #include "hphp/runtime/base/type-string.h"
+#include "hphp/runtime/base/typed-value.h"
 #include "hphp/runtime/base/static-string-table.h"
 #include "hphp/runtime/base/rds.h"
 
 #include "hphp/runtime/vm/jit/ir-instruction.h"
 #include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/type.h"
+
+#include "hphp/util/type-scan.h"
 
 #include <folly/Optional.h>
 
@@ -34,6 +37,8 @@ struct Class;
 namespace HPHP { namespace jit {
 
 //////////////////////////////////////////////////////////////////////
+
+void addTargetProfileInfo(const rds::Profile& key, const std::string& dbgInfo);
 
 /*
  * This is a utility for creating or querying a 'target profiling'
@@ -63,6 +68,9 @@ namespace HPHP { namespace jit {
  *      gen(ProfMyTarget, RDSHandleData { prof.handle() }, ...);
  *    }
  *
+ * The type must have a toString(...) method returning a std::string with a
+ * single human-readable line representing the state of the profile, taking
+ * the same set of extra arguments as the reduce function passed to 'data'.
  */
 template<class T>
 struct TargetProfile {
@@ -73,6 +81,7 @@ struct TargetProfile {
                 size_t extraSize = 0)
     : m_link(createLink(profTransID, kind, bcOff, name, extraSize))
     , m_kind(kind)
+    , m_key{profTransID, bcOff, name}
   {}
 
   TargetProfile(const TransContext& context,
@@ -109,6 +118,10 @@ struct TargetProfile {
     for (auto& base : rds::allTLBases()) {
       reduce(out, rds::handleToRef<T>(base, hand),
              std::forward<Args>(extraArgs)...);
+    }
+    if (RuntimeOption::EvalDumpTargetProfiles) {
+      addTargetProfileInfo(m_key,
+                           out.toString(std::forward<Args>(extraArgs)...));
     }
   }
 
@@ -169,6 +182,7 @@ private:
 private:
   rds::Link<T> const m_link;
   TransKind const m_kind;
+  rds::Profile const m_key;
 };
 
 //////////////////////////////////////////////////////////////////////
@@ -188,6 +202,8 @@ struct MethProfile {
   MethProfile(const MethProfile& other) :
       m_curMeth(other.m_curMeth),
       m_curClass(other.m_curClass) {}
+
+  std::string toString() const;
 
   const Class* uniqueClass() const {
     return curTag() == Tag::UniqueClass ? rawClass() : nullptr;
@@ -263,6 +279,12 @@ struct ArrayKindProfile {
 
   static const uint32_t kNumProfiledArrayKinds = 4;
 
+  std::string toString() const {
+    std::ostringstream out;
+    for (auto c : count) out << folly::format("{},", c);
+    return out.str();
+  }
+
   static void reduce(ArrayKindProfile& a, const ArrayKindProfile& b) {
     for (uint32_t i = 0; i < kNumProfiledArrayKinds; i++) {
       a.count[i] += b.count[i];
@@ -292,53 +314,6 @@ struct ArrayKindProfile {
 
 //////////////////////////////////////////////////////////////////////
 
-struct StructArrayProfile {
-  int32_t nonStructCount;
-  int32_t numShapesSeen;
-  Shape* shape{nullptr}; // Never access this directly. Use getShape instead.
-
-  bool isEmpty() const {
-    return !numShapesSeen;
-  }
-
-  bool isMonomorphic() const {
-    return numShapesSeen == 1;
-  }
-
-  bool isPolymorphic() const {
-    return numShapesSeen > 1;
-  }
-
-  void makePolymorphic() {
-    numShapesSeen = INT_MAX;
-    shape = nullptr;
-  }
-
-  Shape* getShape() const {
-    assertx(isMonomorphic());
-    return shape;
-  }
-
-  static void reduce(StructArrayProfile& a, const StructArrayProfile& b) {
-    a.nonStructCount += b.nonStructCount;
-    if (a.isPolymorphic()) return;
-
-    if (a.isEmpty()) {
-      a.shape = b.shape;
-      a.numShapesSeen = b.numShapesSeen;
-      return;
-    }
-
-    assertx(a.isMonomorphic());
-    if (b.isEmpty()) return;
-    if (b.isMonomorphic() && a.getShape() == b.getShape()) return;
-    a.makePolymorphic();
-    return;
-  }
-};
-
-//////////////////////////////////////////////////////////////////////
-
 /*
  * TypeProfile keeps the union of all the types observed during profiling.
  */
@@ -346,13 +321,18 @@ struct TypeProfile {
   Type type; // this gets initialized with 0, which is TBottom
   static_assert(Type::Bits::kBottom == 0, "Assuming TBottom is 0");
 
-  void report(Type newType) {
-    type |= newType;
+  std::string toString() const { return type.toString(); }
+
+  void report(TypedValue tv) {
+    type |= typeFromTV(&tv, nullptr);
   }
 
   static void reduce(TypeProfile& a, const TypeProfile& b) {
-    a.report(b.type);
+    a.type |= b.type;
   }
+
+  // In RDS but can't contain pointers to request-allocated data
+  TYPE_SCAN_IGNORE_ALL;
 };
 
 //////////////////////////////////////////////////////////////////////
@@ -361,6 +341,12 @@ struct SwitchProfile {
   SwitchProfile(const SwitchProfile&) = delete;
   SwitchProfile& operator=(const SwitchProfile&) = delete;
 
+  std::string toString(int nCases) const {
+    std::ostringstream out;
+    for (int i = 0; i < nCases; ++i) out << folly::format("{},", cases[i]);
+    return out.str();
+  }
+
   uint32_t cases[0]; // dynamically sized
 
   static void reduce(SwitchProfile& a, const SwitchProfile& b, int nCases) {
@@ -368,6 +354,9 @@ struct SwitchProfile {
       a.cases[i] += b.cases[i];
     }
   }
+
+  // In RDS but can't contain pointers to request-allocated data
+  TYPE_SCAN_IGNORE_ALL;
 };
 
 struct SwitchCaseCount {

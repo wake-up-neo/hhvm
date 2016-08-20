@@ -106,7 +106,7 @@ struct FuncEmitter {
   /*
    * Commit this function to a repo.
    */
-  void commit(RepoTxn& txn) const;
+  void commit(RepoTxn& txn) const; // throws(RepoExc)
 
   /*
    * Instantiate a runtime Func*.
@@ -226,8 +226,6 @@ public:
   /////////////////////////////////////////////////////////////////////////////
   // Complex setters.
   //
-  // XXX: Some of these should be moved to the emitter (esp. the
-  // setBuiltinFunc() methods).
 
   /*
    * Shorthand for setting `line1' and `line2' because typing is hard.
@@ -245,8 +243,7 @@ public:
   /*
    * Set some fields for builtin functions.
    */
-  void setBuiltinFunc(BuiltinFunction bif, BuiltinFunction nif,
-                      Attr attrs_, Offset base_);
+  void setBuiltinFunc(Attr attrs_, Offset base_);
 
 
   /////////////////////////////////////////////////////////////////////////////
@@ -285,14 +282,15 @@ public:
   EHEntVec ehtab;
   FPIEntVec fpitab;
 
-  bool isClosureBody;
-  bool isAsync;
-  bool isGenerator;
-  bool isPairGenerator;
-  bool isMemoizeImpl;
-  bool isMemoizeWrapper;
-  bool hasMemoizeSharedProp;
-  bool containsCalls;
+  bool isClosureBody{false};
+  bool isAsync{false};
+  bool isGenerator{false};
+  bool isPairGenerator{false};
+  bool isMemoizeImpl{false};
+  bool isMemoizeWrapper{false};
+  bool hasMemoizeSharedProp{false};
+  bool containsCalls{false};
+  bool isNative{false};
 
   LowStringPtr docComment;
   LowStringPtr originalFilename;
@@ -312,10 +310,6 @@ private:
   int m_activeUnnamedLocals;
   Id m_numIterators;
   Id m_nextFreeIterator;
-
-  BuiltinFunction m_builtinFuncPtr;
-  BuiltinFunction m_nativeFuncPtr;
-
   bool m_ehTabSorted;
 };
 
@@ -330,18 +324,18 @@ struct FuncRepoProxy : public RepoProxy {
 
   explicit FuncRepoProxy(Repo& repo);
   ~FuncRepoProxy();
-  void createSchema(int repoId, RepoTxn& txn);
+  void createSchema(int repoId, RepoTxn& txn); // throws(RepoExc)
 
   struct InsertFuncStmt : public RepoProxy::Stmt {
     InsertFuncStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
     void insert(const FuncEmitter& fe,
                 RepoTxn& txn, int64_t unitSn, int funcSn, Id preClassId,
-                const StringData* name, bool top);
+                const StringData* name, bool top); // throws(RepoExc)
   };
 
   struct GetFuncsStmt : public RepoProxy::Stmt {
     GetFuncsStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
-    void get(UnitEmitter& ue);
+    void get(UnitEmitter& ue); // throws(RepoExc)
   };
 
   InsertFuncStmt insertFunc[RepoIdCount];

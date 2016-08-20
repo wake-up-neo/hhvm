@@ -131,18 +131,19 @@ AliasClass pointee(
       auto base = sinst->src(0);
       auto key  = sinst->src(1);
 
-      always_assert(base->isA(TArr));
+      always_assert(base->isA(TArrLike));
 
       if (key->isA(TInt)) {
         if (key->hasConstVal()) return AElemI { base, key->intVal() };
         return AElemIAny;
       }
       if (key->hasConstVal(TStr)) {
+        assertx(!base->isA(TVec));
         int64_t n;
         auto const arrTy = base->type();
-        auto const dictTy = Type::Array(ArrayData::kDictKind);
-        if (!(arrTy <= dictTy) && key->strVal()->isStrictlyInteger(n)) {
-          if (arrTy.maybe(dictTy)) return AElemAny;
+        if (!arrTy.subtypeOfAny(TDict, TKeyset) &&
+            key->strVal()->isStrictlyInteger(n)) {
+          if (arrTy.maybe(TDict) || arrTy.maybe(TKeyset)) return AElemAny;
           return AElemI { base, n };
         }
         return AElemS { base, key->strVal() };
@@ -151,18 +152,21 @@ AliasClass pointee(
     };
 
     if (typeNR <= TPtrToElemGen) {
-      if (sinst->is(LdPackedArrayElemAddr)) return elem();
+      if (sinst->is(LdPackedArrayElemAddr, LdVecElemAddr)) return elem();
       return AElemAny;
     }
 
     // The result of ElemArray{,W,U} is either the address of an array element,
     // or &init_null_variant().
     if (typeNR <= TPtrToMembGen) {
-      if (sinst->is(ElemArray, ElemArrayW)) return elem();
+      if (sinst->is(ElemArray, ElemArrayW, ElemDict,
+                    ElemDictW, ElemKeyset, ElemKeysetW)) return elem();
 
       // Takes a PtrToGen as its first operand, so we can't easily grab an array
       // base.
-      if (sinst->is(ElemArrayU)) return AElemAny;
+      if (sinst->is(ElemArrayU, ElemVecU, ElemDictU, ElemKeysetU)) {
+        return AElemAny;
+      }
 
       // These instructions can only get at tvRef when given it as a
       // src. Otherwise they can only return pointers to properties or
@@ -259,6 +263,9 @@ GeneralEffects may_reenter(const IRInstruction& inst, GeneralEffects x) {
   auto const may_reenter_is_ok =
     (inst.taken() && inst.taken()->isCatch()) ||
     inst.is(DecRef,
+            ConvArrToKeyset,
+            ConvVecToKeyset,
+            ConvDictToKeyset,
             ReleaseVVAndSkip,
             CIterFree,
             MIterFree,
@@ -875,7 +882,6 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
   case IsTypeMem:
   case CheckTypeMem:
   case CheckInitMem:
-  case DbgAssertPtr:
     return may_load_store(pointee(inst.src(0)), AEmpty);
 
   //////////////////////////////////////////////////////////////////////
@@ -898,25 +904,44 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
   //////////////////////////////////////////////////////////////////////
   // Array loads and stores
 
-  case InitPackedArray:
+  case InitPackedLayoutArray:
     return PureStore {
-      AElemI { inst.src(0), inst.extra<InitPackedArray>()->index },
+      AElemI { inst.src(0), inst.extra<InitPackedLayoutArray>()->index },
       inst.src(1)
     };
 
-  case LdStructArrayElem:
-    assertx(inst.src(1)->strVal()->isStatic());
-    return PureLoad { AElemS { inst.src(0), inst.src(1)->strVal() } };
+  case LdVecElem: {
+    auto const base = inst.src(0);
+    auto const key  = inst.src(1);
+    always_assert(base->isA(TVec));
+    always_assert(key->isA(TInt));
+    return PureLoad {
+      key->hasConstVal() ? AElemI { base, key->intVal() } : AElemIAny
+    };
+  }
 
-  case InitPackedArrayLoop:
+  case InitPackedLayoutArrayLoop:
     {
-      auto const extra = inst.extra<InitPackedArrayLoop>();
+      auto const extra = inst.extra<InitPackedLayoutArrayLoop>();
       auto const stack_in = AStack {
         inst.src(1),
         extra->offset + static_cast<int32_t>(extra->size) - 1,
         static_cast<int32_t>(extra->size)
       };
       return may_load_store_move(stack_in, AElemIAny, stack_in);
+    }
+
+  case NewKeysetArray:
+    {
+      // NewKeysetArray is reading elements from the stack, but writes to a
+      // completely new array, so we can treat the store set as empty.
+      auto const extra = inst.extra<NewKeysetArray>();
+      auto const stack_in = AStack {
+        inst.src(0),
+        extra->offset + static_cast<int32_t>(extra->size) - 1,
+        static_cast<int32_t>(extra->size)
+      };
+      return may_raise(inst, may_load_store_move(stack_in, AEmpty, stack_in));
     }
 
   case NewStructArray:
@@ -932,21 +957,65 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
       return may_load_store_move(stack_in, AEmpty, stack_in);
     }
 
+  case MixedArrayGetK:
+  case DictGetK:
+  case KeysetGetK: {
+    auto const base = inst.src(0);
+    auto const key  = inst.src(1);
+    always_assert(key->isA(TInt | TStr));
+    if (key->isA(TInt)) {
+      return PureLoad {
+        key->hasConstVal() ? AElemI { base, key->intVal() } : AElemIAny
+      };
+    }
+    if (key->isA(TStr)) {
+      return PureLoad {
+        key->hasConstVal() ? AElemS { base, key->strVal() } : AElemSAny
+      };
+    }
+    return PureLoad { AElemAny };
+  }
+
+  case ElemMixedArrayK:
+  case ElemDictK:
+  case ElemKeysetK:
+    return IrrelevantEffects {};
+
   case ProfileMixedArrayOffset:
   case CheckMixedArrayOffset:
   case CheckArrayCOW:
+  case ProfileDictOffset:
+  case ProfileKeysetOffset:
+  case CheckDictOffset:
+  case CheckKeysetOffset:
     return may_load_store(AHeapAny, AEmpty);
 
-  case ElemMixedArrayK:
-  case MixedArrayGetK:
+  case ArrayIsset:
+  case DictGetQuiet:
+  case DictIsset:
+  case DictEmptyElem:
+  case DictIdx:
+  case KeysetGetQuiet:
+  case KeysetIsset:
+  case KeysetEmptyElem:
+  case KeysetIdx:
+  case AKExistsArr:
+  case AKExistsDict:
+  case AKExistsKeyset:
+    return may_load_store(AElemAny, AEmpty);
+
+  case SameVec:
+  case NSameVec:
+  case SameDict:
+  case NSameDict:
+  case EqKeyset:
+  case NeqKeyset:
     return may_load_store(AElemAny, AEmpty);
 
   case ArrayIdx:
     return may_load_store(AElemAny | ARefAny, AEmpty);
   case MapIdx:
     return may_load_store(AHeapAny, AEmpty);
-  case AKExistsArr:
-    return may_load_store(AElemAny, AEmpty);
   case AKExistsObj:
     return may_reenter(inst, may_load_store(AHeapAny, AHeapAny));
 
@@ -974,6 +1043,8 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
   case VGetElem:
   case SetElem:
   case SetNewElemArray:
+  case SetNewElemVec:
+  case SetNewElemKeyset:
   case SetNewElem:
   case SetOpElem:
   case SetWithRefElem:
@@ -983,6 +1054,11 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
   case IncDecElem:
   case ElemArrayD:
   case ElemArrayU:
+  case ElemVecD:
+  case ElemVecU:
+  case ElemDictD:
+  case ElemDictU:
+  case ElemKeysetU:
   case VGetProp:
   case UnsetProp:
   case IncDecProp:
@@ -998,7 +1074,7 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
 
   /*
    * Intermediate minstr operations. In addition to a base pointer like the
-   * operations agove, these may take a pointer to MInstrState::tvRef, which
+   * operations above, these may take a pointer to MInstrState::tvRef, which
    * they may store to (but not read from).
    */
   case ElemX:
@@ -1163,6 +1239,7 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
   case LdPropAddr:
   case LdStkAddr:
   case LdPackedArrayElemAddr:
+  case LdVecElemAddr:
   case LteBool:
   case LteDbl:
   case LteInt:
@@ -1206,7 +1283,6 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
   case Halt:
   case ConvBoolToInt:
   case ConvBoolToDbl:
-  case DbgAssertType:
   case DbgAssertFunc:
   case DefConst:
   case LdLocAddr:
@@ -1226,6 +1302,7 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
   case LdStaticLoc:
   case LdClsCns:
   case CheckCtxThis:
+  case CheckFuncStatic:
   case CastCtxThis:
   case LdARNumParams:
   case LdRDSAddr:
@@ -1253,7 +1330,6 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
   case DecRefNZ:
   case AFWHBlockOn:
   case IncRef:
-  case IncRefCtx:
   case LdClosureCtx:
   case StClosureCtx:
   case StClosureArg:
@@ -1263,6 +1339,7 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
   case ConvStrToInt:
   case ConvResToInt:
   case OrdStr:
+  case ChrInt:
   case CreateSSWH:
   case NewLikeArray:
   case CheckRefs:
@@ -1296,6 +1373,9 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
   case ConvBoolToStr:
   case CountArray:
   case CountArrayFast:
+  case CountVec:
+  case CountDict:
+  case CountKeyset:
   case StAsyncArResult:
   case StAsyncArResume:
   case StAsyncArSucceeded:
@@ -1304,6 +1384,9 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
   case NInstanceOfBitmask:
   case InstanceOfIface:
   case InterfaceSupportsArr:
+  case InterfaceSupportsVec:
+  case InterfaceSupportsDict:
+  case InterfaceSupportsKeyset:
   case InterfaceSupportsDbl:
   case InterfaceSupportsInt:
   case InterfaceSupportsStr:
@@ -1346,12 +1429,9 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
   case ConvStrToBool:
   case ConvStrToDbl:
   case ConvResToDbl:
-  case ConvVecToArr:
-  case ConvDictToArr:
   case EagerSyncVMRegs:
   case ExtendsClass:
   case LdUnwinderValue:
-  case GetCtxFwdCall:
   case LdCtx:
   case LdCctx:
   case LdClosure:
@@ -1372,8 +1452,8 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
   case LdClsMethodCacheCls:
   case LdClsMethodCacheFunc:
   case LdClsMethodFCacheFunc:
+  case FwdCtxStaticCall:
   case ProfileArrayKind:
-  case ProfileStructArray:
   case ProfileSwitchDest:
   case LdFuncCachedSafe:
   case LdFuncNumParams:
@@ -1389,7 +1469,6 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
   case LdWHResult:
   case LdWHState:
   case LookupClsRDS:
-  case GetCtxFwdCallDyn:
   case DbgTraceCall:
   case InitCtx:
   case PackMagicArgs:
@@ -1425,8 +1504,11 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
       // Need to add maybeRef to the `store' set. See comments about
       // `GeneralEffects' in memory-effects.h.
       auto const effect = may_load_store(maybeRef, maybeRef);
-      if (inst.src(0)->type().maybe(TArr | TObj | TBoxedArr | TBoxedObj)) {
-        // Could re-enter to run a destructor.
+      if (src->type().maybe(TArr | TVec | TDict | TObj | TRes |
+                            TBoxedArr | TBoxedVec | TBoxedDict |
+                            TBoxedObj | TBoxedRes)) {
+        // Could re-enter to run a destructor. Keysets are exempt because they
+        // can only contain strings or integers.
         return may_reenter(inst, effect);
       }
       return effect;
@@ -1478,6 +1560,7 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
   case RaiseError:
   case RaiseNotice:
   case RaiseWarning:
+  case RaiseMissingThis:
   case ConvCellToStr:
   case ConvObjToStr:
   case Count:      // re-enters on CountableClass
@@ -1498,6 +1581,15 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
   case EqArr:
   case NeqArr:
   case CmpArr:
+  case GtVec:
+  case GteVec:
+  case LtVec:
+  case LteVec:
+  case EqVec:
+  case NeqVec:
+  case CmpVec:
+  case EqDict:
+  case NeqDict:
   case DecodeCufIter:
   case ConvCellToArr:  // decrefs src, may read obj props
   case ConvCellToObj:  // decrefs src
@@ -1523,12 +1615,23 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
   case AddElemIntKey:  // decrefs value
   case AddElemStrKey:  // decrefs value
   case AddNewElem:     // decrefs value
+  case DictAddElemIntKey:  // decrefs value
+  case DictAddElemStrKey:  // decrefs value
   case ArrayGet:       // kVPackedKind warnings
-  case ArrayIsset:     // kVPackedKind warnings
   case ArraySet:       // kVPackedKind warnings
   case ArraySetRef:    // kVPackedKind warnings
+  case DictGet:
+  case KeysetGet:
+  case VecSet:
+  case VecSetRef:
+  case DictSet:
+  case DictSetRef:
   case ElemArray:
   case ElemArrayW:
+  case ElemDict:
+  case ElemDictW:
+  case ElemKeyset:
+  case ElemKeysetW:
   case GetMemoKey:     // re-enters to call getInstanceKey() in some cases
   case LdClsCtor:
   case ConcatStrStr:
@@ -1552,12 +1655,33 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
   case ConcatStr3:
   case ConcatStr4:
   case ConvCellToDbl:
+  case ConvArrToVec:
+  case ConvArrToDict:
+  case ConvObjToVec:
+  case ConvObjToDict:
+  case ConvObjToKeyset:
   case ThrowOutOfBounds:
+  case ThrowInvalidArrayKey:
   case ThrowInvalidOperation:
   case ThrowArithmeticError:
   case ThrowDivisionByZeroError:
   case SetOpCell:
     return may_raise(inst, may_load_store(AHeapAny, AHeapAny));
+
+  case ConvArrToKeyset: // Decrefs input values
+  case ConvVecToKeyset:
+  case ConvDictToKeyset:
+    return may_reenter(inst,
+                       may_load_store(AElemAny, AEmpty));
+
+  case ConvVecToArr:
+  case ConvDictToArr:
+  case ConvKeysetToArr:
+  case ConvDictToVec:
+  case ConvKeysetToVec:
+  case ConvVecToDict:
+  case ConvKeysetToDict:
+    return may_load_store(AElemAny, AEmpty);
 
   case ReleaseVVAndSkip:  // can decref ExtraArgs or VarEnv and Locals
     return may_reenter(inst,

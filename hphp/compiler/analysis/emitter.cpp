@@ -119,7 +119,6 @@
 #include "hphp/runtime/base/packed-array.h"
 #include "hphp/runtime/base/stats.h"
 #include "hphp/runtime/base/static-string-table.h"
-#include "hphp/runtime/base/struct-array.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/zend-string.h"
 #include "hphp/runtime/base/zend-functions.h"
@@ -465,16 +464,20 @@ public:
 };
 
 struct Label {
+  enum class NoEntryNopFlag {};
   Label() : m_off(InvalidAbsoluteOffset) {}
   explicit Label(Emitter& e) : m_off(InvalidAbsoluteOffset) {
-    set(e);
+    set(e, true);
+  }
+  Label(Emitter& e, NoEntryNopFlag) : m_off(InvalidAbsoluteOffset) {
+    set(e, false);
   }
   Offset getAbsoluteOffset() const { return m_off; }
   // Sets the Label to the bytecode offset of given by e,
   // fixes up any instructions that have already been
   // emitted that reference this Label, and fixes up the
   // EmitterVisitor's jump target info
-  void set(Emitter& e);
+  void set(Emitter& e, bool emitNopAtEntry = true);
   // If a Label is has not been set, it is the Emitter's
   // resposibility to call bind on the Label each time it
   // prepares to emit an instruction that uses the Label
@@ -972,8 +975,7 @@ public:
   void postponeCinit(InterfaceStatementPtr m, FuncEmitter* fe, NonScalarVec* v);
   void emitPostponedMeths();
   void bindUserAttributes(MethodStatementPtr meth,
-                          FuncEmitter *fe,
-                          bool &allowOverride);
+                          FuncEmitter *fe);
   void bindNativeFunc(MethodStatementPtr meth, FuncEmitter *fe);
   int32_t emitNativeOpCodeImpl(MethodStatementPtr meth,
                                const char* funcName,
@@ -1982,14 +1984,21 @@ void SymbolicStack::popFDesc() {
   m_fdescCount -= kNumActRecCells;
 }
 
-void Label::set(Emitter& e) {
+void Label::set(Emitter& e, bool emitNopAtEntry /* = true */) {
+  auto const off = e.getUnitEmitter().bcPos();
   if (isSet()) {
     InvariantViolation(
       "Label::set was called more than once on the same "
       "Label; originally set to %d; now %d",
       m_off,
-      e.getUnitEmitter().bcPos());
+      off);
     return;
+  }
+  EmitterVisitor& ev = e.getEmitterVisitor();
+  if (emitNopAtEntry && ev.getFuncEmitter()->base == off) {
+    // Make sure there are no jumps to the base of functions.
+    // The JIT relies on this in some analysis.
+    e.getUnitEmitter().emitOp(OpEntryNop);
   }
   m_off = e.getUnitEmitter().bcPos();
   // Fix up any forward jumps that reference to this Label
@@ -1997,7 +2006,6 @@ void Label::set(Emitter& e) {
       m_emittedOffs.begin(); it != m_emittedOffs.end(); ++it) {
     e.getUnitEmitter().emitInt32(m_off - it->first, it->second);
   }
-  EmitterVisitor& ev = e.getEmitterVisitor();
   if (!m_emittedOffs.empty()) {
     // If there were forward jumps that referenced this Label,
     // compare the the eval stack from the first foward jump we
@@ -3730,7 +3738,7 @@ void EmitterVisitor::visitKids(ConstructPtr c) {
   }
 }
 
-template<typename ArrayType, class Fun>
+template<uint32_t MaxMakeSize, class Fun>
 bool checkKeys(ExpressionPtr init_expr, bool check_size, Fun fun) {
   if (init_expr->getKindOf() != Expression::KindOfExpressionList) {
     return false;
@@ -3738,7 +3746,7 @@ bool checkKeys(ExpressionPtr init_expr, bool check_size, Fun fun) {
 
   auto el = static_pointer_cast<ExpressionList>(init_expr);
   int n = el->getCount();
-  if (n < 1 || (check_size && n > ArrayType::MaxMakeSize)) {
+  if (n < 1 || (check_size && n > MaxMakeSize)) {
     return false;
   }
 
@@ -3765,7 +3773,7 @@ bool checkKeys(ExpressionPtr init_expr, bool check_size, Fun fun) {
 bool isPackedInit(ExpressionPtr init_expr, int* size,
                   bool check_size = true) {
   *size = 0;
-  return checkKeys<MixedArray>(init_expr, check_size,
+  return checkKeys<MixedArray::MaxMakeSize>(init_expr, check_size,
     [&](ArrayPairExpressionPtr ap) {
       Variant key;
 
@@ -3802,7 +3810,7 @@ bool isPackedInit(ExpressionPtr init_expr, int* size,
  * all static strings with no duplicates.
  */
 bool isStructInit(ExpressionPtr init_expr, std::vector<std::string>& keys) {
-  return checkKeys<StructArray>(init_expr, true,
+  return checkKeys<MixedArray::MaxStructMakeSize>(init_expr, true,
     [&](ArrayPairExpressionPtr ap) {
       auto key = ap->getName();
       if (key == nullptr || !key->isLiteralString()) return false;
@@ -4729,13 +4737,8 @@ bool EmitterVisitor::visit(ConstructPtr node) {
           // Can't resolve this to a literal name at emission time
           static const StringData* fname
             = makeStaticString("get_called_class");
-          Offset fpiStart = m_ue.bcPos();
-          e.FPushFuncD(0, fname);
-          {
-            FPIRegionRecorder fpi(this, m_ue, m_evalStack, fpiStart);
-          }
-          e.FCall(0);
-          e.UnboxR();
+          e.FCallBuiltin(0, 0, fname);
+          e.UnboxRNop();
           e.InstanceOf();
         } else if (s != "") {
           ClassScopeRawPtr cls = second->getClassScope();
@@ -5193,22 +5196,53 @@ bool EmitterVisitor::visit(ConstructPtr node) {
         makeStaticString(call->getClassScope()->getScopeName());
       e.String(name);
       return true;
-    } else if (call->isCallToFunction("dict") &&
-               (m_ue.m_isHHFile || Option::EnableHipHopSyntax)) {
-      emitFuncCall(e, call, "HH\\dict", params);
+    } else if (((call->isCallToFunction("dict") &&
+                 (m_ue.m_isHHFile || Option::EnableHipHopSyntax)) ||
+                call->isCallToFunction("HH\\dict")) &&
+               params && params->getCount() == 1) {
+      visit((*params)[0]);
+      emitConvertToCell(e);
+      e.CastDict();
       return true;
-    } else if (call->isCallToFunction("vec") &&
-               (m_ue.m_isHHFile || Option::EnableHipHopSyntax)) {
-      emitFuncCall(e, call, "HH\\vec", params);
+    } else if (((call->isCallToFunction("vec") &&
+                 (m_ue.m_isHHFile || Option::EnableHipHopSyntax)) ||
+                call->isCallToFunction("HH\\vec")) &&
+               params && params->getCount() == 1) {
+      visit((*params)[0]);
+      emitConvertToCell(e);
+      e.CastVec();
       return true;
-    } else if (call->isCallToFunction("is_vec") &&
-               (m_ue.m_isHHFile || Option::EnableHipHopSyntax)) {
-      emitFuncCall(e, call, "HH\\is_vec", params);
+    } else if (((call->isCallToFunction("keyset") &&
+                 (m_ue.m_isHHFile || Option::EnableHipHopSyntax)) ||
+                call->isCallToFunction("HH\\keyset")) &&
+               params && params->getCount() == 1) {
+      visit((*params)[0]);
+      emitConvertToCell(e);
+      e.CastKeyset();
       return true;
-    } else if (emitConstantFuncCall(e, call)) {
+    } else if (((call->isCallToFunction("is_vec") &&
+                 (m_ue.m_isHHFile || Option::EnableHipHopSyntax)) ||
+                call->isCallToFunction("HH\\is_vec")) &&
+               params && params->getCount() == 1) {
+      visit((*call->getParams())[0]);
+      emitIsType(e, IsTypeOp::Vec);
+      return true;
+    } else if (((call->isCallToFunction("is_dict") &&
+                 (m_ue.m_isHHFile || Option::EnableHipHopSyntax)) ||
+                call->isCallToFunction("HH\\is_dict")) &&
+               params && params->getCount() == 1) {
+      visit((*call->getParams())[0]);
+      emitIsType(e, IsTypeOp::Dict);
+      return true;
+    } else if (((call->isCallToFunction("is_keyset") &&
+                 (m_ue.m_isHHFile || Option::EnableHipHopSyntax)) ||
+                call->isCallToFunction("HH\\is_keyset")) &&
+               params && params->getCount() == 1) {
+      visit((*call->getParams())[0]);
+      emitIsType(e, IsTypeOp::Keyset);
       return true;
     }
-#define TYPE_CONVERT_INSTR(what, What)                             \
+  #define TYPE_CONVERT_INSTR(what, What)                             \
     else if (call->isCallToFunction(#what"val") &&                 \
              params && params->getCount() == 1) {                  \
       visit((*params)[0]);                                         \
@@ -5244,8 +5278,11 @@ bool EmitterVisitor::visit(ConstructPtr node) {
   TYPE_CHECK_INSTR(float, Dbl)
   TYPE_CHECK_INSTR(scalar, Scalar)
 #undef TYPE_CHECK_INSTR
-    // fall through
+    else if (emitConstantFuncCall(e, call)) {
+      return true;
+    }
   }
+  // fall through
   case Construct::KindOfDynamicFunctionCall: {
     emitFuncCall(e, static_pointer_cast<FunctionCall>(node));
     return true;
@@ -5917,8 +5954,27 @@ bool EmitterVisitor::emitScalarValue(Emitter& e, const Variant& v) {
       e.String(makeStaticString(v.getStringData()));
       return true;
 
+    case KindOfPersistentVec:
+    case KindOfVec:
+      assert(v.isVecArray());
+      e.Vec(ArrayData::GetScalarArray(v.getArrayData()));
+      return true;
+
+    case KindOfPersistentDict:
+    case KindOfDict:
+      assert(v.isDict());
+      e.Dict(ArrayData::GetScalarArray(v.getArrayData()));
+      return true;
+
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+      assert(v.isKeyset());
+      e.Keyset(ArrayData::GetScalarArray(v.getArrayData()));
+      return true;
+
     case KindOfPersistentArray:
     case KindOfArray:
+      assert(v.isPHPArray());
       e.Array(ArrayData::GetScalarArray(v.getArrayData()));
       return true;
 
@@ -6663,7 +6719,7 @@ bool EmitterVisitor::emitVGet(Emitter& e, bool skipCells) {
     }
   } else {
     auto const stackCount =
-      emitMOp(i, iLast, e, MInstrOpts{MOpFlags::DefineReffy});
+      emitMOp(i, iLast, e, MInstrOpts{MOpFlags::Define});
     e.VGetM(stackCount, symToMemberKey(e, iLast, true /* allowW */));
   }
   return false;
@@ -6832,6 +6888,12 @@ void EmitterVisitor::emitBuiltinDefaultArg(Emitter& e, Variant& v,
           switch (*t) {
             case KindOfPersistentString:
             case KindOfString:
+            case KindOfPersistentVec:
+            case KindOfVec:
+            case KindOfPersistentDict:
+            case KindOfDict:
+            case KindOfPersistentKeyset:
+            case KindOfKeyset:
             case KindOfPersistentArray:
             case KindOfArray:
             case KindOfObject:
@@ -6877,8 +6939,27 @@ void EmitterVisitor::emitBuiltinDefaultArg(Emitter& e, Variant& v,
       return;
     }
 
+    case KindOfPersistentVec:
+    case KindOfVec:
+      assert(v.isVecArray());
+      e.Vec(v.getArrayData());
+      return;
+
+    case KindOfPersistentDict:
+    case KindOfDict:
+      assert(v.isDict());
+      e.Dict(v.getArrayData());
+      return;
+
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+      assert(v.isKeyset());
+      e.Keyset(v.getArrayData());
+      return;
+
     case KindOfPersistentArray:
     case KindOfArray:
+      assert(v.isPHPArray());
       e.Array(v.getArrayData());
       return;
 
@@ -7192,7 +7273,7 @@ void EmitterVisitor::emitBind(Emitter& e) {
     }
   } else {
     auto const stackCount =
-      emitMOp(i, iLast, e, MInstrOpts{MOpFlags::DefineReffy}.rhs());
+      emitMOp(i, iLast, e, MInstrOpts{MOpFlags::Define}.rhs());
     e.BindM(stackCount, symToMemberKey(e, iLast, true /* allowW */));
   }
 }
@@ -7713,12 +7794,19 @@ static Attr buildAttrs(ModifierExpressionPtr mod, bool isRef = false) {
  */
 const StaticString
   s_IsFoldable("__IsFoldable"),
+  s_AllowStatic("__AllowStatic"),
   s_ParamCoerceModeNull("__ParamCoerceModeNull"),
   s_ParamCoerceModeFalse("__ParamCoerceModeFalse");
 
 static void parseUserAttributes(FuncEmitter* fe, Attr& attrs) {
   if (fe->userAttributes.count(s_IsFoldable.get())) {
     attrs = attrs | AttrIsFoldable;
+  }
+  if (!SystemLib::s_inited &&
+      fe->pce() &&
+      !(attrs & AttrStatic) &&
+      !fe->userAttributes.count(s_AllowStatic.get())) {
+    attrs |= AttrRequiresThis;
   }
   if (fe->userAttributes.count(s_ParamCoerceModeNull.get())) {
     attrs = attrs | AttrParamCoerceModeNull;
@@ -7728,14 +7816,10 @@ static void parseUserAttributes(FuncEmitter* fe, Attr& attrs) {
 }
 
 static Attr buildMethodAttrs(MethodStatementPtr meth, FuncEmitter* fe,
-                             bool top, bool allowOverride) {
+                             bool top) {
   FunctionScopePtr funcScope = meth->getFunctionScope();
   ModifierExpressionPtr mod(meth->getModifiers());
   Attr attrs = buildAttrs(mod, meth->isRef());
-
-  if (allowOverride) {
-    attrs = attrs | AttrAllowOverride;
-  }
 
   // if hasCallToGetArgs() or if mayUseVV
   if (meth->hasCallToGetArgs() || funcScope->mayUseVV()) {
@@ -7985,14 +8069,9 @@ void EmitterVisitor::emitPostponedMeths() {
 }
 
 void EmitterVisitor::bindUserAttributes(MethodStatementPtr meth,
-                                        FuncEmitter *fe,
-                                        bool &allowOverride) {
+                                        FuncEmitter *fe) {
   auto const& userAttrs = meth->getFunctionScope()->userAttributes();
   for (auto& attr : userAttrs) {
-    if (attr.first == "__Overridable") {
-      allowOverride = true;
-      continue;
-    }
     const StringData* uaName = makeStaticString(attr.first);
     ExpressionPtr uaValue = attr.second;
     assert(uaValue);
@@ -8016,10 +8095,9 @@ void EmitterVisitor::bindNativeFunc(MethodStatementPtr meth,
   }
 
   auto modifiers = meth->getModifiers();
-  bool allowOverride = false;
-  bindUserAttributes(meth, fe, allowOverride);
+  bindUserAttributes(meth, fe);
 
-  Attr attributes = AttrBuiltin | AttrNative | AttrUnique | AttrPersistent;
+  Attr attributes = AttrBuiltin | AttrUnique | AttrPersistent;
   if (meth->isRef()) {
     attributes = attributes | AttrReference;
   }
@@ -8039,10 +8117,6 @@ void EmitterVisitor::bindNativeFunc(MethodStatementPtr meth,
     } else {
       attributes = attributes | (modifiers->isProtected()
                               ? AttrProtected : AttrPublic);
-    }
-  } else {
-    if (allowOverride) {
-      attributes = attributes | AttrAllowOverride;
     }
   }
   parseUserAttributes(fe, attributes);
@@ -8092,7 +8166,7 @@ void EmitterVisitor::bindNativeFunc(MethodStatementPtr meth,
 
   Emitter e(meth, m_ue, *this);
   FuncFinisher ff(this, e, fe, 0);
-  Label topOfBody(e);
+  Label topOfBody(e, Label::NoEntryNopFlag{});
 
   Offset base = m_ue.bcPos();
 
@@ -8100,7 +8174,7 @@ void EmitterVisitor::bindNativeFunc(MethodStatementPtr meth,
     emitDeprecationWarning(e, meth);
   }
 
-  fe->setBuiltinFunc(bif, nif, attributes, base);
+  fe->setBuiltinFunc(attributes, base);
   fillFuncEmitterParams(fe, meth->getParams(), true);
   if (nativeAttrs & Native::AttrOpCodeImpl) {
     ff.setStackPad(emitNativeOpCodeImpl(meth, funcname, classname, fe));
@@ -8114,8 +8188,7 @@ void EmitterVisitor::emitMethodMetadata(MethodStatementPtr meth,
                                         ClosureUseVarVec* useVars,
                                         bool top) {
   FuncEmitter* fe = m_curFunc;
-  bool allowOverride = false;
-  bindUserAttributes(meth, fe, allowOverride);
+  bindUserAttributes(meth, fe);
 
   // assign ids to parameters (all methods)
   int numParam = meth->getParams() ? meth->getParams()->getCount() : 0;
@@ -8186,7 +8259,7 @@ void EmitterVisitor::emitMethodMetadata(MethodStatementPtr meth,
   fe->init(meth->line0(),
            meth->line1(),
            m_ue.bcPos(),
-           buildMethodAttrs(meth, fe, top, allowOverride),
+           buildMethodAttrs(meth, fe, top),
            top,
            methDoc);
 
@@ -8352,7 +8425,7 @@ void EmitterVisitor::emitMethod(MethodStatementPtr meth) {
 
   Emitter e(meth, m_ue, *this);
   FuncFinisher ff(this, e, m_curFunc);
-  Label topOfBody(e);
+  Label topOfBody(e, Label::NoEntryNopFlag{});
   emitMethodPrologue(e, meth);
 
   if (meth->getFunctionScope()->userAttributes().count(attr_Deprecated)) {
@@ -9004,13 +9077,6 @@ Func* EmitterVisitor::canEmitBuiltinCall(const std::string& name,
   if ((f->returnType() == KindOfDouble) &&
        !Native::allowFCallBuiltinDoubles()) return nullptr;
 
-  if (!(f->attrs() & AttrNative)) {
-    // HNI only enables Variable args via ActRec which in turn
-    // is captured by the f->nativeFuncPtr() == nullptr,
-    // so there's nothing additional to check in the HNI case
-    return nullptr;
-  }
-
   bool allowDoubleArgs = Native::allowFCallBuiltinDoubles();
   auto concrete_params = f->numParams();
   if (variadic) {
@@ -9093,16 +9159,6 @@ void EmitterVisitor::emitFuncCall(Emitter& e, FunctionCallPtr node,
         (!fcallBuiltin->hasVariadicCaptureParam() ||
          numParams != fcallBuiltin->numParams())) {
       fcallBuiltin = nullptr;
-    }
-    if (fcallBuiltin && (fcallBuiltin->attrs() & AttrAllowOverride)) {
-      if (!Option::WholeProgram ||
-          (node->getFuncScope() && node->getFuncScope()->isUserFunction())) {
-        // In non-WholeProgram mode, we can't tell whether the function
-        // will be overridden, so never use FCallBuiltin.
-        // In WholeProgram mode, don't use FCallBuiltin if it *has* been
-        // overridden.
-        fcallBuiltin = nullptr;
-      }
     }
     StringData* nsName = nullptr;
     if (!node->hadBackslash() && !nameOverride) {
@@ -10141,7 +10197,7 @@ void EmitterVisitor::initScalar(TypedValue& tvVal, ExpressionPtr val,
     }
     m_staticColType.push_back(k);
     visit(el);
-    tvVal = make_tv<KindOfPersistentArray>(
+    tvVal = make_array_like_tv(
       ArrayData::GetScalarArray(m_staticArrays.back().get())
     );
     m_staticArrays.pop_back();
@@ -10229,15 +10285,15 @@ void EmitterVisitor::emitArrayInit(Emitter& e, ExpressionListPtr el,
 
   if (el == nullptr) {
     if (isDict) {
-      e.Array(staticEmptyDictArray());
+      e.Dict(staticEmptyDictArray());
       return;
     }
     if (isVec) {
-      e.Array(staticEmptyVecArray());
+      e.Vec(staticEmptyVecArray());
       return;
     }
     if (isKeyset) {
-      e.Array(staticEmptyKeysetArray());
+      e.Keyset(staticEmptyKeysetArray());
       return;
     }
     e.Array(staticEmptyArray());
@@ -10252,6 +10308,22 @@ void EmitterVisitor::emitArrayInit(Emitter& e, ExpressionListPtr el,
     TypedValue tv;
     tvWriteUninit(&tv);
     initScalar(tv, el, kind);
+    if (isDict) {
+      assert(tv.m_data.parr->isDict());
+      e.Dict(tv.m_data.parr);
+      return;
+    }
+    if (isVec) {
+      assert(tv.m_data.parr->isVecArray());
+      e.Vec(tv.m_data.parr);
+      return;
+    }
+    if (isKeyset) {
+      assert(tv.m_data.parr->isKeyset());
+      e.Keyset(tv.m_data.parr);
+      return;
+    }
+    assert(tv.m_data.parr->isPHPArray());
     e.Array(tv.m_data.parr);
     return;
   }
@@ -10284,10 +10356,6 @@ void EmitterVisitor::emitArrayInit(Emitter& e, ExpressionListPtr el,
     return;
   }
 
-  // Don't emit struct arrays for a collection initializers.  HashCollection
-  // can't handle that yet.  Also ignore RuntimeOption::DisableStructArray here.
-  // The VM can handle the NewStructArray bytecode when struct arrays are
-  // disabled.
   auto const allowStruct = !kind;
   std::vector<std::string> keys;
   if (allowStruct && isStructInit(el, keys)) {
@@ -10685,7 +10753,7 @@ static int32_t emitGeneratorMethod(UnitEmitter& ue,
                                    bool isAsync) {
   Attr attrs = (Attr)(AttrBuiltin | AttrPublic);
   fe->init(0, 0, ue.bcPos(), attrs, false, staticEmptyString());
-
+  fe->isNative = false;
   if (!isAsync && RuntimeOption::AutoprimeGenerators) {
     // Create a dummy Emitter, so it's possible to emit jump instructions
     EmitterVisitor ev(ue);
@@ -10952,7 +11020,7 @@ void emitAllHHBC(AnalysisResultPtr&& ar) {
   Compiler::ClearErrors();
 
   JobQueueDispatcher<EmitterWorker>
-    dispatcher(threadCount, true, 0, false, ar.get());
+    dispatcher(threadCount, 0, false, ar.get());
 
   auto setPreloadPriority = [&ar](const std::string& f, int p) {
     auto fs = ar->findFileScope(f);
@@ -11219,6 +11287,7 @@ Unit* hphp_compiler_parse(const char* code, int codeLen, const MD5& md5,
 
       ue.reset(emitHHBCUnitEmitter(ar, fsp, md5));
     }
+    // NOTE: Repo errors are ignored!
     Repo::get().commitUnit(ue.get(), unitOrigin);
 
     auto unit = ue->create();

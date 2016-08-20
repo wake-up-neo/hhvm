@@ -46,19 +46,8 @@ const TimerName s_names[] = {
 };
 
 int64_t getCPUTimeNanos() {
-  if (!RuntimeOption::EvalJitTimer) return -1;
-
-#ifdef CLOCK_THREAD_CPUTIME_ID
-  auto const ns = Vdso::ClockGetTimeNS(CLOCK_THREAD_CPUTIME_ID);
-  if (ns != -1) return ns;
-#endif
-
-#ifdef RUSAGE_THREAD
-  return HPHP::Timer::GetRusageMicros(HPHP::Timer::TotalCPU,
-                                      HPHP::Timer::Thread) * 1000;
-#else
-  return -1;
-#endif
+  return RuntimeOption::EvalJitTimer ? HPHP::Timer::GetThreadCPUTimeNanos() :
+         -1;
 }
 
 //////////////////////////////////////////////////////////////////////

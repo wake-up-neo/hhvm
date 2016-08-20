@@ -61,8 +61,8 @@ bool traceRefusal(const Func* caller, const Func* callee, const char* why) {
 
 std::atomic<bool> hasCalledDisableInliningIntrinsic;
 hphp_hash_set<const StringData*,
-                    string_data_hash,
-                    string_data_isame> forbiddenInlinees;
+              string_data_hash,
+              string_data_isame> forbiddenInlinees;
 SimpleMutex forbiddenInlineesLock;
 
 bool inliningIsForbiddenFor(const Func* callee) {
@@ -170,13 +170,17 @@ bool InliningDecider::canInlineAt(SrcKey callSK, const Func* callee) const {
     return false;
   }
 
-  if (callee->cls()) {
-    if (!classHasPersistentRDS(callee->cls())) {
-      // if the callee's class is not persistent, its still ok
-      // to use it if we're jitting into a method of a subclass
-      auto ctx = callSK.func()->cls();
-      if (!ctx || !ctx->classof(callee->cls())) {
-        return false;
+  if (auto cls = callee->implCls()) {
+    if (!classHasPersistentRDS(cls)) {
+      if (callee->isClosureBody()) {
+        if (callee->unit() != callSK.unit()) return false;
+      } else {
+        // if the callee's class is not persistent, its still ok
+        // to use it if we're jitting into a method of a subclass
+        auto ctx = callSK.func()->cls();
+        if (!ctx || !ctx->classof(cls)) {
+          return false;
+        }
       }
     }
   } else {
@@ -640,6 +644,8 @@ RegionDescPtr selectCalleeRegion(const SrcKey& sk,
   assertx(!fpi.empty());
   auto const ctx = fpi.back().ctxType;
 
+  if (ctx == TBottom) return nullptr;
+
   std::vector<Type> argTypes;
   for (int i = numArgs - 1; i >= 0; --i) {
     // DataTypeGeneric is used because we're just passing the locals into the
@@ -648,6 +654,7 @@ RegionDescPtr selectCalleeRegion(const SrcKey& sk,
 
     // If we don't have sufficient type information to inline the region return
     // early
+    if (type == TBottom) return nullptr;
     if (!(type <= TCell) && !(type <= TBoxedCell) && !(type <= TCls)) {
       return nullptr;
     }

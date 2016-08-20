@@ -59,7 +59,8 @@ let make_next_files genv : Relative_path.t MultiWorker.nextlist =
     (FindUtils.is_php s)
       (** If experimental disabled, we don't parse hhi files under
        * the experimental directory. *)
-      && (genv.local_config.SLC.enable_experimental_tc_features
+      && (TypecheckerOptions.experimental_features
+        (ServerConfig.typechecker_options genv.config)
         || not (FindUtils.has_ancestor s "experimental"))
 
   end in
@@ -199,7 +200,7 @@ let indexing genv =
 
 let parsing genv env ~get_next t =
   let files_info, errorl, failed =
-    Parsing_service.go genv.workers ~get_next in
+    Parsing_service.go genv.workers SMap.empty ~get_next in
   let files_info = Relative_path.Map.union files_info env.files_info in
   let hs = SharedMem.heap_size () in
   Hh_logger.log "Heap size: %d" hs;
@@ -254,12 +255,18 @@ let type_check genv env fast t =
   if ServerArgs.ai_mode genv.options = None || not (is_check_mode genv.options)
   then begin
     let count = Relative_path.Map.cardinal fast in
-    let errorl, failed = Typing_check_service.go genv.workers env.tcopt fast in
+    let errorl, err_info =
+      Typing_check_service.go genv.workers env.tcopt fast in
+    let { Decl_service.
+      errs = failed;
+      lazy_decl_errs = lazy_decl_failed;
+    } = err_info in
     let hs = SharedMem.heap_size () in
     Hh_logger.log "Heap size: %d" hs;
     HackEventLogger.type_check_end count t;
     let env = { env with
       errorl = Errors.merge errorl env.errorl;
+      failed_decl = Relative_path.Set.union env.failed_decl lazy_decl_failed;
       failed_check = failed;
     } in
     env, (Hh_logger.log_duration "Type-check" t)
@@ -330,15 +337,15 @@ let ai_check genv files_info env t =
   | None -> env, t
 
 let print_hash_stats () =
-  let {SharedMem.used_slots; slots} = SharedMem.dep_stats () in
+  let {SharedMem.used_slots; slots; nonempty_slots = _} = SharedMem.dep_stats () in
   let load_factor = float_of_int used_slots /. float_of_int slots in
   Hh_logger.log "Dependency table load factor: %d / %d (%.02f)"
     used_slots slots load_factor;
 
-  let {SharedMem.used_slots; slots} = SharedMem.hash_stats () in
+  let {SharedMem.used_slots; slots; nonempty_slots} = SharedMem.hash_stats () in
   let load_factor = float_of_int used_slots /. float_of_int slots in
-  Hh_logger.log "Hashtable load factor: %d / %d (%.02f)"
-    used_slots slots load_factor;
+  Hh_logger.log "Hashtable load factor: %d / %d (%.02f) with %d nonempty slots"
+    used_slots slots load_factor nonempty_slots;
   ()
 
 let get_build_targets env =
@@ -348,6 +355,10 @@ let get_build_targets env =
 
 (* entry point *)
 let init ?load_mini_script genv =
+  (* Log lazy declarations *)
+  let lazy_decl = genv.local_config.SLC.lazy_decl
+    && Option.is_none (ServerArgs.ai_mode genv.options) in
+  HackEventLogger.set_lazy_decl lazy_decl;
   let env = ServerEnvBuild.make_env genv.config in
   let root = ServerArgs.root genv.options in
 
@@ -375,9 +386,7 @@ let init ?load_mini_script genv =
   let fast = Relative_path.Set.fold env.failed_parsing
     ~f:Relative_path.Map.remove ~init:fast in
   let env, t =
-    if genv.local_config.SLC.lazy_decl
-      && Option.is_none (ServerArgs.ai_mode genv.options)
-    then env, t
+    if lazy_decl then env, t
     else type_decl genv env fast t in
 
   let state = state_future >>= fun f ->

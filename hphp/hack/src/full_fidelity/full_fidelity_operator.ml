@@ -11,10 +11,8 @@
 open Full_fidelity_token_kind
 
 type t =
-| LambdaOperator
 | IndexingOperator
 | FunctionCallOperator
-| YieldOperator
 | AwaitOperator
 | PipeOperator
 | ConditionalQuestionOperator
@@ -88,7 +86,6 @@ let precedence operator =
   (* TODO: variable operator $ *)
   match operator with
 
-  | YieldOperator
   | AssignmentOperator | AdditionAssignmentOperator
   | SubtractionAssignmentOperator | MultiplicationAssignmentOperator
   | DivisionAssignmentOperator | ExponentiationAssignmentOperator
@@ -96,7 +93,7 @@ let precedence operator =
   | AndAssignmentOperator
   | OrAssignmentOperator | ExclusiveOrAssignmentOperator
   | LeftShiftAssignmentOperator | RightShiftAssignmentOperator
-  | LambdaOperator -> 1
+    -> 1
   | PipeOperator -> 2
   | ConditionalQuestionOperator | ConditionalColonOperator -> 3
   | CoalesceOperator -> 4
@@ -131,7 +128,7 @@ let associativity operator =
   | EqualOperator | StrictEqualOperator | NotEqualOperator
   | StrictNotEqualOperator | LessThanOperator | LessThanOrEqualOperator
   | GreaterThanOperator | GreaterThanOrEqualOperator | InstanceofOperator
-  | YieldOperator | NewOperator | CloneOperator | AwaitOperator
+  | NewOperator | CloneOperator | AwaitOperator
     -> NotAssociative
 
   | PipeOperator | ConditionalQuestionOperator | ConditionalColonOperator
@@ -160,13 +157,11 @@ let associativity operator =
   | RemainderAssignmentOperator | AndAssignmentOperator
   | OrAssignmentOperator | ExclusiveOrAssignmentOperator
   | LeftShiftAssignmentOperator | RightShiftAssignmentOperator
-  | LambdaOperator
   (* print *)
     -> RightAssociative
 
 let prefix_unary_from_token token =
   match token with
-  | Yield -> YieldOperator
   | Await -> AwaitOperator
   | Exclamation -> LogicalNotOperator
   | Tilde -> NotOperator
@@ -191,7 +186,6 @@ let is_trailing_operator_token token =
   | Plus
   | Minus
   | Ampersand
-  | EqualEqualGreaterThan
   | BarGreaterThan
   | Question
   | QuestionQuestion
@@ -291,7 +285,6 @@ let is_binary_operator_token token =
   | Plus
   | Minus
   | Ampersand
-  | EqualEqualGreaterThan
   | BarGreaterThan
   | QuestionQuestion
   | BarBar
@@ -348,10 +341,8 @@ let is_assignment operator =
 
 let to_string kind =
   match kind with
-  | LambdaOperator -> "lambda"
   | IndexingOperator -> "indexing"
   | FunctionCallOperator -> "function_call"
-  | YieldOperator -> "yield"
   | AwaitOperator -> "await"
   | PipeOperator -> "pipe"
   | ConditionalQuestionOperator -> "conditional"

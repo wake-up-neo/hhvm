@@ -27,8 +27,6 @@ type config = {
   log_level        : int;
 }
 
-val default_config : config
-
 type handle = private {
   h_fd: Unix.file_descr;
   h_global_size: int;
@@ -44,7 +42,6 @@ exception Dep_table_full
 (*****************************************************************************)
 
 val init: config -> handle
-val init_default: unit -> handle
 
 (*****************************************************************************)
 (* Connect a slave to the shared heap *)
@@ -95,6 +92,7 @@ val heap_size : unit -> int
 (*****************************************************************************)
 
 type table_stats = {
+  nonempty_slots : int;
   used_slots : int;
   slots : int;
 }
@@ -110,6 +108,9 @@ val is_heap_overflow: unit -> bool
 (*****************************************************************************)
 
 val invalidate_caches: unit -> unit
+
+(* Size of value in GC heap *)
+val value_size: Obj.t -> int
 
 (*****************************************************************************)
 (* The signature of a shared memory hashtable.
@@ -184,3 +185,19 @@ module WithCache :
     and type key = UserKeyType.t
     and module KeySet = Set.Make (UserKeyType)
     and module KeyMap = MyMap.Make (UserKeyType)
+
+module type CacheType = sig
+  type key
+  type value
+
+  val add: key -> value -> unit
+  val get: key -> value option
+  val remove: key -> unit
+  val clear: unit -> unit
+end
+
+module LocalCache :
+  functor (UserKeyType : UserKeyType) ->
+  functor (Value : Value.Type) ->
+  CacheType with type key = UserKeyType.t
+    and type value = Value.t

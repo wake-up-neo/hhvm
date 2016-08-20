@@ -15,6 +15,13 @@
    +----------------------------------------------------------------------+
 */
 
+// There are apparently two versions of toupper/tolower: the C version in
+// cctype.h and the C++ version in cctype. Make sure we include this C header
+// first to get the C version, which at least with glibc has much better
+// behaviour in a tight loop due to inlining; this makes strtoupper/strtolower
+// several times faster. See https://github.com/facebook/hhvm/issues/7133
+#include <ctype.h>
+
 #include "hphp/runtime/ext/string/ext_string.h"
 #include "hphp/util/bstring.h"
 #include "hphp/runtime/ext/hash/hash_murmur.h"
@@ -39,6 +46,7 @@
 #include "hphp/zend/html-table.h"
 
 #include <folly/Unicode.h>
+#include <bitset>
 #include <locale.h>
 
 namespace HPHP {
@@ -433,12 +441,22 @@ String HHVM_FUNCTION(ucwords,
   if (str.empty()) {
     return str;
   }
+
   String strcopy(str, CopyString);
   char* string = strcopy.mutableData();
   *string = toupper(*string);
-  char last = ' ';
+
+  if (!delimiters.length()) return strcopy;
+
+  std::bitset<256> delimiters_set;
+  int delimiters_len = delimiters.length();
+  for (int i = 0; i < delimiters_len; i++) {
+    delimiters_set.set(static_cast<uint8_t>(delimiters[i]));
+  }
+
+  uint8_t last = ' ';
   return stringForEach<true>(strcopy.size(), strcopy, [&] (char c) {
-    char ret = delimiters.find(last) >= 0 ? toupper(c) : c;
+    char ret = delimiters_set.test(last) ? toupper(c) : c;
     last = c;
     return ret;
   });
@@ -1473,6 +1491,24 @@ TypedValue HHVM_FUNCTION(strlen,
     case KindOfPersistentString:
     case KindOfString:
       return make_tv<KindOfInt64>(cell->m_data.pstr->size());
+
+    case KindOfPersistentVec:
+    case KindOfVec:
+      raise_warning("strlen() expects parameter 1 to be string, "
+                    "vec given");
+      return make_tv<KindOfNull>();
+
+    case KindOfPersistentDict:
+    case KindOfDict:
+      raise_warning("strlen() expects parameter 1 to be string, "
+                    "dict given");
+      return make_tv<KindOfNull>();
+
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+      raise_warning("strlen() expects parameter 1 to be string, "
+                    "keyset given");
+      return make_tv<KindOfNull>();
 
     case KindOfPersistentArray:
     case KindOfArray:

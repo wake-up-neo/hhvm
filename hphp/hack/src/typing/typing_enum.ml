@@ -23,7 +23,7 @@ module SN = Naming_special_names
 module Phase = Typing_phase
 
 let member_type env member_ce =
-  let default_result = member_ce.ce_type in
+  let lazy default_result = member_ce.ce_type in
   if not member_ce.ce_is_xhp_attr then default_result
   else match default_result with
     | _, Tapply (enum_id, _)->
@@ -143,16 +143,18 @@ let get_constant tc (seen, has_default) = function
     Errors.enum_switch_not_const pos;
     (seen, has_default)
 
-let check_enum_exhaustiveness pos tc caselist =
+let check_enum_exhaustiveness pos tc caselist coming_from_unresolved =
+  (* If this check comes from an enum inside a Tunresolved, then
+     don't punish for having an extra default case *)
   let (seen, has_default) =
     List.fold_left ~f:(get_constant tc) ~init:(SMap.empty, false) caselist in
   let consts = SMap.remove SN.Members.mClass tc.tc_consts in
   let all_cases_handled = SMap.cardinal seen = SMap.cardinal consts in
-  match (all_cases_handled, has_default) with
-    | false, false ->
+  match (all_cases_handled, has_default, coming_from_unresolved) with
+    | false, false, _ ->
       let const_list = SMap.keys consts in
       let unhandled =
         List.filter const_list (function k -> not (SMap.mem k seen)) in
       Errors.enum_switch_nonexhaustive pos unhandled tc.tc_pos
-    | true, true -> Errors.enum_switch_redundant_default pos tc.tc_pos
+    | true, true, false -> Errors.enum_switch_redundant_default pos tc.tc_pos
     | _ -> ()

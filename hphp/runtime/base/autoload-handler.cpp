@@ -96,11 +96,11 @@ bool vm_decode_function_cufiter(const Variant& function,
                                 CufIterPtr& cufIter) {
   ObjectData* obj = nullptr;
   Class* cls = nullptr;
-  CallerFrame cf;
   StringData* invName = nullptr;
   // Don't warn here, let the caller decide what to do if the func is nullptr.
-  const HPHP::Func* func = vm_decode_function(function, cf(), false,
-                                              obj, cls, invName, false);
+  const HPHP::Func* func = vm_decode_function(function, GetCallerFrame(), false,
+                                              obj, cls, invName,
+                                              DecodeFlags::NoWarn);
   if (func == nullptr) {
     return false;
   }
@@ -257,7 +257,7 @@ AutoloadHandler::loadFromMapImpl(const String& clsName,
       if (unit) {
         if (initial) {
           TypedValue retval;
-          ec->invokeFunc(&retval, unit->getMain(), init_null_variant,
+          ec->invokeFunc(&retval, unit->getMain(nullptr), init_null_variant,
                          nullptr, nullptr, nullptr, nullptr,
                          ExecutionContext::InvokePseudoMain);
           tvRefcountedDecRef(&retval);
@@ -496,7 +496,7 @@ bool AutoloadHandler::autoloadClassOrType(const String& clsName) {
         typeRes = loadFromMapPartial(className, s_type, true, cte, typeErr);
         if (typeRes == Success) return true;
       }
-      const Variant& func = m_map.get()->get(s_failure);
+      const Variant func = m_map.get()->get(s_failure);
       // If we reach this point, then for each map either nothing was found
       // or the file we included didn't define a class or type alias with the
       // specified name, and the failure callback (if one exists) did not throw

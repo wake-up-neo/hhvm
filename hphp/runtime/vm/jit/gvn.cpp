@@ -293,6 +293,12 @@ bool supportsGVN(const IRInstruction* inst) {
   case NSameObj:
   case SameArr:
   case NSameArr:
+  case SameVec:
+  case NSameVec:
+  case SameDict:
+  case NSameDict:
+  case EqKeyset:
+  case NeqKeyset:
   case GtRes:
   case GteRes:
   case LtRes:
@@ -309,6 +315,9 @@ bool supportsGVN(const IRInstruction* inst) {
   case InstanceOfBitmask:
   case NInstanceOfBitmask:
   case InterfaceSupportsArr:
+  case InterfaceSupportsVec:
+  case InterfaceSupportsDict:
+  case InterfaceSupportsKeyset:
   case InterfaceSupportsStr:
   case InterfaceSupportsInt:
   case InterfaceSupportsDbl:
@@ -343,9 +352,14 @@ bool supportsGVN(const IRInstruction* inst) {
   case LdAFWHActRec:
   case LdResumableArObj:
   case LdPackedArrayElemAddr:
+  case LdVecElemAddr:
   case OrdStr:
+  case ChrInt:
   case CheckRange:
   case CountArrayFast:
+  case CountVec:
+  case CountDict:
+  case CountKeyset:
     return true;
   default:
     return false;

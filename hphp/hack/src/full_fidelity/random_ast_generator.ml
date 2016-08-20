@@ -7,22 +7,25 @@
  * of patent rights can be found in the PATENTS file in the same directory.
  *
  *)
+module Config = Random_ast_generator_config
+
 module type AstGenerator = sig
   type t
   (* generate a program from the root non-terminal with given number of tokens*)
-  val generate : int -> string
+  val generate : int -> Config.t -> string
+  val generate_with_exact_count : int -> Config.t -> string * int
 end
 
-module Make (G : Hack_grammar_descriptor.Grammar) : AstGenerator = struct
+module Make (G : Hack_grammar_descriptor_helper.Grammar) : AstGenerator = struct
   type t = G.nonterm
 
   module NontermCount = struct
-    type t = G.nonterm * int
+    type t = string * int
     let compare = compare
   end
   module PostfixCount = struct
     (* key is non-terminal, index of rule, offset position in rule, length *)
-    type t = G.nonterm * int * int * int
+    type t = string * int * int * int
     let compare = compare
   end
   module CountMem = Map.Make(NontermCount)
@@ -64,19 +67,24 @@ module Make (G : Hack_grammar_descriptor.Grammar) : AstGenerator = struct
 
   (* get the result of f and memoize the result *)
   let handle_count_mem mem key f =
-    if CountMem.mem key mem.count_mem
-    then (mem, CountMem.find key mem.count_mem)
+    let (nonterm, count) = key in
+    let name = G.nonterm_to_string nonterm in
+    let new_key = (name, count) in
+    if CountMem.mem new_key mem.count_mem
+    then (mem, CountMem.find new_key mem.count_mem)
     else
     let (mem, ret) = f mem key in
-    (put_count key ret mem, ret)
+    (put_count new_key ret mem, ret)
 
   (* get the result of f and memoize the result *)
   let handle_postfix_mem mem key f =
-    if PostfixMem.mem key mem.post_mem
-    then (mem, PostfixMem.find key mem.post_mem)
+    let (nonterm, index, pos, count) = key in
+    let new_key = (G.nonterm_to_string nonterm, index, pos, count) in
+    if PostfixMem.mem new_key mem.post_mem
+    then (mem, PostfixMem.find new_key mem.post_mem)
     else
     let (mem, ret) = f mem key in
-    (put_postfix key ret mem, ret)
+    (put_postfix new_key ret mem, ret)
 
   (* Given nonterminal and expected string length, return a list of values,
    * for element for each rule starting with nonterm, with element valued at
@@ -187,10 +195,28 @@ module Make (G : Hack_grammar_descriptor.Grammar) : AstGenerator = struct
           get_string_postfix mem nonterm rule_index n_pos rest_length in
         String.concat " " [f_string; e_string]
 
+    let gen_from_distribution distribution =
+      let sum = List.fold_left (+.) 0. distribution in
+      let target = Random.float sum in
+      let fold_fun (acc, selected, count) el =
+        if acc -. el <= 0. && selected < 0 then (acc -. el, count, count + 1)
+        else (acc -. el, selected, count + 1)
+      in
+      let (_, choice, _) =
+        List.fold_left fold_fun (target, -1, -1) distribution in
+      choice
+
+    let gen_from_distribution_opt config nonterm_name num_rules =
+      if Config.exists nonterm_name config then
+        let distribution = Config.get nonterm_name config in
+        gen_from_distribution distribution
+      else
+        Random.int (num_rules)
+
     (* Stochastically generate strig: each production randomly chosen from
      * all productions of the current LHS. When a target count is reached, use
      * the dynamic programming generator to generate a short "postfix" *)
-    let rec get_string_simple mem symbol count =
+    let rec get_string_simple mem symbol count config =
       let short_len = 1 in
       match symbol with
       | G.Term x -> (mem, G.to_string x, 1)
@@ -198,29 +224,39 @@ module Make (G : Hack_grammar_descriptor.Grammar) : AstGenerator = struct
         if count <= 0 then
           let rec try_fun mem x len =
             let str = get_string mem x len in
-            if str = "" then try_fun mem x (len + 1) else str
+            if str = "" then try_fun mem x (len + 1) else (str, len)
           in
-          (mem, try_fun mem x short_len, short_len)
+          let (str, len) = try_fun mem x short_len in
+          (mem, str, len)
         else
           let rules = G.grammar x in
           let num_rules = List.length rules in
-          let rule = List.nth rules (Random.int num_rules) in
+          let nonterm_name = G.nonterm_to_string x in
+          let index = gen_from_distribution_opt config nonterm_name num_rules in
+          let rule = List.nth rules index in
           let nonterm_count =
             let count acc x = if is_nonterm x then (acc+1) else acc in
             List.fold_left count 0 rule in
           let fold_fun (mem, str_lst, c) sym =
             let indi_count =
               if is_nonterm sym then count / nonterm_count else 1 in
-            let (mem, str, el_c) = get_string_simple mem sym indi_count in
+            let (mem, str, el_c) =
+              get_string_simple mem sym indi_count config in
             (mem, str :: str_lst, c + el_c)
           in
           let (mem, strings, generated) =
             List.fold_left fold_fun (mem, [], 0) rule in
           mem, String.concat " " (List.rev strings), generated
 
-  let generate count =
+  let generate_all count config =
     let memory = {count_mem = CountMem.empty; post_mem = PostfixMem.empty} in
-    (* let program = get_string memory G.start count in *)
-    let (_, program, _) = get_string_simple memory (G.NonTerm G.start) count in
+    get_string_simple memory (G.NonTerm G.start) count config
+
+  let generate count config =
+    let (_, program, _) = generate_all count config in
     Printf.sprintf "<?hh\n%s" program
+
+  let generate_with_exact_count count config =
+    let (_, program, real_count) = generate_all count config in
+    Printf.sprintf "<?hh\n%s" program, real_count
 end

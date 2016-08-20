@@ -210,8 +210,10 @@ std::vector<std::unique_ptr<UnitEmitter>> load_input() {
   SCOPE_EXIT { Repo::shutdown(); };
 
   if (Repo::get().global().UsedHHBBC) {
-    throw std::runtime_error("This hhbc repo has already been "
-      "optimized by hhbbc");
+    throw std::runtime_error(
+      "This hhbc repo has already been optimized by hhbbc.\n"
+      "Re-running hhbbc is known to be buggy, and will corrupt your repo."
+    );
   }
 
   return parallel::map(
@@ -242,6 +244,7 @@ void write_output(std::vector<std::unique_ptr<UnitEmitter>> ues,
   gd.AutoprimeGenerators      = RuntimeOption::AutoprimeGenerators;
 
   gd.arrayTypeTable.repopulate(*arrTable);
+  // NOTE: There's no way to tell if saveGlobalData() fails for some reason.
   Repo::get().saveGlobalData(gd);
 }
 
@@ -298,7 +301,7 @@ int main(int argc, char** argv) try {
   Repo::shutdown();
 
   Trace::BumpRelease bumper(Trace::hhbbc_time, -1, logging);
-  compile_repo();
+  compile_repo(); // NOTE: errors ignored
   return 0;
 }
 

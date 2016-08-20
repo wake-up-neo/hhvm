@@ -290,7 +290,13 @@ private:
   SSATmp* preOptimizeAssertLoc(IRInstruction*);
   SSATmp* preOptimizeAssertStk(IRInstruction*);
   SSATmp* preOptimizeCheckCtxThis(IRInstruction*);
-  SSATmp* preOptimizeLdCtx(IRInstruction*);
+  SSATmp* preOptimizeLdCtxHelper(IRInstruction*);
+  SSATmp* preOptimizeLdCtx(IRInstruction* i) {
+    return preOptimizeLdCtxHelper(i);
+  }
+  SSATmp* preOptimizeLdCctx(IRInstruction* i) {
+    return preOptimizeLdCtxHelper(i);
+  }
   SSATmp* preOptimizeLdLocation(IRInstruction*, Location);
   SSATmp* preOptimizeLdLoc(IRInstruction*);
   SSATmp* preOptimizeLdStk(IRInstruction*);
@@ -376,6 +382,9 @@ struct BlockPusher {
 ///////////////////////////////////////////////////////////////////////////////
 
 bool typeMightRelax(const SSATmp* tmp);
+
+bool dictElemMightRelax(const IRInstruction* inst);
+bool keysetElemMightRelax(const IRInstruction* inst);
 
 ///////////////////////////////////////////////////////////////////////////////
 

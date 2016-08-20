@@ -425,11 +425,46 @@ To array conversions:
 
 | ConvStrToArr,                 D(Arr), S(Str),                      PRc|CRc
 
-| ConvVecToArr,                 D(Arr), S(Arr),                      PRc|CRc
+| ConvVecToArr,                 D(Arr), S(Vec),                      PRc|CRc
 
-| ConvDictToArr,                D(Arr), S(Arr),                      PRc|CRc
+| ConvDictToArr,                D(Arr), S(Dict),                     PRc|CRc
+
+| ConvKeysetToArr,              D(Arr), S(Keyset),                   PRc|CRc
 
 | ConvCellToArr,                D(Arr), S(Cell),                  Er|PRc|CRc
+
+
+To vec conversions:
+
+| ConvArrToVec,                 D(Vec), S(Arr),                   Er|PRc|CRc
+
+| ConvDictToVec,                D(Vec), S(Dict),                     PRc|CRc
+
+| ConvKeysetToVec,              D(Vec), S(Keyset),                   PRc|CRc
+
+| ConvObjToVec,                 D(Vec), S(Obj),                   Er|PRc|CRc
+
+
+To dict conversions:
+
+| ConvArrToDict,                D(Dict), S(Arr),                  Er|PRc|CRc
+
+| ConvVecToDict,                D(Dict), S(Vec),                     PRc|CRc
+
+| ConvKeysetToDict,             D(Dict), S(Keyset),                  PRc|CRc
+
+| ConvObjToDict,                D(Dict), S(Obj),                  Er|PRc|CRc
+
+
+To keyset conversions:
+
+| ConvArrToKeyset,              D(Keyset), S(Arr),                   PRc|CRc
+
+| ConvVecToKeyset,              D(Keyset), S(Vec),                   PRc|CRc
+
+| ConvDictToKeyset,             D(Keyset), S(Dict),                  PRc|CRc
+
+| ConvObjToKeyset,              D(Keyset), S(Obj),                Er|PRc|CRc
 
 
 To bool conversions:
@@ -445,7 +480,6 @@ To bool conversions:
 | ConvObjToBool,               D(Bool), S(Obj),                           NF
 
 | ConvCellToBool,              D(Bool), S(Cell),                          NF
-
 
 To double conversions:
 
@@ -519,6 +553,11 @@ To string conversions:
   Convert the character at position S1 in base string S0 to an unsigned
   integer.  Raises a notice if the position is out of bounds.
   Intended as an optimization for ord($str[$idx]).
+
+| ChrInt,                      D(StaticStr), S(Int),                      NF
+
+  Convert the integer S0 to a the one character string with ascii code
+  S0 & 255.
 
 4. Boolean predicates
 
@@ -651,6 +690,48 @@ To string conversions:
   SameArr and NSameArr may re-enter the VM and therefore may throw
   exceptions. SameArr and NSameArr never re-enter or throw.
 
+| GtVec,                       D(Bool), S(Vec) S(Vec),                    Er
+
+| GteVec,                      D(Bool), S(Vec) S(Vec),                    Er
+
+| LtVec,                       D(Bool), S(Vec) S(Vec),                    Er
+
+| LteVec,                      D(Bool), S(Vec) S(Vec),                    Er
+
+| EqVec,                       D(Bool), S(Vec) S(Vec),                    Er
+
+| NeqVec,                      D(Bool), S(Vec) S(Vec),                    Er
+
+| SameVec,                     D(Bool), S(Vec) S(Vec),                    NF
+
+| NSameVec,                    D(Bool), S(Vec) S(Vec),                    NF
+
+| CmpVec,                      D(Int),  S(Vec) S(Vec),                    Er
+
+  Perform comparison of vecs. All versions except for SameVec and NSameVec may
+  re-enter the VM and therefore may throw exceptions. SameVec and NSameVec
+  never re-enter or throw.
+
+| EqDict,                      D(Bool), S(Dict) S(Dict),                  Er
+
+| NeqDict,                     D(Bool), S(Dict) S(Dict),                  Er
+
+| SameDict,                    D(Bool), S(Dict) S(Dict),                  NF
+
+| NSameDict,                   D(Bool), S(Dict) S(Dict),                  NF
+
+  Perform comparison of dicts. EqDict and NeqDict may re-enter the VM and
+  therefore may throw exceptions. SameDict and NSameDict never re-enter or
+  throw. Relational comparisons for dicts are not supported.
+
+| EqKeyset,                    D(Bool), S(Keyset) S(Keyset),              NF
+
+| NeqKeyset,                   D(Bool), S(Keyset) S(Keyset),              NF
+
+  Perform comparison of keysets. As keysets can only contain ints and strings,
+  comparisons never re-enter or throw. Relational comparisons for keysets are
+  not supported.
+
 | GtRes,                       D(Bool), S(Res) S(Res),                    NF
 
 | GteRes,                      D(Bool), S(Res) S(Res),                    NF
@@ -709,6 +790,12 @@ To string conversions:
   fast instance check bitvector (see class.h).
 
 | InterfaceSupportsArr,        D(Bool), S(Str), NF
+
+| InterfaceSupportsVec,        D(Bool), S(Str), NF
+
+| InterfaceSupportsDict,       D(Bool), S(Str), NF
+
+| InterfaceSupportsKeyset,     D(Bool), S(Str), NF
 
 | InterfaceSupportsStr,        D(Bool), S(Str), NF
 
@@ -922,7 +1009,7 @@ To string conversions:
   which must be a frame for the function in the LdCtx's marker. The result
   could be either an object representing the this pointer or a class context.
 
-| LdCctx, D(Cctx), S(FramePtr), NF
+| LdCctx, DCtx, S(FramePtr), NF
 
   Loads into D the value of the m_cls field out of the frame pointer S0. The
   compiler should generate this only if it can prove that the frame does not
@@ -1043,19 +1130,16 @@ To string conversions:
   indicating that a more complete lookup path should be taken. May throw if the
   method does not exist.
 
-| GetCtxFwdCallDyn<clsName,methodName>, D(Ctx), S(Ctx), PRc
+| CheckFuncStatic, ND, S(Func), B
 
-  If S0 is a Cctx, return S0. If S0 is an object, check if clsName::methodName
-  is a static method. If it is, return S0's class as a Ctx pointer. If not,
-  return S0. If S0 is a Ctx, dynamically check if it is a non-null object
-  pointer or Cctx at runtime and perform the operations described above. This
-  instruction must only be used when the value is known to not be empty.
+  Tests to see if Func::m_attrs & AttrStatic, and if so branch to B.
+  This instruction is intended to be used in forwarding calls, where we know
+  that Func is not a closure.
 
-| GetCtxFwdCall, D(Ctx), S(Ctx) C(Func), PRc
+| FwdCtxStaticCall, D(Cctx), S(Ctx), NF
 
-  If S0 is an object and S1 is static, this opcode returns S0's class with the
-  low bit set (i.e., as a Cctx). If S0 is an object and S1 is not static, this
-  opcode increfs S0 and returns it. If S0 is a Cctx, this opcode returns S0.
+  If S0 is an object, this opcode returns S0's class with the low bit set
+  (i.e., as a Cctx). Otherwise this instruction returns S0.
 
 | LdClsMethodCacheFunc<clsName,methodName>, D(Func), NA, B
 
@@ -1273,9 +1357,15 @@ To string conversions:
 
   Allocate a new array in mixed mode with the expected capacity S0.
 
-| NewDictArray, D(Arr), C(Int), PRc
+| NewDictArray, D(Dict), C(Int), PRc
 
-  Allocate a new array in dict mode with the expected capacity S0.
+  Allocate a new dict with the expected capacity S0.
+
+| NewKeysetArray<offset,keys>, D(Keyset), S(StkPtr), PRc|CRc|Er
+
+  Allocate a new keyset containing N elements off the stack given by S0, at
+  `offset'. This instruction moves the elements off the stack without
+  manipulating their reference counts.
 
 | NewLikeArray, D(Arr), S(Arr) C(Int), PRc
 
@@ -1285,27 +1375,28 @@ To string conversions:
 | AllocPackedArray<size>, DArrPacked, NA, PRc
 
   Allocate a new uninitialized packed array with space for size elements in it.
-  The array will be initialized with values using either InitPackedArray or
-  InitPackedArrayLoop.
+  The array will be initialized with values using either InitPackedLayoutArray
+  or InitPackedLayoutArrayLoop.
 
-| AllocVecArray<size>, DArrVec, NA, PRc
+| AllocVecArray<size>, D(Vec), NA, PRc
 
   Allocate a new uninitialized vector array with space for size elements in it.
-  The array will be initialized with values using either InitPackedArray or
-  InitPackedArrayLoop.
+  The array will be initialized with values using either InitPackedLayoutArray
+  or InitPackedLayoutArrayLoop.
 
-| InitPackedArray<index>, ND, S(Arr) S(Gen), CRc
+| InitPackedLayoutArray<index>, ND, S(Arr,Vec) S(Cell), CRc
 
   Store the S1 into the slot at index in array S0. This instruction assumes
   that it doesn't have to incref the value being stored. Used to initialize an
-  array allocated with AllocPackedArray.
+  array allocated with AllocPackedArray or AllocVecArray.
 
-| InitPackedArrayLoop<offset,size>, ND, S(Arr) S(StkPtr), CRc
+| InitPackedLayoutArrayLoop<offset,size>, ND, S(Arr,Vec) S(StkPtr), CRc
 
   Move `size' elements from the stack given by S1, at `offset', into the array
   S0.  Assumes that the first element on the stack is the last element in the
-  array.  Used to initialize an array allocated with AllocPackedArray that was
-  too big to use a series of InitPackedArray instructions.
+  array.  Used to initialize an array allocated with AllocPackedArray or
+  AllocVecArray that was too big to use a series of InitPackedLayoutArray
+  instructions.
 
 | NewStructArray<offset,keys...>, D(Arr), S(StkPtr), PRc|CRc
 
@@ -1597,15 +1688,11 @@ To string conversions:
   Defines D as S0. May imply register-to-register moves at code generation
   time. Does not imply an incref or any other manipulation of S0.
 
-| IncRef, ND, S(Gen), NF
+| IncRef, ND, S(Gen,Ctx), NF
 
   If S0 is a refcounted type, increment its refcount.
 
-| IncRefCtx, ND, S(Ctx), NF
-
-  If the Ctx in S0 is a $this pointer, IncRef it.
-
-| DecRef<locId>, ND, S(Gen), CRc
+| DecRef<locId>, ND, S(Gen,Ctx), CRc
 
   Decrease the reference count of S0 by one, and call a destructor for types
   that require it if it goes to zero.
@@ -1619,7 +1706,7 @@ To string conversions:
   The locId is just a hint to the runtime indicating which local variable is
   being DecRef'd, if any.
 
-| DecRefNZ, ND, S(Gen), CRc
+| DecRefNZ, ND, S(Gen,Ctx), CRc
 
   Decrease the reference count of S0 by one, do not check if it goes to zero.
   This instruction can be used for more efficient code when it is provable that
@@ -1651,11 +1738,17 @@ To string conversions:
   computed by returning the value of their count method. Objects that do not
   implement Countable have a count of 1.
 
-| CountArray,      D(Int), S(Arr), NF
+| CountArray,      D(Int), S(Arr),    NF
 
-| CountArrayFast,  D(Int), S(Arr), NF
+| CountArrayFast,  D(Int), S(Arr),    NF
 
-| CountCollection, D(Int), S(Obj), NF
+| CountVec,        D(Int), S(Vec),    NF
+
+| CountDict,       D(Int), S(Dict),   NF
+
+| CountKeyset,     D(Int), S(Keyset), NF
+
+| CountCollection, D(Int), S(Obj),    NF
 
   Computes the number of elements in S0 using the same definition as Count, but
   with a restriction on the input type.
@@ -1747,6 +1840,12 @@ To string conversions:
 
   Raises a notice that S0 is an undefined key for an array.
 
+| RaiseMissingThis, ND, S(Func), Er
+
+  Raises an appropriate notice or fatal to indicate that Func was
+  called with null $this. In most cases its a notice, but for
+  builtins and special class methods its a fatal.
+
 | InitClosureStaticLoc, ND, S(BoxedCell) S(Cell), NF
 
   Assuming S0 is an uninitialized closure static local, initialize it by
@@ -1806,11 +1905,27 @@ To string conversions:
   IR because many eval stack slots are not entirely typed wrt initness right
   now.)
 
+| DictAddElemStrKey, D(Dict), S(Dict) S(Str) S(Cell), Er|CRc|PRc
+
+  Add S2 to the dict S0 for the key S1, and return the resulting dict.
+
+| DictAddElemIntKey, D(Dict), S(Dict) S(Int) S(Cell), Er|CRc|PRc
+
+  Add S2 to the dict S0 for the key S1, and return the resulting dict.
+
 | ArrayAdd, D(Arr), S(Arr) S(Arr), Er|CRc|PRc
 
   Has the effects of the php + operator on the two source arrays.
 
 | AKExistsArr, D(Bool), S(Arr) S(Int,Str), NF
+
+  Has the effects of array_key_exists(S0, S1).
+
+| AKExistsDict, D(Bool), S(Dict) S(Int,Str), NF
+
+  Has the effects of array_key_exists(S0, S1).
+
+| AKExistsKeyset, D(Bool), S(Keyset) S(Int,Str), NF
 
   Has the effects of array_key_exists(S0, S1).
 
@@ -1828,6 +1943,16 @@ To string conversions:
 | ArrayIdx, D(Gen), S(Arr) S(Int,Str) S(Cell), NF
 
   Checks if S0 contains the key S1, and returns the result if found. Otherwise
+  S2 is returned.
+
+| DictIdx, DDictElem, S(Dict) S(Int,Str) S(Cell), NF
+
+  Checks if S0 contains the key S1 and returns the result if found. Otherwise
+  S2 is returned.
+
+| KeysetIdx, DKeysetElem, S(Keyset) S(Int,Str) S(Cell), NF
+
+  Checks if S0 contains the key S1 and returns the result if found. Otherwise
   S2 is returned.
 
 | MapIdx, D(Gen), S(Obj) S(Str) S(Cell), NF
@@ -1897,11 +2022,12 @@ To string conversions:
 
 15. Generators & Closures
 
-| LdClosureCtx, D(Ctx), S(Obj), NF
+| LdClosureCtx, DCtx, S(Obj), NF
 
   Load the context from the closure object S0 into D.
+  May only be used in S0's closure Func.
 
-| StClosureCtx, ND, S(Obj) S(Ctx), CRc
+| StClosureCtx, ND, S(Obj) S(Ctx,Nullptr), CRc
 
   Store the context represented by S1 into the closure object S0. S1 may be a
   Nullptr when there is no context (i.e. the closure is being used in a
@@ -2107,22 +2233,10 @@ To string conversions:
 
   Increment the profiling counter associated with translation TransID.
 
-| DbgAssertRefCount, ND, S(Gen), NF
+| DbgAssertRefCount, ND, S(Gen,TCtx), NF
 
   Assert that S0 has a valid refcount. If S0 has a reference counted type and
   its count is implausible then execute a hardware trap instruction.
-
-| DbgAssertPtr, ND, S(PtrToGen), NF
-
-  Assert that S0 points to plausible TypedValue. If the TypedValue is a type
-  with a _count field, check that the count field is plausible using the same
-  logic as DbgAssertRefCount. Internally this uses always_assert(); failures
-  cause an abort (whatever always_assert does).
-
-| DbgAssertType<T>, ND, S(Cell), NF
-
-  Assert that S0 is of type T at runtime. If the assertion fails, execution is
-  aborted via a hardware exception.
 
 | DbgTraceCall<spOffset>, ND, S(FramePtr) S(StkPtr), NF
 
@@ -2150,13 +2264,13 @@ To string conversions:
 
 17. Iterators
 
-| IterInit<IterData>,   D(Bool), S(Arr,Obj) S(FramePtr), Er|CRc
+| IterInit<IterData>,   D(Bool), S(ArrLike,Obj) S(FramePtr), Er|CRc
 
-| IterInitK<IterData>,  D(Bool), S(Arr,Obj) S(FramePtr), Er|CRc
+| IterInitK<IterData>,  D(Bool), S(ArrLike,Obj) S(FramePtr), Er|CRc
 
-| WIterInit<IterData>,  D(Bool), S(Arr,Obj) S(FramePtr), Er|CRc
+| WIterInit<IterData>,  D(Bool), S(ArrLike,Obj) S(FramePtr), Er|CRc
 
-| WIterInitK<IterData>, D(Bool), S(Arr,Obj) S(FramePtr), Er|CRc
+| WIterInitK<IterData>, D(Bool), S(ArrLike,Obj) S(FramePtr), Er|CRc
 
 | MIterInit<T,IterData>,  D(Bool), S(BoxedCell) S(FramePtr), Er
 
@@ -2230,7 +2344,7 @@ To string conversions:
   Free the iterator variable whose index is given by S1 in the stack frame
   pointed to by S0.
 
-| DecodeCufIter<iterId>, D(Bool), S(Arr,Obj,Str)  S(FramePtr), Er
+| DecodeCufIter<iterId>, D(Bool), S(ArrLike,Obj,Str)  S(FramePtr), Er
 
   Decode S0 as a callable, and write the decoded values to the iterator
   specified by IterId. Returns true iff it successfully decoded the callable.
@@ -2385,9 +2499,29 @@ fields of that struct for holding intermediate values.
   fail, branch to B.  This check is allowed to have false negatives, in the
   case of int-like strings.
 
-| CheckArrayCOW, ND, S(Arr), B
+| CheckArrayCOW, ND, S(ArrLike), B
 
   Check that S0 has a refcount of exactly 1; if not, branch to B.
+
+| ProfileDictOffset, ND, S(Dict) S(Int,Str), NF
+
+  Profile the offset of the element keyed by S1 in S0.
+
+| CheckDictOffset<pos>, ND, S(Dict) S(Int,Str), B
+
+  Check that `pos' is within the usage bounds of S0 (including tombstones), and
+  that S1 exactly matches the element key of S0 at `pos'.  If any of the checks
+  fail, branch to B.  This check is allowed to have false negatives.
+
+| ProfileKeysetOffset, ND, S(Keyset) S(Int,Str), NF
+
+  Profile the offset of the element keyed by S1 in S0.
+
+| CheckKeysetOffset<pos>, ND, S(Keyset) S(Int,Str), B
+
+  Check that `pos' is within the usage bounds of S0 (including tombstones), and
+  that S1 exactly matches the element key of S0 at `pos'.  If any of the checks
+  fail, branch to B.  This check is allowed to have false negatives.
 
 | ElemArray,  D(PtrToMembGen), S(Arr) S(Int,Str), Er
 
@@ -2404,9 +2538,55 @@ fields of that struct for holding intermediate values.
   ElemArray{D,U} both take a PtrToGen for the base operand, but expect it to be
   a PtrToArr or PtrToBoxedArr.  T is the type of the base array.
 
-| ElemMixedArrayK<pos>, D(PtrToMembGen), AK(Mixed) S(Int,Str), NF
+| ElemMixedArrayK<pos>, D(PtrToElemGen), AK(Mixed) S(Int,Str), NF
 
   Like ElemArray, but the element for S1 is at a known position `pos' in S0.
+
+| ElemVecD<T>, D(PtrToElemCell), S(PtrToGen) S(Int), MElem|Er
+
+| ElemVecU<T>, D(PtrToMembCell), S(PtrToGen) S(Int), MElem|Er
+
+  Similar to ElemX, but the base S0 is a vec and the key S1 is an int. ElemVecD
+  is for Define member instrs and ElemVecU is for Unset. (Other variations can
+  be implemented without special IR instructions).
+
+  ElemVec{D,U} both take a PtrToGen for the base operand, but expect it to be a
+  PtrToVec or PtrToBoxedVec. T is the type of the base vec.
+
+| ElemDict,  D(PtrToMembCell), S(Dict) S(Int,Str), Er
+
+| ElemDictW, D(PtrToMembCell), S(Dict) S(Int,Str), Er
+
+| ElemDictD<T>, D(PtrToElemCell), S(PtrToGen) S(Int,Str), MElem|Er
+
+| ElemDictU<T>, D(PtrToMembCell), S(PtrToGen) S(Int,Str), MElem|Er
+
+  Similar to ElemX, but the base S0 is a dict and the key S1 is an int/str.
+  ElemDictW is for Warn member instrs, ElemDictD is for Define member instrs,
+  and ElemDictU is for Unset.
+
+  ElemDict{D,U} both take a PtrToGen for the base operand, but expect it to be
+  a PtrToDict or PtrToBoxedDict.  T is the type of the base array.
+
+| ElemDictK<pos>, D(PtrToElemCell), S(Dict) S(Int,Str), NF
+
+  Like ElemDict, but the element for S1 is at a known position `pos' in S0.
+
+| ElemKeyset,  D(PtrToMembCell), S(Keyset) S(Int,Str), Er
+
+| ElemKeysetW, D(PtrToMembCell), S(Keyset) S(Int,Str), Er
+
+| ElemKeysetU<T>, D(PtrToMembCell), S(PtrToGen) S(Int,Str), MElem|Er
+
+  Similar to ElemX, but the base S0 is a keyset and the key S1 is an int/str.
+  ElemKeysetW is for Warn member instrs and ElemKeysetU is for Unset.
+
+  ElemKeysetU both take a PtrToGen for the base operand, but expect it to be
+  a PtrToKeyset or PtrToBoxedKeyset.  T is the type of the base array.
+
+| ElemKeysetK<pos>, D(PtrToElemCell), S(Keyset) S(Int,Str), NF
+
+  Like ElemKeyset, but the element for S1 is at a known position `pos' in S0.
 
 | ElemDX, D(PtrToMembGen), S(PtrToGen) S(Cell) S(PtrToMISGen), MElem|Er
 
@@ -2425,6 +2605,32 @@ fields of that struct for holding intermediate values.
 | MixedArrayGetK<pos>, DArrElem, AK(Mixed) S(Int,Str), NF
 
   Like ArrayGet, but the element for S1 is at a known position `pos' in S0.
+
+| DictGet, DDictElem, S(Dict) S(Int,Str), Er
+
+  Get element with key S1 from base S0, throwing if the element is not present.
+
+| DictGetQuiet, DDictElem, S(Dict) S(Int,Str), NF
+
+  Get element with key S1 from base S0, returning null if the element is not
+  present.
+
+| DictGetK<pos>, DDictElem, S(Dict) S(Int,Str), NF
+
+  Like DictGet, but the element for S1 is at a known position `pos' in S0.
+
+| KeysetGet, DKeysetElem, S(Keyset) S(Int,Str), Er
+
+  Get element with key S1 from base S0, throwing if the element is not present.
+
+| KeysetGetQuiet, DKeysetElem, S(Keyset) S(Int,Str), NF
+
+  Get element with key S1 from base S0, returning null if the element is not
+  present.
+
+| KeysetGetK<pos>, DKeysetElem, S(Keyset) S(Int,Str), NF
+
+  Like KeysetGet, but the element for S1 is at a known position `pos' in S0.
 
 | StringGet, D(StaticStr), S(Str) S(Int), PRc|Er
 
@@ -2457,6 +2663,28 @@ fields of that struct for holding intermediate values.
   Like ArraySet, but for binding operations on the array. S3 must point to a
   RefData with an array type when this instruction is executed, and it must be
   the same array that is in S0.
+
+| VecSet, D(Vec), S(Vec) S(Int) S(Cell), PRc|CRc|Er
+
+  Set element with key S1 in S0 to S2. The dest will be a new Vec that should
+  replace S0.
+
+| VecSetRef, ND, S(Vec) S(Int) S(Cell) S(BoxedCell), CRc|Er
+
+  Like VecSet, but for binding operations on the vec. S3 must point to a
+  RefData with a vec type when this instruction is executed, and it must be the
+  same vec that is in S0.
+
+| DictSet, D(Dict), S(Dict) S(Int,Str) S(Cell), PRc|CRc|Er
+
+  Set element with key S1 in S0 to S2. The dest will be a new Dict that should
+  replace S0.
+
+| DictSetRef, ND, S(Dict) S(Int,Str) S(Cell) S(BoxedCell), CRc|Er
+
+  Like DictSet, but for binding operations on the dict. S3 must point to a
+  RefData with a vec type when this instruction is executed, and it must be the
+  same dict that is in S0.
 
 | MapSet, ND, S(Obj) S(Int,Str) S(Cell), Er
 
@@ -2497,13 +2725,29 @@ fields of that struct for holding intermediate values.
 
 | SetNewElemArray, ND, S(PtrToGen) S(Cell), MElem|Er
 
-  Append the value in S1 to S0, where S0 must be a pointer to an array.
+  Append the value in S1 to S0, where S0 must be a pointer to a array.
+
+| SetNewElemVec, ND, S(PtrToGen) S(Cell), MElem|Er
+
+  Append the value in S1 to S0, where S0 must be a pointer to a vec.
+
+| SetNewElemKeyset, ND, S(PtrToGen) S(Int,Str), MElem|Er
+
+  Append the value in S1 to S0, where S0 must be a pointer to a keyset.
 
 | BindNewElem, ND, S(PtrToGen) S(BoxedCell), MElem|Er
 
   Append the reference in S1 to S0.
 
-| ArrayIsset, D(Bool), S(Arr) S(Int,Str), Er
+| ArrayIsset, D(Bool), S(Arr) S(Int,Str), NF
+
+  Returns true iff the element at key S1 in the base S0 is set.
+
+| DictIsset, D(Bool), S(Dict) S(Int,Str), NF
+
+  Returns true iff the element at key S1 in the base S0 is set.
+
+| KeysetIsset, D(Bool), S(Keyset) S(Int,Str), NF
 
   Returns true iff the element at key S1 in the base S0 is set.
 
@@ -2532,13 +2776,27 @@ fields of that struct for holding intermediate values.
   Returns true iff the element at key S1 in S0 is set and not equal (as defined
   by the hhbc Eq instruction) to false.
 
+| DictEmptyElem, D(Bool), S(Dict) S(Int,Str), NF
+
+  Like EmptyElem, but specialized for dicts.
+
+| KeysetEmptyElem, D(Bool), S(Keyset) S(Int,Str), NF
+
+  Like EmptyElem, but specialized for dicts.
+
 | CheckRange, D(Bool), S(Int) S(Int), NF
 
   Returns true iff S0 is in the range [0, S1).
 
-| ThrowOutOfBounds, ND, S(Int), Er|T
+| ThrowOutOfBounds, ND, S(ArrLike|Obj) S(Gen), Er|T
 
-  Throws an OutOfBoundsException with a message indicating S0.
+  Throws an OutOfBoundsException corresponding to an access of S0 with the key
+  S1.
+
+| ThrowInvalidArrayKey, ND, S(ArrLike) S(Gen), Er|T
+
+  Throws an InvalidArgumentException corresponding to an access of S0 with the
+  key S1, which has a type invalid for that array.
 
 | ThrowInvalidOperation, ND, S(Str), Er|T
 
@@ -2556,11 +2814,6 @@ fields of that struct for holding intermediate values.
 
   Profile the array kind of S0.
 
-| ProfileStructArray, ND, S(Arr), NF
-
-  Profile type of array S0 (i.e. whether it is a StructArray or some other kind
-  and if it is a StructArray what Shapes it saw).
-
 | ProfileType, ND, S(Gen), NF
 
   Profile the type of S0.
@@ -2568,12 +2821,6 @@ fields of that struct for holding intermediate values.
 | ProfileMethod<rdsHandle,spOff>, ND, S(StkPtr) S(Cls,Nullptr), NF
 
   Profile the Func in the ActRec that was just pushed onto the stack.
-
-| LdStructArrayElem, DArrElem, AK(Struct) S(StaticStr), NF
-
-  Loads the element of the struct array in S0 at offset S1. This instruction
-  assumes that the key for that particular offset was already present in the
-  array, which previous guards should guarantee.
 
 | CheckPackedArrayBounds, ND, AK(Packed) S(Int), B
 
@@ -2584,9 +2831,21 @@ fields of that struct for holding intermediate values.
 
   Load the address of the element at index S1 of the packed array in S0.
 
+| LdVecElem, DVecElem, S(Vec) S(Int), NF
+
+  Loads the element of the vec array in S0 at offset S1. This instruction
+  assumes that the vec actually contains an element at that offset (IE, the vec
+  has the proper length).
+
+| LdVecElemAddr<T>, DParamPtr(Elem), S(Vec) S(Int), NF
+
+  Loads the address of the element at index S1 of the vec array in S0. This
+  instruction assumes the vec actually contains an element at that offset (IE,
+  the vec has the proper length).
+
 | LdVectorSize, D(Int), S(Obj), NF
 
-  Returns the size of the given Vector in S0.
+  Returns the size of the given Vector collection in S0.
 
 | VectorDoCow, ND, S(Obj), NF
 
@@ -2661,12 +2920,12 @@ fields of that struct for holding intermediate values.
   and need to be discarded, they will be decref'd and may re-enter to run
   destructors.
 
-| InitCtx, ND, S(FramePtr) S(Ctx), CRc
+| InitCtx, ND, S(FramePtr) S(Ctx,Nullptr), CRc
 
   Store S1 to the m_this/m_cls field in the frame pointer S0.
 
   If InitCtx appears in an IR unit, it must dominate all occurrences of LdCtx
-  and LdCctx.
+  and LdCctx with the same FramePtr.
 
 | CheckSurpriseFlagsEnter<func,argc>, ND, S(FramePtr), Er
 

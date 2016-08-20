@@ -9,31 +9,20 @@
  *)
 
 open Utils
+open ServerCommandTypes
+open ServerEnv
 
 module TLazyHeap = Typing_lazy_heap
-
-type 'a command =
-  | Rpc of 'a ServerRpc.t
-  | Stream of streamed
-  | Debug
-
-and streamed =
-  | SHOW of string
-  | LIST_FILES
-  | LIST_MODES
-  | BUILD of ServerBuild.build_opts
-
-(** Timeout on reading the command from the client - client probably frozen. *)
-exception Read_command_timeout
 
 (****************************************************************************)
 (* Called by the client *)
 (****************************************************************************)
 let rpc : type a. Timeout.in_channel * out_channel -> a ServerRpc.t -> a
-= fun (ic, oc) cmd ->
+= fun (_, oc) cmd ->
   Marshal.to_channel oc (Rpc cmd) [];
   flush oc;
-  Timeout.input_value ic
+  let fd = Unix.descr_of_out_channel oc in
+  Marshal_tools.from_fd_with_preamble fd
 
 let stream_request oc cmd =
   Marshal.to_channel oc (Stream cmd) [];
@@ -41,6 +30,10 @@ let stream_request oc cmd =
 
 let connect_debug oc =
   Marshal.to_channel oc Debug [];
+  flush oc
+
+let send_connection_type oc t =
+  Marshal.to_channel oc t [];
   flush oc
 
 (****************************************************************************)
@@ -155,32 +148,35 @@ let stream_response (genv:ServerEnv.genv) env (ic, oc) ~cmd =
           )
       end)
 
-let say_hello oc =
-  output_string oc "Hello\n";
-  flush oc
+let get_persistent_fds env =
+  match env.persistent_client_fd with
+  | Some fd -> fd
+  | None ->
+    failwith ("Persistent channel not found!")
 
-let read_client_msg ic =
-  Timeout.with_timeout
-    ~timeout:1
-    ~on_timeout: (fun _ -> raise Read_command_timeout)
-    ~do_: (fun timeout -> Timeout.input_value ~timeout ic)
+let send_response_to_client fd response =
+  Marshal_tools.to_fd_with_preamble fd response
 
-let send_response_to_client (ic, oc) response =
-  Marshal.to_channel oc response [];
-  flush oc;
-  ServerUtils.shutdown_client (ic, oc)
-
-let handle genv env (ic, oc) =
-  let msg = read_client_msg ic in
+let handle genv env client =
+  let msg = ClientProvider.read_client_msg client in
   match msg with
   | Rpc cmd ->
       let t = Unix.gettimeofday () in
-      let response = ServerRpc.handle genv env cmd in
+      let new_env, response = ServerRpc.handle genv env cmd in
       let cmd_string = ServerRpc.to_string cmd in
       HackEventLogger.handled_command cmd_string t;
-      send_response_to_client (ic, oc) response;
-      if cmd = ServerRpc.KILL then ServerUtils.die_nicely ()
-  | Stream cmd -> stream_response genv env (ic, oc) ~cmd
+      ClientProvider.send_response_to_client client response;
+      if cmd = ServerRpc.DISCONNECT ||
+          not @@ (ClientProvider.is_persistent client env)
+        then ClientProvider.shutdown_client client;
+      if cmd = ServerRpc.KILL then ServerUtils.die_nicely ();
+      new_env
+  | Stream cmd ->
+      let ic, oc = ClientProvider.get_channels client in
+      stream_response genv env (ic, oc) ~cmd;
+      env
   | Debug ->
-    genv.ServerEnv.debug_channels <- Some (ic, oc);
-    ServerDebug.say_hello genv
+      let ic, oc = ClientProvider.get_channels client in
+      genv.ServerEnv.debug_channels <- Some (ic, oc);
+      ServerDebug.say_hello genv;
+      env

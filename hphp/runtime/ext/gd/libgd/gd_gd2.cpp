@@ -138,11 +138,17 @@ static int _gd2GetHeader(gdIOCtxPtr in, int *sx, int *sy, int *cs, int *vers, in
 	if (gd2_compressed(*fmt)) {
 		nc = (*ncx) * (*ncy);
 		GD2_DBG(php_gd_error("Reading %d chunk index entries", nc));
+		if (overflow2(sizeof(t_chunk_info), nc)) {
+			goto fail1;
+		}
 		sidx = sizeof(t_chunk_info) * nc;
 		if (sidx <= 0) {
 			goto fail1;
 		}
 		cidx = (t_chunk_info*) gdCalloc(sidx, 1);
+		if (cidx == NULL) {
+			goto fail1;
+		}
 		for (i = 0; i < nc; i++) {
 			if (gdGetInt(&cidx[i].offset, in) != 1) {
 				goto fail1;
@@ -660,10 +666,12 @@ static void _gdImageGd2 (gdImagePtr im, gdIOCtx * out, int cs, int fmt)
 
 	/* Force fmt to a valid value since we don't return anything. */
 	if ((fmt != GD2_FMT_RAW) && (fmt != GD2_FMT_COMPRESSED)) {
-		fmt = im->trueColor ? GD2_FMT_TRUECOLOR_COMPRESSED : GD2_FMT_COMPRESSED;
+		fmt = GD2_FMT_COMPRESSED;
 	}
 	if (im->trueColor) {
 		fmt += 2;
+                assert(fmt == GD2_FMT_TRUECOLOR_RAW ||
+                       fmt == GD2_FMT_TRUECOLOR_COMPRESSED);
 	}
 	/* Make sure chunk size is valid. These are arbitrary values; 64 because it seems
 	 * a little silly to expect performance improvements on a 64x64 bit scale, and

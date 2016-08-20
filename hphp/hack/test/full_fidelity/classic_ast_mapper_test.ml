@@ -23,7 +23,7 @@ type test_case = {
 
 (** This actually uses the classic parser, not the full-fidelity parser. *)
 let sanity_test_classic_parser source =
-  let errorl, result =
+  let errorl, result, _ =
     Errors.do_ begin fun () ->
       Parser_hack.program (Relative_path.default) source
     end
@@ -122,7 +122,7 @@ let test_suite =
 
 let main () =
   EventLogger.init (Daemon.devnull ()) 0.0;
-  let _handle = SharedMem.init_default () in
+  let _handle = SharedMem.init GlobalConfig.default_sharedmem_config in
   run_test_tt_main test_suite
 
 let _ = main ()

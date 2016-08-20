@@ -1,4 +1,4 @@
-  /*
+/*
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
@@ -209,22 +209,6 @@ struct IfaceMethodData : IRExtraData {
 
   Slot vtableIdx;
   Slot methodIdx;
-};
-
-/*
- * Func pointer.
- */
-struct FuncData : IRExtraData {
-  explicit FuncData(const Func* func) : func(func) {}
-
-  std::string show() const {
-    return folly::to<std::string>(func->fullName()->data());
-  }
-
-  bool equals(FuncData o) const { return func == o.func; }
-  size_t hash() const { return std::hash<const Func*>()(func); }
-
-  const Func* func;
 };
 
 /*
@@ -845,23 +829,6 @@ struct LdFuncCachedUData : IRExtraData {
 };
 
 /*
- * The name of a class, and the expected Class* at runtime.
- */
-struct CheckDefinedClsData : IRExtraData {
-  CheckDefinedClsData(const StringData* clsName, const Class* cls)
-    : clsName(clsName)
-    , cls(cls)
-  {}
-
-  std::string show() const {
-    return folly::to<std::string>(clsName->data());
-  }
-
-  const StringData* clsName;
-  const Class* cls;
-};
-
-/*
  * Offset and stack deltas for InterpOne.
  */
 struct InterpOneData : IRExtraData {
@@ -1030,6 +997,20 @@ struct PackedArrayData : IRExtraData {
 
 struct InitPackedArrayLoopData : IRExtraData {
   explicit InitPackedArrayLoopData(IRSPRelOffset offset, uint32_t size)
+    : offset(offset)
+    , size(size)
+  {}
+
+  std::string show() const {
+    return folly::format("{},{}", offset.offset, size).str();
+  }
+
+  IRSPRelOffset offset;
+  uint32_t size;
+};
+
+struct NewKeysetArrayData : IRExtraData {
+  explicit NewKeysetArrayData(IRSPRelOffset offset, uint32_t size)
     : offset(offset)
     , size(size)
   {}
@@ -1231,7 +1212,6 @@ X(LdClsMethodCacheFunc,         ClsMethodData);
 X(LdClsMethodCacheCls,          ClsMethodData);
 X(LdClsMethodFCacheFunc,        ClsMethodData);
 X(LookupClsMethodFCache,        ClsMethodData);
-X(GetCtxFwdCallDyn,             ClsMethodData);
 X(LdIfaceMethod,                IfaceMethodData);
 X(LdStaticLoc,                  StaticLocName);
 X(InitStaticLoc,                StaticLocName);
@@ -1251,14 +1231,22 @@ X(OODeclExists,                 ClassKindData);
 X(NewStructArray,               NewStructData);
 X(AllocPackedArray,             PackedArrayData);
 X(AllocVecArray,                PackedArrayData);
-X(InitPackedArrayLoop,          InitPackedArrayLoopData);
-X(InitPackedArray,              IndexData);
+X(NewKeysetArray,               NewKeysetArrayData);
+X(InitPackedLayoutArrayLoop,    InitPackedArrayLoopData);
+X(InitPackedLayoutArray,        IndexData);
 X(CheckMixedArrayOffset,        IndexData);
+X(CheckDictOffset,              IndexData);
+X(CheckKeysetOffset,            IndexData);
 X(ElemMixedArrayK,              IndexData);
 X(MixedArrayGetK,               IndexData);
+X(DictGetK,                     IndexData);
+X(KeysetGetK,                   IndexData);
+X(ElemDictK,                    IndexData);
+X(ElemKeysetK,                  IndexData);
 X(ProfileArrayKind,             RDSHandleData);
 X(ProfileMixedArrayOffset,      RDSHandleData);
-X(ProfileStructArray,           RDSHandleData);
+X(ProfileDictOffset,            RDSHandleData);
+X(ProfileKeysetOffset,          RDSHandleData);
 X(ProfileType,                  RDSHandleData);
 X(ProfileMethod,                ProfileMethodData);
 X(LdRDSAddr,                    RDSHandleData);

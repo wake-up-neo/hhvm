@@ -22,12 +22,16 @@
 #include "hphp/runtime/ext/xdebug/util.h"
 #include "hphp/runtime/ext/xdebug/xdebug_command.h"
 
-#include "hphp/runtime/base/externals.h"
 #include "hphp/runtime/base/thread-info.h"
 #include "hphp/runtime/debugger/debugger_hook_handler.h"
 #include "hphp/runtime/ext/string/ext_string.h"
+#include "hphp/runtime/vm/globals-array.h"
+#include "hphp/runtime/vm/vm-regs.h"
 #include "hphp/util/network.h"
 #include "hphp/util/timer.h"
+
+#include <folly/FileUtil.h>
+#include <folly/Range.h>
 
 #include <fcntl.h>
 #include <netinet/tcp.h>
@@ -285,6 +289,15 @@ void XDebugServer::destroySocket() {
   }
 }
 
+static bool isAsyncCommand(folly::StringPiece cmdName) {
+  return cmdName == "break" ||
+    cmdName == "breakpoint_set" ||
+    cmdName == "breakpoint_get" ||
+    cmdName == "breakpoint_list" ||
+    cmdName == "breakpoint_update" ||
+    cmdName == "breakpoint_remove";
+}
+
 void XDebugServer::pollSocketLoop() {
   while (true) {
     // Take some load off the CPU when polling thread is paused.
@@ -303,10 +316,6 @@ void XDebugServer::pollSocketLoop() {
       break;
     }
 
-    // At this point we know that the request thread is busy running, so we let
-    // it enter the jit.
-    m_requestThread->m_reqInjectionData.setDebuggerIntr(false);
-
     if (m_bufferAvail == 0) {
       // Check if there is any input waiting on us.
       if (!poll_socket(m_socket)) {
@@ -320,30 +329,71 @@ void XDebugServer::pollSocketLoop() {
       }
     }
 
+    std::shared_ptr<XDebugCommand> cmd;
     try {
       log("Polling thread received: %s\n", m_bufferCur);
-      auto cmd = parseCommand();
-      if (cmd->getCommandStr() != "break") {
+      cmd = parseCommand();
+      const auto& cmdName = cmd->getCommandStr();
+      if (!isAsyncCommand(cmdName)) {
+        // TODO: emit error response
+        // for invalid commands in run state.
         continue;
       }
 
-      log("Received break command\n");
-
-      // We're going to set the 'break' flag on our XDebugServer, and pause
-      // ourselves.  The request thread will unpause us when it exits its
-      // command loop.
-      m_pollingState.store(PollingState::Pause);
-      setNewBreak(cmd);
+      log("Received %s command\n", cmdName.c_str());
+      addNewCommand(cmd);
 
       // Force request thread to run in the interpreter, and hit
       // XDebugHook::onOpcode().
       m_requestThread->m_reqInjectionData.setDebuggerIntr(true);
       m_requestThread->m_reqInjectionData.setFlag(DebuggerSignalFlag);
-    } catch (const XDebugExn&) {
+    } catch (const XDebugExn& exn) {
       log("Polling thread got invalid command: %s\n", m_bufferCur);
-      // Can drop the error.
+      sendErrorMessage(cmd, exn.error);
     }
   }
+}
+
+/*
+ * Executed by request thread to process async commands from
+ * poll thread.
+ */
+void XDebugServer::processAsyncCommandQueue() {
+  std::vector<std::shared_ptr<XDebugCommand>> commandQueue;
+  // Scope to limit m_asyncCommandQueue lock time so that
+  // async commands can be parsed in parallel with command handling.
+  {
+    std::lock_guard<std::mutex> guard(m_asyncCommandQueueMtx);
+    std::swap(m_asyncCommandQueue, commandQueue);
+  }
+
+  for (auto& cmd : commandQueue) {
+    // TODO: gracefully handle continuation command.
+    // currently we do not allow continuation commands from
+    // poll thread but we may in future and should handle this
+    // situation.
+    processCommand(cmd);
+    // Async break command will enter break state.
+    if (cmd->getCommandStr() == "break") {
+      int line = 0;
+      auto transpath = getCurrentFilePath(&line);
+      breakpoint(transpath, init_null(), init_null(), line);
+    }
+  }
+}
+
+bool XDebugServer::processCommand(const std::shared_ptr<XDebugCommand>& cmd) {
+  auto response = xdebug_xml_node_init("response");
+  SCOPE_EXIT { xdebug_xml_node_dtor(response); };
+
+  addXmlns(*response);
+
+  // Try to handle the command.  Possibly send a response.
+  bool should_continue = cmd->handle(*response);
+  if (cmd->shouldRespond()) {
+    sendResponse(*response);
+  }
+  return should_continue;
 }
 
 void XDebugServer::closeLog() {
@@ -573,10 +623,8 @@ void XDebugServer::deinitDbgp() {
     auto response = xdebug_xml_node_init("response");
     addXmlns(*response);
     addStatus(*response);
-    if (m_lastCommand != nullptr) {
-      addCommand(*response, *m_lastCommand);
-    }
-    sendMessage(*response);
+    addLastCommandIfAvailable(*response);
+    sendResponse(*response);
     xdebug_xml_node_dtor(response);
 
     // Wait for a response from the client.  Regardless of the command loop
@@ -587,25 +635,64 @@ void XDebugServer::deinitDbgp() {
   req::free(m_buffer);
 }
 
+void XDebugServer::addLastCommandIfAvailable(xdebug_xml_node& node) {
+  if (!m_lastCommands.empty()) {
+    addCommand(node, *m_lastCommands.back());
+  }
+}
+
+void XDebugServer::sendErrorMessage(
+  const std::shared_ptr<XDebugCommand>& cmd,
+  XDebugError code
+) {
+  auto response = xdebug_xml_node_init("response");
+  SCOPE_EXIT { xdebug_xml_node_dtor(response); };
+  addXmlns(*response);
+  if (cmd != nullptr) {
+    addCommand(*response, *cmd);
+  }
+  addError(*response, code);
+  sendResponse(*response);
+}
+
+void XDebugServer::sendResponse(xdebug_xml_node& xml) {
+  sendMessage(xml);
+  if (!m_lastCommands.empty()) {
+    // The response for last command has been processed.
+    m_lastCommands.pop_back();
+  }
+}
+
 void XDebugServer::sendMessage(xdebug_xml_node& xml) {
-  auto constexpr XML_MSG_HEADER =
+  constexpr folly::StringPiece header =
     "<?xml version=\"1.0\" encoding=\"iso-8859-1\"?>\n";
+  constexpr folly::StringPiece delimiter("\0", 1);
 
   auto const message = xdebug_xml_return_node(&xml);
-  auto const message_len = message.size() + strlen(XML_MSG_HEADER);
 
   log("-> %s\n\n", message.data());
   logFlush();
 
-  StringBuffer buf;
-  buf.append(static_cast<int64_t>(message_len));
-  buf.append('\0');
-  buf.append(XML_MSG_HEADER);
-  buf.append(message);
-  buf.append('\0');
+  // Slice off the last '>' in the closing tag, verify message ends with closing
+  // tag.
+  auto const slice = message.slice().subpiece(0, message.size() - 1);
+  always_assert(slice.endsWith(xml.tag));
 
-  write(m_socket, buf.data(), buf.size());
-  return;
+  auto const lenStr = folly::to<std::string>(message.size() + header.size());
+
+  auto const makeIovec = [] (folly::StringPiece piece) {
+    return iovec { const_cast<char*>(piece.data()), piece.size() };
+  };
+
+  std::array<iovec, 5> buffers = {
+    makeIovec(lenStr),
+    makeIovec(delimiter),
+    makeIovec(header),
+    makeIovec(message.slice()),
+    makeIovec(delimiter)
+  };
+
+  folly::writevFull(m_socket, buffers.data(), buffers.size());
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -621,9 +708,7 @@ bool XDebugServer::breakpoint(const Variant& filename,
   auto response = xdebug_xml_node_init("response");
   addXmlns(*response);
   addStatus(*response);
-  if (m_lastCommand != nullptr) {
-    addCommand(*response, *m_lastCommand);
-  }
+  addLastCommandIfAvailable(*response);
 
   // Grab the c strings
   auto to_c_str = [] (const Variant& var) {
@@ -657,7 +742,7 @@ bool XDebugServer::breakpoint(const Variant& filename,
 
   // Add the message node then send the response
   xdebug_xml_add_child(response, msg);
-  sendMessage(*response);
+  sendResponse(*response);
   xdebug_xml_node_dtor(response);
 
   // Wait for a resonse from the user
@@ -723,24 +808,12 @@ bool XDebugServer::doCommandLoop() {
       return false;
     }
 
-    auto response = xdebug_xml_node_init("response");
-    SCOPE_EXIT { xdebug_xml_node_dtor(response); };
-
-    addXmlns(*response);
-
+    std::shared_ptr<XDebugCommand> cmd;
     try {
-      // Parse the command and store it as the last command.
-      auto cmd = parseCommand();
-      m_lastCommand = cmd;
-
-      // Try to handle the command.  Possibly send a response.
-      should_continue = cmd->handle(*response);
-      if (cmd->shouldRespond()) {
-        sendMessage(*response);
-      }
+      cmd = parseCommand();
+      should_continue = processCommand(cmd);
     } catch (const XDebugExn& exn) {
-      addError(*response, exn.error);
-      sendMessage(*response);
+      sendErrorMessage(cmd, exn.error);
     }
   } while (!should_continue);
 
@@ -798,7 +871,9 @@ std::shared_ptr<XDebugCommand> XDebugServer::parseCommand() {
   parseInput(input, cmd_str, args);
 
   // Create the command from the command string and args.
-  return XDebugCommand::fromString(*this, cmd_str, args);
+  auto cmd = XDebugCommand::fromString(*this, cmd_str, args);
+  m_lastCommands.emplace_back(cmd);
+  return cmd;
 }
 
 void XDebugServer::parseInput(folly::StringPiece in, String& cmd, Array& args) {

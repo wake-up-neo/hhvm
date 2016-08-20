@@ -250,40 +250,54 @@ void ifThenElse(IRGS& env, Branch branch, Next next, Taken taken) {
 }
 
 /*
- * Generate an if-then block construct.
- *
- * Code emitted in the `taken' lambda will be executed iff the branch emitted
- * in the `branch' lambda is taken.
+ * Implementation for ifThen() and ifElse().
  *
  * TODO(#11019533): Fix undefined behavior if any of the blocks ends up
  * unreachable as a result of simplification (or funky irgen).
  */
-template<class Branch, class Taken>
-void ifThen(IRGS& env, Branch branch, Taken taken) {
-  auto const taken_block = defBlock(env);
-  auto const done_block  = defBlock(env);
+template<bool on_true, class Branch, class Succ>
+void ifBranch(IRGS& env, Branch branch, Succ succ) {
+  auto const succ_block = defBlock(env);
+  auto const done_block = defBlock(env);
 
-  branch(taken_block);
-  auto const cur = env.irb->curBlock();
+  auto const cond_block    = on_true ? succ_block : done_block;
+  auto const default_block = on_true ? done_block : succ_block;
 
-  if (cur->empty() || !cur->back().isBlockEnd()) {
-    gen(env, Jmp, done_block);
-  } else if (!cur->back().isTerminal()) {
-    cur->back().setNext(done_block);
+  branch(cond_block);
+  auto const branch_block = env.irb->curBlock();
+
+  if (branch_block->empty() || !branch_block->back().isBlockEnd()) {
+    gen(env, Jmp, default_block);
+  } else if (!branch_block->back().isTerminal()) {
+    branch_block->back().setNext(default_block);
   }
-  env.irb->fs().setSaveOutState(cur);
-  env.irb->appendBlock(taken_block);
+  // The above logic ensures that `branch_block' always ends with an
+  // isBlockEnd() instruction, so its out state is meaningful.
+  env.irb->fs().setSaveOutState(branch_block);
 
-  taken();
-  // Patch the last block added by the Taken lambda to jump to the done block.
-  // Note that last might not be taken_block.
+  env.irb->appendBlock(succ_block);
+  succ();
+
+  // Patch the last block added by `succ' to jump to the done block.  Note that
+  // `last' might not be `succ_block'.
   auto const last = env.irb->curBlock();
   if (last->empty() || !last->back().isBlockEnd()) {
     gen(env, Jmp, done_block);
   } else if (!last->back().isTerminal()) {
     last->back().setNext(done_block);
   }
-  env.irb->appendBlock(done_block, cur);
+  env.irb->appendBlock(done_block, branch_block);
+}
+
+/*
+ * Generate an if-then block construct.
+ *
+ * Code emitted in the `taken' lambda will be executed iff the branch emitted
+ * in the `branch' lambda is taken.
+ */
+template<class Branch, class Taken>
+void ifThen(IRGS& env, Branch branch, Taken taken) {
+  ifBranch<true>(env, branch, taken);
 }
 
 /*
@@ -291,27 +305,10 @@ void ifThen(IRGS& env, Branch branch, Taken taken) {
  *
  * Code emitted in the `next' lambda will be executed iff the branch emitted in
  * the branch lambda is not taken.
- *
- * TODO(#11019533): Fix undefined behavior if any of the blocks ends up
- * unreachable as a result of simplification (or funky irgen).
  */
 template<class Branch, class Next>
 void ifElse(IRGS& env, Branch branch, Next next) {
-  auto const done_block = defBlock(env);
-
-  branch(done_block);
-  auto const cur = env.irb->curBlock();
-  env.irb->fs().setSaveOutState(cur);
-
-  next();
-  // Patch the last block added by the Next lambda to jump to the done block.
-  auto last = env.irb->curBlock();
-  if (last->empty() || !last->back().isBlockEnd()) {
-    gen(env, Jmp, done_block);
-  } else if (!last->back().isTerminal()) {
-    last->back().setNext(done_block);
-  }
-  env.irb->appendBlock(done_block, cur);
+  ifBranch<false>(env, branch, next);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -465,6 +462,8 @@ inline SSATmp* ldThis(IRGS& env) {
 }
 
 inline SSATmp* ldCtx(IRGS& env) {
+  if (!curClass(env))                return cns(env, nullptr);
+  if (!curFunc(env)->mayHaveThis())  return gen(env, LdCctx, fp(env));
   if (env.irb->fs().thisAvailable()) return ldThis(env);
   return gen(env, LdCtx, fp(env));
 }
@@ -503,7 +502,7 @@ inline SSATmp* unbox(IRGS& env, SSATmp* val, Block* exit) {
 // Other common helpers
 
 inline bool classIsUnique(const Class* cls) {
-  return RuntimeOption::RepoAuthoritative && cls && (cls->attrs() & AttrUnique);
+  return cls && (cls->attrs() & AttrUnique);
 }
 
 inline bool classIsUniqueNormalClass(const Class* cls) {
@@ -788,19 +787,7 @@ inline void decRefLocalsInline(IRGS& env) {
 inline void decRefThis(IRGS& env) {
   if (!curFunc(env)->mayHaveThis()) return;
   auto const ctx = ldCtx(env);
-  ifThenElse(
-    env,
-    [&] (Block* taken) {
-      gen(env, CheckCtxThis, taken, ctx);
-    },
-    [&] {  // Next: it's a this
-      auto const this_ = gen(env, CastCtxThis, ctx);
-      decRef(env, this_);
-    },
-    [&] {  // Taken: static context, or psuedomain w/o a $this
-      // No op.
-    }
-  );
+  decRef(env, ctx);
 }
 
 //////////////////////////////////////////////////////////////////////

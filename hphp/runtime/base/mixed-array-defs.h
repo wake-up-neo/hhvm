@@ -23,8 +23,6 @@
 #include "hphp/runtime/base/array-iterator-defs.h"
 #include "hphp/runtime/base/packed-array.h"
 #include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/base/struct-array.h"
-#include "hphp/runtime/base/struct-array-defs.h"
 
 #include "hphp/util/stacktrace-profiler.h"
 #include "hphp/util/word-mem.h"
@@ -117,7 +115,8 @@ inline void MixedArray::initHash(int32_t* hash, uint32_t scale) {
     : "+r"(offset) : "r"(hash) : "xmm0"
   );
 #else
-  wordfill(hash, Empty, HashSize(scale));
+  static_assert(Empty == -1, "Cannot use wordfillones().");
+  wordfillones(hash, HashSize(scale));
 #endif
 }
 
@@ -226,6 +225,13 @@ void MixedArray::getArrayElm(ssize_t pos, TypedValue* valOut) const {
 }
 
 ALWAYS_INLINE
+const TypedValue& MixedArray::getArrayElmRef(ssize_t pos) const {
+  assert(size_t(pos) < m_used);
+  auto& elm = data()[pos];
+  return elm.data;
+}
+
+ALWAYS_INLINE
 void MixedArray::dupArrayElmWithRef(ssize_t pos,
                                    TypedValue* valOut,
                                    TypedValue* keyOut) const {
@@ -243,20 +249,6 @@ MixedArray::Elm& MixedArray::allocElm(int32_t* ei) {
   (*ei) = i;
   m_used = i + 1;
   return data()[i];
-}
-
-inline MixedArray* MixedArray::asMixed(ArrayData* ad) {
-  assert(ad->isMixed() || ad->isDict() || ad->isKeyset());
-  auto a = static_cast<MixedArray*>(ad);
-  assert(a->checkInvariants());
-  return a;
-}
-
-inline const MixedArray* MixedArray::asMixed(const ArrayData* ad) {
-  assert(ad->isMixed() || ad->isDict() || ad->isKeyset());
-  auto a = static_cast<const MixedArray*>(ad);
-  assert(a->checkInvariants());
-  return a;
 }
 
 inline size_t MixedArray::hashSize() const {
@@ -338,15 +330,10 @@ struct MixedArray::ValIter {
     : m_arr(arr)
     , m_kind(arr->kind())
   {
-    assert(isMixed(m_kind) || m_kind == kPackedKind ||
-           m_kind == kVecKind || m_kind == kStructKind);
+    assert(isMixed(m_kind) || m_kind == kPackedKind || m_kind == kVecKind);
     if (isMixed(m_kind)) {
       m_iterMixed = asMixed(arr)->data();
       m_stopMixed = m_iterMixed + asMixed(arr)->m_used;
-    } else if (m_kind == kStructKind) {
-      auto structArray = StructArray::asStructArray(arr);
-      m_iterStruct = structArray->data();
-      m_stopStruct = m_iterStruct + structArray->size();
     } else {
       m_iterPacked = reinterpret_cast<TypedValue*>(arr + 1);
       m_stopPacked = m_iterPacked + arr->m_size;
@@ -357,17 +344,11 @@ struct MixedArray::ValIter {
     : m_arr(arr)
     , m_kind(arr->kind())
   {
-    assert(isMixed(m_kind) || m_kind == kPackedKind ||
-           m_kind == kVecKind || m_kind == kStructKind);
+    assert(isMixed(m_kind) || m_kind == kPackedKind || m_kind == kVecKind);
     if (isMixed(m_kind)) {
       m_iterMixed = asMixed(arr)->data() + start_pos;
       m_stopMixed = asMixed(arr)->data() + asMixed(arr)->m_used;
       assert(m_iterMixed <= m_stopMixed);
-     } else if (m_kind == kStructKind) {
-      auto structArray = StructArray::asStructArray(arr);
-      m_iterStruct = structArray->data() + start_pos;
-      m_stopStruct = structArray->data() + arr->size();
-      assert(m_iterStruct <= m_stopStruct);
     } else {
       m_iterPacked = reinterpret_cast<TypedValue*>(arr + 1) + start_pos;
       m_stopPacked = reinterpret_cast<TypedValue*>(arr + 1) + arr->m_size;
@@ -402,9 +383,6 @@ struct MixedArray::ValIter {
 
   ssize_t currentPos() const {
     if (isMixed(m_kind)) return m_iterMixed - asMixed(m_arr)->data();
-    if (m_kind == kStructKind) {
-      return m_iterStruct - StructArray::asStructArray(m_arr)->data();
-    }
     return m_iterPacked - reinterpret_cast<TypedValue*>(m_arr + 1);
   }
 
@@ -414,12 +392,10 @@ private:
   union {
     Elm* m_iterMixed;
     TypedValue* m_iterPacked;
-    TypedValue* m_iterStruct;
   };
   union {
     Elm* m_stopMixed;
     TypedValue* m_stopPacked;
-    TypedValue* m_stopStruct;
   };
 };
 
@@ -482,15 +458,51 @@ void ConvertTvToUncounted(TypedValue* source) {
       else str = StringData::MakeUncounted(str->slice());
       break;
     }
+    case KindOfVec:
+      source->m_type = KindOfPersistentVec;
+      // Fall-through.
+    case KindOfPersistentVec: {
+      auto& ad = source->m_data.parr;
+      assert(ad->isVecArray());
+      if (ad->isStatic()) break;
+      else if (ad->empty()) ad = staticEmptyVecArray();
+      else ad = PackedArray::MakeUncounted(ad);
+      break;
+    }
+
+    case KindOfDict:
+      source->m_type = KindOfPersistentDict;
+      // Fall-through.
+    case KindOfPersistentDict: {
+      auto& ad = source->m_data.parr;
+      assert(ad->isDict());
+      if (ad->isStatic()) break;
+      else if (ad->empty()) ad = staticEmptyDictArray();
+      else ad = MixedArray::MakeUncounted(ad);
+      break;
+    }
+
+    case KindOfKeyset:
+      source->m_type = KindOfPersistentKeyset;
+      // Fall-through.
+    case KindOfPersistentKeyset: {
+      auto& ad = source->m_data.parr;
+      assert(ad->isKeyset());
+      if (ad->isStatic()) break;
+      else if (ad->empty()) ad = staticEmptyKeysetArray();
+      else ad = MixedArray::MakeUncounted(ad);
+      break;
+    }
+
     case KindOfArray:
       source->m_type = KindOfPersistentArray;
       // Fall-through.
     case KindOfPersistentArray: {
       auto& ad = source->m_data.parr;
+      assert(ad->isPHPArray());
       if (ad->isStatic()) break;
       else if (ad->empty()) ad = staticEmptyArray();
       else if (ad->isPackedLayout()) ad = PackedArray::MakeUncounted(ad);
-      else if (ad->isStruct()) ad = StructArray::MakeUncounted(ad);
       else ad = MixedArray::MakeUncounted(ad);
       break;
     }
@@ -521,12 +533,11 @@ void ReleaseUncountedTv(TypedValue& tv) {
     }
     return;
   }
-  if (isArrayType(tv.m_type)) {
+  if (isArrayLikeType(tv.m_type)) {
     auto arr = tv.m_data.parr;
     assert(!arr->isRefCounted());
     if (!arr->isStatic()) {
       if (arr->isPackedLayout()) PackedArray::ReleaseUncounted(arr);
-      else if (arr->isStruct()) StructArray::ReleaseUncounted(arr);
       else MixedArray::ReleaseUncounted(arr);
     }
     return;

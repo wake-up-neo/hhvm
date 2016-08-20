@@ -21,6 +21,7 @@
  *)
 (*****************************************************************************)
 open Core
+open Decl_defs
 open Typing_defs
 open Typing_deps
 
@@ -199,16 +200,6 @@ module CompareTypes = struct
     let acc = constraints_ acc x1 x2 in
     acc
 
-  and class_elt (subst, same) celt1 celt2 =
-    let same = same && celt1.ce_visibility = celt2.ce_visibility in
-    let same = same && celt1.ce_final = celt2.ce_final in
-    let same = same && celt1.ce_is_xhp_attr = celt2.ce_is_xhp_attr in
-    let same = same && celt1.ce_override = celt2.ce_override in
-    let same = same && celt1.ce_synthesized = celt2.ce_synthesized in
-    ty (subst, same) celt1.ce_type celt2.ce_type
-
-  and members acc m1 m2 = smap class_elt acc m1 m2
-
   and class_const (subst, same) c1 c2 =
     let same = same && c1.cc_synthesized = c2.cc_synthesized in
     ty (subst, same) c1.cc_type c2.cc_type
@@ -228,12 +219,6 @@ module CompareTypes = struct
 
   and typeconsts acc tc1 tc2 = smap typeconst acc tc1 tc2
 
-  and constructor acc c1 c2 =
-    let subst, same = match (fst c1), (fst c2) with
-      | Some x1, Some x2 -> class_elt acc x1 x2
-      | _ -> acc
-    in subst, same && (snd c1 = snd c2)
-
   and req_ancestry acc imp1 imp2 =
     if List.length imp1 <> List.length imp2
     then default
@@ -251,28 +236,28 @@ module CompareTypes = struct
   and class_ (subst, same) c1 c2 =
     let same =
       same &&
-      c1.tc_final = c2.tc_final &&
-      c1.tc_need_init = c2.tc_need_init &&
-      c1.tc_members_fully_known = c2.tc_members_fully_known &&
-      c1.tc_abstract = c2.tc_abstract &&
-      c1.tc_kind = c2.tc_kind &&
-      c1.tc_name = c2.tc_name &&
-      SSet.compare c1.tc_deferred_init_members c2.tc_deferred_init_members = 0 &&
-      SSet.compare c1.tc_extends c2.tc_extends = 0 &&
-      SSet.compare c1.tc_req_ancestors_extends c2.tc_req_ancestors_extends = 0
+      c1.dc_final = c2.dc_final &&
+      c1.dc_need_init = c2.dc_need_init &&
+      c1.dc_members_fully_known = c2.dc_members_fully_known &&
+      c1.dc_abstract = c2.dc_abstract &&
+      c1.dc_kind = c2.dc_kind &&
+      c1.dc_name = c2.dc_name &&
+      SSet.compare c1.dc_deferred_init_members c2.dc_deferred_init_members = 0 &&
+      SSet.compare c1.dc_extends c2.dc_extends = 0 &&
+      SSet.compare c1.dc_req_ancestors_extends c2.dc_req_ancestors_extends = 0 &&
+      SMap.compare c1.dc_methods c2.dc_methods = 0 &&
+      SMap.compare c1.dc_smethods c2.dc_smethods = 0 &&
+      SMap.compare c1.dc_props c2.dc_props = 0 &&
+      SMap.compare c1.dc_sprops c2.dc_sprops = 0 &&
+      c1.dc_construct = c2.dc_construct
     in
     let acc = subst, same in
-    let acc = tparam_list acc c1.tc_tparams c2.tc_tparams in
-    let acc = class_consts acc c1.tc_consts c2.tc_consts in
-    let acc = members acc c1.tc_props c2.tc_props in
-    let acc = members acc c1.tc_sprops c2.tc_sprops in
-    let acc = members acc c1.tc_methods c2.tc_methods in
-    let acc = members acc c1.tc_smethods c2.tc_smethods in
-    let acc = typeconsts acc c1.tc_typeconsts c2.tc_typeconsts in
-    let acc = constructor acc c1.tc_construct c2.tc_construct in
-    let acc = req_ancestry acc c1.tc_req_ancestors c2.tc_req_ancestors in
-    let acc = ancestry acc c1.tc_ancestors c2.tc_ancestors in
-    let acc = cmp_opt enum_type acc c1.tc_enum_type c2.tc_enum_type in
+    let acc = tparam_list acc c1.dc_tparams c2.dc_tparams in
+    let acc = class_consts acc c1.dc_consts c2.dc_consts in
+    let acc = typeconsts acc c1.dc_typeconsts c2.dc_typeconsts in
+    let acc = req_ancestry acc c1.dc_req_ancestors c2.dc_req_ancestors in
+    let acc = ancestry acc c1.dc_ancestors c2.dc_ancestors in
+    let acc = cmp_opt enum_type acc c1.dc_enum_type c2.dc_enum_type in
     acc
 
 end
@@ -309,44 +294,132 @@ module ClassDiff = struct
     let is_unchanged = true in
 
     (* compare class constants *)
-    let consts_diff = smap class1.tc_consts class2.tc_consts in
+    let consts_diff = smap class1.dc_consts class2.dc_consts in
     let is_unchanged = is_unchanged && SSet.is_empty consts_diff in
     let acc = add_inverted_deps acc (fun x -> Dep.Const (cid, x)) consts_diff in
 
     (* compare class members *)
-    let props_diff = smap class1.tc_props class2.tc_props in
+    let props_diff = smap class1.dc_props class2.dc_props in
     let is_unchanged = is_unchanged && SSet.is_empty props_diff in
     let acc = add_inverted_deps acc (fun x -> Dep.Prop (cid, x)) props_diff in
 
     (* compare class static members *)
-    let sprops_diff = smap class1.tc_sprops class2.tc_sprops in
+    let sprops_diff = smap class1.dc_sprops class2.dc_sprops in
     let is_unchanged = is_unchanged && SSet.is_empty sprops_diff in
     let acc = add_inverted_deps acc (fun x -> Dep.SProp (cid, x)) sprops_diff in
 
     (* compare class methods *)
-    let methods_diff = smap class1.tc_methods class2.tc_methods in
+    let methods_diff = smap class1.dc_methods class2.dc_methods in
     let is_unchanged = is_unchanged && SSet.is_empty methods_diff in
     let acc = add_inverted_deps acc (fun x -> Dep.Method (cid, x)) methods_diff in
 
     (* compare class static methods *)
-    let smethods_diff = smap class1.tc_smethods class2.tc_smethods in
+    let smethods_diff = smap class1.dc_smethods class2.dc_smethods in
     let is_unchanged = is_unchanged && SSet.is_empty smethods_diff in
     let acc = add_inverted_deps acc (fun x -> Dep.SMethod (cid, x)) smethods_diff in
 
     (* compare class constructors *)
-    let cstr_diff = class1.tc_construct <> class2.tc_construct in
+    let cstr_diff = class1.dc_construct <> class2.dc_construct in
     let is_unchanged = is_unchanged && not cstr_diff in
     let cstr_ideps = Typing_deps.get_ideps (Dep.Cstr cid) in
     let acc = if cstr_diff then DepSet.union acc cstr_ideps else acc in
 
     (* compare class type constants *)
-    let typeconsts_diff = smap class1.tc_typeconsts class2.tc_typeconsts in
+    let typeconsts_diff = smap class1.dc_typeconsts class2.dc_typeconsts in
     let is_unchanged = is_unchanged && SSet.is_empty typeconsts_diff in
     let acc =
       add_inverted_deps acc (fun x -> Dep.Const (cid, x)) typeconsts_diff in
 
     acc, is_unchanged
 
+end
+
+(*****************************************************************************)
+(* Given two classes give back the set of functions or classes that need
+ * to be rechecked because the type of their member changed
+ *)
+(*****************************************************************************)
+module ClassEltDiff = struct
+  open Decl_heap
+
+  let add_inverted_dep build_obj x _ acc =
+    DepSet.union (Typing_deps.get_ideps (build_obj x)) acc
+
+  let add_inverted_deps acc build_obj xmap =
+    SMap.fold (add_inverted_dep build_obj) xmap acc
+
+  let diff_elts (type t) (module EltHeap: SharedMem.NoCache
+      with type key = string * string
+       and type t = t
+    ) ~cid ~elts1 ~elts2 ~normalize =
+    SMap.merge begin fun name elt1 elt2 ->
+      let key = (cid, name) in
+      match elt1, elt2 with
+      | Some elt, _ | _, Some elt when elt.elt_origin = cid ->
+        begin
+          match EltHeap.get_old key, EltHeap.get key with
+          | None, _ | _, None -> Some ()
+          | Some x1, Some x2 ->
+            let ty1 = normalize x1 in
+            let ty2 = normalize x2 in
+            if ty1 = ty2
+            then None
+            else Some ()
+        end
+      | _ -> None
+    end elts1 elts2
+
+  let compare_props class1 class2 acc =
+    let cid = class1.dc_name in
+    let elts1, elts2 = class1.dc_props, class2.dc_props in
+    let diff = diff_elts (module Props) ~cid ~elts1 ~elts2
+        ~normalize:Decl_pos_utils.NormalizeSig.ty in
+    add_inverted_deps acc (fun x -> Dep.Prop (cid, x)) diff
+
+  let compare_sprops class1 class2 acc =
+    let cid = class1.dc_name in
+    let elts1, elts2 = class1.dc_sprops, class2.dc_sprops in
+    let diff = diff_elts (module StaticProps) ~cid ~elts1 ~elts2
+        ~normalize:Decl_pos_utils.NormalizeSig.ty in
+    add_inverted_deps acc (fun x -> Dep.SProp (cid, x)) diff
+
+  let compare_meths class1 class2 acc =
+    let cid = class1.dc_name in
+    let elts1, elts2 = class1.dc_methods, class2.dc_methods in
+    let diff = diff_elts (module Methods) ~cid ~elts1 ~elts2
+        ~normalize:Decl_pos_utils.NormalizeSig.fun_type in
+    add_inverted_deps acc (fun x -> Dep.Method (cid, x)) diff
+
+  let compare_smeths class1 class2 acc =
+    let cid = class1.dc_name in
+    let elts1, elts2 = class1.dc_smethods, class2.dc_smethods in
+    let diff = diff_elts (module StaticMethods) ~cid ~elts1 ~elts2
+        ~normalize:Decl_pos_utils.NormalizeSig.fun_type in
+    add_inverted_deps acc (fun x -> Dep.SMethod (cid, x)) diff
+
+  let compare_cstrs class1 class2 =
+    let cid = class1.dc_name in
+    match class1.dc_construct, class2.dc_construct with
+    | (Some elt, _), _
+    | _, (Some elt, _) when elt.elt_origin = cid ->
+      begin
+        match Constructors.get_old cid, Constructors.get cid with
+        | None, _ | _, None -> Typing_deps.get_ideps (Dep.Cstr cid)
+        | Some ft1, Some ft2 ->
+            let ft1 = Decl_pos_utils.NormalizeSig.fun_type ft1 in
+            let ft2 = Decl_pos_utils.NormalizeSig.fun_type ft2 in
+            if ft1 = ft2
+            then DepSet.empty
+            else Typing_deps.get_ideps (Dep.Cstr cid)
+      end
+    | _ -> DepSet.empty
+
+  let compare class1 class2 =
+    compare_cstrs class1 class2
+    |> compare_props class1 class2
+    |> compare_sprops class1 class2
+    |> compare_meths class1 class2
+    |> compare_smeths class1 class2
 end
 
 (*****************************************************************************)
@@ -360,23 +433,24 @@ end
  *)
 (*****************************************************************************)
 let class_big_diff class1 class2 =
-  let class1 = Typing_pos_utils.NormalizeSig.class_type class1 in
-  let class2 = Typing_pos_utils.NormalizeSig.class_type class2 in
-  class1.tc_need_init <> class2.tc_need_init ||
-  SSet.compare class1.tc_deferred_init_members class2.tc_deferred_init_members <> 0 ||
-  class1.tc_members_fully_known <> class2.tc_members_fully_known ||
-  class1.tc_kind <> class2.tc_kind ||
-  class1.tc_tparams <> class2.tc_tparams ||
-  SMap.compare class1.tc_ancestors class2.tc_ancestors <> 0 ||
+  let class1 = Decl_pos_utils.NormalizeSig.class_type class1 in
+  let class2 = Decl_pos_utils.NormalizeSig.class_type class2 in
+  class1.dc_need_init <> class2.dc_need_init ||
+  SSet.compare class1.dc_deferred_init_members class2.dc_deferred_init_members <> 0 ||
+  class1.dc_members_fully_known <> class2.dc_members_fully_known ||
+  class1.dc_kind <> class2.dc_kind ||
+  class1.dc_tparams <> class2.dc_tparams ||
+  SMap.compare class1.dc_substs class2.dc_substs <> 0 ||
+  SMap.compare class1.dc_ancestors class2.dc_ancestors <> 0 ||
   List.compare ~cmp:Pervasives.compare
-    class1.tc_req_ancestors class2.tc_req_ancestors <> 0 ||
-  SSet.compare class1.tc_req_ancestors_extends class2.tc_req_ancestors_extends <> 0 ||
-  SSet.compare class1.tc_extends class2.tc_extends <> 0 ||
-  class1.tc_enum_type <> class2.tc_enum_type ||
+    class1.dc_req_ancestors class2.dc_req_ancestors <> 0 ||
+  SSet.compare class1.dc_req_ancestors_extends class2.dc_req_ancestors_extends <> 0 ||
+  SSet.compare class1.dc_extends class2.dc_extends <> 0 ||
+  class1.dc_enum_type <> class2.dc_enum_type ||
   (* due to, e.g. switch exhaustiveness checks, a change in an enum's
    * constant set is a "big" difference *)
-    (class1.tc_enum_type <> None &&
-       not (SSet.is_empty (ClassDiff.smap class1.tc_consts class2.tc_consts)))
+    (class1.dc_enum_type <> None &&
+       not (SSet.is_empty (ClassDiff.smap class1.dc_consts class2.dc_consts)))
 
 (*****************************************************************************)
 (* Given a class name adds all the subclasses, we need a "trace" to follow
@@ -423,11 +497,11 @@ let get_extend_deps cid_hash to_redecl =
 *)
 (*****************************************************************************)
 let get_fun_deps old_funs fid (to_redecl, to_recheck) =
-  match SMap.find_unsafe fid old_funs, Typing_heap.Funs.get fid with
+  match SMap.find_unsafe fid old_funs, Decl_heap.Funs.get fid with
   (* Note that we must include all dependencies even if we get the None, None
    * case. Due to the fact we can declare types lazily, there may be no
-   * existing declaration in the old Typing_heap that corresponds to a function
-   * `foo` in the AST. Then when the user deletes `foo`, the new Typing_heap
+   * existing declaration in the old Decl_heap that corresponds to a function
+   * `foo` in the AST. Then when the user deletes `foo`, the new Decl_heap
    * will also lack a definition of `foo`. Now we must recheck all the use
    * sites of `foo` to make sure there are no dangling references. *)
   | None, _ | _, None ->
@@ -436,8 +510,8 @@ let get_fun_deps old_funs fid (to_redecl, to_recheck) =
       let fun_name = Typing_deps.get_bazooka (Dep.FunName fid) in
       DepSet.union fun_name to_redecl, DepSet.union fun_name to_recheck
   | Some fty1, Some fty2 ->
-      let fty1 = Typing_pos_utils.NormalizeSig.fun_type fty1 in
-      let fty2 = Typing_pos_utils.NormalizeSig.fun_type fty2 in
+      let fty1 = Decl_pos_utils.NormalizeSig.fun_type fty1 in
+      let fty2 = Decl_pos_utils.NormalizeSig.fun_type fty2 in
       let is_same_signature = fty1 = fty2 in
       if is_same_signature
       then to_redecl, to_recheck
@@ -456,13 +530,13 @@ let get_funs_deps old_funs funs =
 *)
 (*****************************************************************************)
 let get_type_deps old_types tid to_recheck =
-  match SMap.find_unsafe tid old_types, Typing_heap.Typedefs.get tid with
+  match SMap.find_unsafe tid old_types, Decl_heap.Typedefs.get tid with
   | None, _ | _, None ->
       let bazooka = Typing_deps.get_bazooka (Dep.Class tid) in
       DepSet.union bazooka to_recheck
   | Some tdef1, Some tdef2 ->
-      let tdef1 = Typing_pos_utils.NormalizeSig.typedef tdef1 in
-      let tdef2 = Typing_pos_utils.NormalizeSig.typedef tdef2 in
+      let tdef1 = Decl_pos_utils.NormalizeSig.typedef tdef1 in
+      let tdef2 = Decl_pos_utils.NormalizeSig.typedef tdef2 in
       let is_same_signature = tdef1 = tdef2 in
       if is_same_signature
       then to_recheck
@@ -481,7 +555,7 @@ let get_types_deps old_types types =
 (*****************************************************************************)
 let get_gconst_deps old_gconsts cst_id (to_redecl, to_recheck) =
   let cst1 = SMap.find_unsafe cst_id old_gconsts in
-  let cst2 = Typing_heap.GConsts.get cst_id in
+  let cst2 = Decl_heap.GConsts.get cst_id in
   match cst1, cst2 with
   | None, _ | _, None ->
       let where_const_is_used = Typing_deps.get_bazooka (Dep.GConst cst_id) in
@@ -512,27 +586,38 @@ let get_class_deps old_classes new_classes trace cid (to_redecl, to_recheck) =
   | Some class1, Some class2 when class_big_diff class1 class2 ->
       get_all_dependencies trace cid (to_redecl, to_recheck)
   | Some class1, Some class2 ->
-      let nclass1 = Typing_pos_utils.NormalizeSig.class_type class1 in
-      let nclass2 = Typing_pos_utils.NormalizeSig.class_type class2 in
+      let nclass1 = Decl_pos_utils.NormalizeSig.class_type class1 in
+      let nclass2 = Decl_pos_utils.NormalizeSig.class_type class2 in
       let deps, is_unchanged = ClassDiff.compare cid nclass1 nclass2 in
       let cid_hash = Typing_deps.Dep.make (Dep.Class cid) in
-      if is_unchanged
-      then
-        let _, is_unchanged = ClassDiff.compare cid class1 class2 in
+      let to_redecl, to_recheck =
         if is_unchanged
-        then to_redecl, to_recheck
+        then
+          let _, is_unchanged = ClassDiff.compare cid class1 class2 in
+          if is_unchanged
+          then to_redecl, to_recheck
+          else
+            (* If we reach this case it means that class1 and class2
+             * have the same signatures, but that some of their
+             * positions differ. We therefore must redeclare the sub-classes
+             * but not recheck them.
+            *)
+            let to_redecl = get_extend_deps_ trace cid_hash to_redecl in
+            to_redecl, to_recheck
         else
-          (* If we reach this case it means that class1 and class2
-           * have the same signatures, but that some of their
-           * positions differ. We therefore must redeclare the sub-classes
-           * but not recheck them.
-           *)
           let to_redecl = get_extend_deps_ trace cid_hash to_redecl in
-          to_redecl, to_recheck
-      else
-        let to_redecl = get_extend_deps_ trace cid_hash to_redecl in
-        let to_recheck = DepSet.union to_redecl to_recheck in
-        DepSet.union deps to_redecl, DepSet.union deps to_recheck
+          let to_recheck = DepSet.union to_redecl to_recheck in
+          DepSet.union deps to_redecl, DepSet.union deps to_recheck
+      in
+
+      (* This adds additional files to recheck if the type signature of a class
+       * element has changed. We do not require adding any additional redecls
+       * because the type is not folded in anyway so it won't affect any other
+       * classes.
+       *)
+      let deps = ClassEltDiff.compare class1 class2 in
+      (* TODO: should not need to add to to_redecl *)
+      DepSet.union deps to_redecl, DepSet.union deps to_recheck
 
 let get_classes_deps old_classes new_classes classes =
   SSet.fold

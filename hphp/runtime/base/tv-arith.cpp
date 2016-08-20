@@ -35,9 +35,20 @@ namespace HPHP {
 namespace {
 
 [[noreturn]] NEVER_INLINE
-void throw_bad_array_operand() {
-  throw ExtendedException("Invalid operand type was used: "
-                          "cannot perform this operation with arrays");
+void throw_bad_array_operand(const ArrayData* ad) {
+  const char* type = [&]{
+    if (ad->isVecArray()) return "vecs";
+    if (ad->isDict()) return "dicts";
+    if (ad->isKeyset()) return "keysets";
+    assert(ad->isPHPArray());
+    return "arrays";
+  }();
+  throw ExtendedException(
+    folly::sformat(
+      "Invalid operand type was used: "
+      "cannot perform this operation with {}", type
+    )
+  );
 }
 
 Cell make_int(int64_t n) { return make_tv<KindOfInt64>(n); }
@@ -60,9 +71,15 @@ TypedNum numericConvHelper(Cell cell) {
     case KindOfPersistentString:
       return stringToNumeric(cell.m_data.pstr);
 
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
     case KindOfPersistentArray:
     case KindOfArray:
-      throw_bad_array_operand();
+      throw_bad_array_operand(cell.m_data.parr);
 
     case KindOfObject:
       return make_int(cell.m_data.pobj->toInt64());
@@ -100,8 +117,8 @@ again:
     }
   }
 
-  if (isArrayType(c1.m_type) && isArrayType(c2.m_type)) {
-    return make_tv<KindOfArray>(o(c1.m_data.parr, c2.m_data.parr));
+  if (isArrayLikeType(c1.m_type) && isArrayLikeType(c2.m_type)) {
+    return make_array_like_tv(o(c1.m_data.parr, c2.m_data.parr));
   }
 
   cellCopy(numericConvHelper(c1), c1);
@@ -113,7 +130,7 @@ again:
 // returns the overflowed value.
 template<class Op, class Check, class Over>
 Cell cellArithO(Op o, Check ck, Over ov, Cell c1, Cell c2) {
-  if (isArrayType(c1.m_type) && isArrayType(c2.m_type)) {
+  if (isArrayLikeType(c1.m_type) && isArrayLikeType(c2.m_type)) {
     return cellArith(o, c1, c2);
   }
 
@@ -152,7 +169,7 @@ struct Sub {
   Cell operator()(int64_t a, int64_t b) const { return make_int(a - b); }
 
   ArrayData* operator()(ArrayData* a1, ArrayData* a2) const {
-    throw_bad_array_operand();
+    throw_bad_array_operand(a1);
   }
 };
 
@@ -163,7 +180,7 @@ struct Mul {
   Cell operator()(int64_t a, int64_t b) const { return make_int(a * b); }
 
   ArrayData* operator()(ArrayData* a1, ArrayData* a2) const {
-    throw_bad_array_operand();
+    throw_bad_array_operand(a1);
   }
 };
 
@@ -224,7 +241,7 @@ struct Div {
   }
 
   ArrayData* operator()(ArrayData* a1, ArrayData* a2) const {
-    throw_bad_array_operand();
+    throw_bad_array_operand(a1);
   }
 };
 
@@ -262,12 +279,12 @@ again:
     }
   }
 
-  if (isArrayType(c1.m_type) && isArrayType(c2.m_type)) {
+  if (isArrayLikeType(c1.m_type) && isArrayLikeType(c2.m_type)) {
     auto const ad1    = c1.m_data.parr;
     auto const newArr = op(ad1, c2.m_data.parr);
     if (newArr != ad1) {
       c1.m_data.parr = newArr;
-      c1.m_type = KindOfArray;
+      c1.m_type = newArr->toDataType();
       decRefArr(ad1);
     }
     return;
@@ -301,7 +318,7 @@ struct SubEq {
   double  operator()(double  a, double  b) const { return a - b; }
 
   ArrayData* operator()(ArrayData* ad1, ArrayData* ad2) const {
-    throw_bad_array_operand();
+    throw_bad_array_operand(ad1);
   }
 };
 
@@ -312,7 +329,7 @@ struct MulEq {
   double  operator()(double  a, double  b) const { return a * b; }
 
   ArrayData* operator()(ArrayData* ad1, ArrayData* ad2) const {
-    throw_bad_array_operand();
+    throw_bad_array_operand(ad1);
   }
 };
 
@@ -428,6 +445,12 @@ void cellIncDecOp(Op op, Cell& cell) {
       return;
 
     case KindOfBoolean:
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
     case KindOfPersistentArray:
     case KindOfArray:
     case KindOfObject:
@@ -717,6 +740,12 @@ void cellBitNot(Cell& cell) {
     case KindOfUninit:
     case KindOfNull:
     case KindOfBoolean:
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
     case KindOfPersistentArray:
     case KindOfArray:
     case KindOfObject:

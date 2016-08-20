@@ -27,6 +27,7 @@
 #include "hphp/runtime/base/zend-functions.h"
 
 #include "hphp/util/alloc.h"
+#include "hphp/util/conv-10.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -190,6 +191,12 @@ void StringBuffer::append(const Variant& v) {
     case KindOfNull:
     case KindOfBoolean:
     case KindOfDouble:
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
     case KindOfPersistentArray:
     case KindOfArray:
     case KindOfObject:

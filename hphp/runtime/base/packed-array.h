@@ -37,6 +37,7 @@ struct ArrayData;
 struct StringData;
 struct MArrayIter;
 struct MixedArray;
+struct APCArray;
 
 //////////////////////////////////////////////////////////////////////
 
@@ -109,9 +110,10 @@ struct PackedArray final: type_scan::MarkCountable<PackedArray> {
   static ArrayData* Pop(ArrayData*, Variant& value);
   static ArrayData* Dequeue(ArrayData*, Variant& value);
   static ArrayData* Prepend(ArrayData*, Cell v, bool copy);
-  static ArrayData* ToDict(ArrayData*);
-  static ArrayData* ToVec(const ArrayData*);
-  static ArrayData* ToKeyset(ArrayData*);
+  static ArrayData* ToPHPArray(ArrayData*, bool);
+  static ArrayData* ToDict(ArrayData*, bool);
+  static ArrayData* ToVec(ArrayData*, bool);
+  static ArrayData* ToKeyset(ArrayData*, bool);
   static void Renumber(ArrayData*) {}
   static void OnSetEvalScalar(ArrayData*);
   static ArrayData* Escalate(const ArrayData* ad) {
@@ -134,9 +136,9 @@ struct PackedArray final: type_scan::MarkCountable<PackedArray> {
   static ArrayData* AppendWithRefVec(ArrayData*, const Variant&, bool);
   static ArrayData* PlusEqVec(ArrayData*, const ArrayData*);
   static ArrayData* MergeVec(ArrayData*, const ArrayData*);
-  static ArrayData* ToVecVec(const ArrayData* ad) {
-    return const_cast<ArrayData*>(ad);
-  }
+  static ArrayData* ToPHPArrayVec(ArrayData*, bool);
+  static ArrayData* ToDictVec(ArrayData*, bool);
+  static ArrayData* ToVecVec(ArrayData*, bool);
 
   static constexpr auto ReleaseVec = &Release;
   static constexpr auto NvGetIntVec = &NvGetInt;
@@ -173,10 +175,17 @@ struct PackedArray final: type_scan::MarkCountable<PackedArray> {
   static constexpr auto RenumberVec = &Renumber;
   static constexpr auto OnSetEvalScalarVec = &OnSetEvalScalar;
   static constexpr auto EscalateVec = &Escalate;
-  static constexpr auto ToDictVec = &ToDict;
   static constexpr auto ToKeysetVec = &ToKeyset;
 
   //////////////////////////////////////////////////////////////////////
+
+  // Like LvalInt, but silently does nothing if the element doesn't exist. Not
+  // part of the ArrayData interface, but used in member operations.
+  static ArrayData* LvalSilentInt(ArrayData*, int64_t, Variant*&, bool);
+
+  static constexpr auto LvalSilentIntVec = &LvalSilentInt;
+
+  /////////////////////////////////////////////////////////////////////
 
   static bool checkInvariants(const ArrayData*);
 
@@ -211,11 +220,23 @@ struct PackedArray final: type_scan::MarkCountable<PackedArray> {
   static ArrayData* MakeUncounted(ArrayData* array, size_t extra = 0);
   static ArrayData* MakeUncountedHelper(ArrayData* array, size_t extra);
 
-  static ArrayData* MakeFromVec(ArrayData* adIn, bool copy);
+  static ArrayData* MakeVecFromAPC(const APCArray* apc);
+
+  static bool VecEqual(const ArrayData* ad1, const ArrayData* ad2);
+  static bool VecNotEqual(const ArrayData* ad1, const ArrayData* ad2);
+  static bool VecSame(const ArrayData* ad1, const ArrayData* ad2);
+  static bool VecNotSame(const ArrayData* ad1, const ArrayData* ad2);
+  static bool VecLt(const ArrayData* ad1, const ArrayData* ad2);
+  static bool VecLte(const ArrayData* ad1, const ArrayData* ad2);
+  static bool VecGt(const ArrayData* ad1, const ArrayData* ad2);
+  static bool VecGte(const ArrayData* ad1, const ArrayData* ad2);
+  static int64_t VecCmp(const ArrayData* ad1, const ArrayData* ad2);
 
   // Fast iteration
-  template <class F> static void IterateV(ArrayData* arr, F fn);
-  template <class F> static void IterateKV(ArrayData* arr, F fn);
+  template <class F, bool inc = true>
+  static void IterateV(const ArrayData* arr, F fn);
+  template <class F, bool inc = true>
+  static void IterateKV(const ArrayData* arr, F fn);
 
 private:
   static ArrayData* Grow(ArrayData*);
@@ -237,6 +258,9 @@ private:
   static ArrayData* MakeUninitializedImpl(uint32_t, HeaderKind);
 
   static ArrayData* CopyStaticHelper(const ArrayData*);
+
+  static bool VecEqualHelper(const ArrayData*, const ArrayData*, bool);
+  static int64_t VecCmpHelper(const ArrayData*, const ArrayData*);
 
   struct VecInitializer;
   static VecInitializer s_initializer;

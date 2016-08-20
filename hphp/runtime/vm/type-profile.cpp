@@ -30,12 +30,16 @@
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/stats.h"
 #include "hphp/runtime/base/thread-info.h"
+#include "hphp/runtime/ext/server/ext_server.h"
 #include "hphp/runtime/vm/func.h"
 #include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/write-lease.h"
 #include "hphp/runtime/vm/treadmill.h"
 #include "hphp/runtime/vm/jit/relocation.h"
+
 #include "hphp/util/atomic-vector.h"
+#include "hphp/util/boot_timer.h"
+#include "hphp/util/struct-log.h"
 
 namespace HPHP {
 
@@ -56,12 +60,34 @@ void profileInit() {
  */
 
 RequestKind __thread requestKind = RequestKind::Warmup;
-static bool warmingUp;
-static std::atomic<int64_t> numRequests;
 bool __thread standardRequest = true;
-static std::atomic<bool> singleJitLock;
-static std::atomic<int> singleJitRequests;
-static std::atomic<int> relocateRequests;
+
+namespace {
+
+bool warmingUp;
+std::atomic<int64_t> numRequests;
+std::atomic<bool> singleJitLock;
+__thread bool acquiredSingleJit = false;
+std::atomic<int> singleJitConcurrentCount;
+__thread bool acquiredSingleJitConcurrent = false;
+std::atomic<int> singleJitRequests;
+std::atomic<int> relocateRequests;
+
+/*
+ * RFH, or "requests served in first hour" is used as a performance metric that
+ * is affected by warmup speed as well as steady-state performance. For every
+ * element n in this list, we log a point along the RFH curve, which is the
+ * total number of requests served when server uptime hits n seconds.
+ */
+const std::vector<int64_t> rfhBuckets = {
+  30, 60, 90, 120, 150, 180, 210, 240, 270, 300,             // every 30s, to 5m
+  360, 420, 480, 540, 600,                                   // every 1m, to 10m
+  900, 1200, 1500, 1800, 2100, 2400, 2700, 3000, 3300, 3600, // every 5m, to 1h
+  4500, 5400, 6300, 7200,                                    // every 15m, to 2h
+};
+std::atomic<size_t> nextRFH{0};
+
+}
 
 void setRelocateRequests(int32_t n) {
   relocateRequests.store(n);
@@ -180,10 +206,30 @@ void profileRequestStart() {
   bool okToJit = requestKind == RequestKind::Standard;
   if (okToJit) {
     jit::Lease::mayLock(true);
+    jit::Lease::mayLockConcurrent(true);
+    assertx(!acquiredSingleJit);
+    assertx(!acquiredSingleJitConcurrent);
+
     if (singleJitRequests < RuntimeOption::EvalNumSingleJitRequests) {
-      bool flag = false;
-      if (!singleJitLock.compare_exchange_strong(flag, true)) {
+      if (!singleJitLock.exchange(true, std::memory_order_relaxed)) {
+        acquiredSingleJit = true;
+      } else {
         jit::Lease::mayLock(false);
+      }
+
+      if (RuntimeOption::EvalJitConcurrently > 0) {
+        // The single jit lock is treated separately for translations that
+        // happen concurrently: we still give threads permission to jit one
+        // request at a time, but we allow up to Eval.JitThreads to have this
+        // permission at once.
+        auto threads = singleJitConcurrentCount.load(std::memory_order_relaxed);
+        if (threads < RuntimeOption::EvalJitThreads &&
+            singleJitConcurrentCount.compare_exchange_strong(
+              threads, threads + 1, std::memory_order_relaxed)) {
+          acquiredSingleJitConcurrent = true;
+        } else {
+          jit::Lease::mayLockConcurrent(false);
+        }
       }
     }
   }
@@ -199,15 +245,53 @@ void profileRequestStart() {
   }
 }
 
+static void checkRFH(int64_t finished) {
+  auto i = nextRFH.load(std::memory_order_relaxed);
+  if (i == rfhBuckets.size() || !StructuredLog::enabled()) {
+    return;
+  }
+
+  auto const uptime = f_server_uptime();
+  if (uptime == -1) return;
+  assertx(uptime >= 0);
+
+  while (i < rfhBuckets.size() && uptime >= rfhBuckets[i]) {
+    assertx(i == 0 || rfhBuckets[i - 1] < rfhBuckets[i]);
+    if (!nextRFH.compare_exchange_strong(i, i + 1, std::memory_order_relaxed)) {
+      // Someone else reported the sample at i. Try again with the current
+      // value of nextRFH.
+      continue;
+    }
+
+    // "bucket" and "uptime" will always be the same as long as the server
+    // retires at least one request in each second of wall time.
+    StructuredLogEntry cols;
+    cols.setInt("requests", finished);
+    cols.setInt("bucket", rfhBuckets[i]);
+    cols.setInt("uptime", uptime);
+    StructuredLog::log("hhvm_rfh", cols);
+
+    ++i;
+  }
+}
+
 void profileRequestEnd() {
   if (warmingUp) return;
-  numRequests.fetch_add(1, std::memory_order_relaxed);
-  if (standardRequest &&
-      singleJitRequests < RuntimeOption::EvalNumSingleJitRequests &&
-      jit::Lease::mayLock(true)) {
-    assert(singleJitLock);
+  auto const finished = numRequests.fetch_add(1, std::memory_order_relaxed) + 1;
+  checkRFH(finished);
+
+  if (acquiredSingleJit || acquiredSingleJitConcurrent) {
     ++singleJitRequests;
-    singleJitLock = false;
+
+    if (acquiredSingleJit) {
+      singleJitLock = false;
+      acquiredSingleJit = false;
+    }
+    if (acquiredSingleJitConcurrent) {
+      --singleJitConcurrentCount;
+      acquiredSingleJitConcurrent = false;
+    }
+
     if (RuntimeOption::ServerExecutionMode()) {
       Logger::Warning("Finished singleJitRequest %d", singleJitRequests.load());
     }

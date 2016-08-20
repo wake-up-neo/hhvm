@@ -15,9 +15,13 @@
 */
 
 #include "hphp/runtime/vm/native.h"
-#include "hphp/runtime/vm/runtime.h"
+
+#include "hphp/runtime/base/req-ptr.h"
+#include "hphp/runtime/base/type-variant.h"
 #include "hphp/runtime/vm/func-emitter.h"
+#include "hphp/runtime/vm/runtime.h"
 #include "hphp/runtime/vm/unit.h"
+
 #include "hphp/runtime/ext_zend_compat/hhvm/zend-wrap-func.h"
 
 namespace HPHP { namespace Native {
@@ -28,7 +32,7 @@ ConstantMap s_constant_map;
 ClassConstantMapMap s_class_constant_map;
 
 static size_t numGPRegArgs() {
-#ifdef __AARCH64EL__
+#ifdef __aarch64__
   return 8; // r0-r7
 #elif defined(__powerpc64__)
   return 31;
@@ -173,14 +177,6 @@ void callFunc(const Func* func, void *ctx,
   auto const numArgs = func->numParams();
   auto retType = func->returnType();
 
-  if (!func->isReturnByValue()) {
-    if (!retType) {
-      GP_args[GP_count++] = (int64_t)&ret;
-    } else if (isBuiltinByRef(retType)) {
-      GP_args[GP_count++] = (int64_t)&ret.m_data;
-    }
-  }
-
   if (ctx) {
     GP_args[GP_count++] = (int64_t)ctx;
   }
@@ -203,7 +199,8 @@ void callFunc(const Func* func, void *ctx,
     if (func->isReturnByValue()) {
       ret = callFuncTVImpl(f, GP_args, GP_count, SIMD_args, SIMD_count);
     } else {
-      callFuncInt64Impl(f, GP_args, GP_count, SIMD_args, SIMD_count);
+      new (&ret) Variant(callFuncIndirectImpl<Variant>(f, GP_args, GP_count,
+                                                       SIMD_args, SIMD_count));
       if (ret.m_type == KindOfUninit) {
         ret.m_type = KindOfNull;
       }
@@ -232,14 +229,27 @@ void callFunc(const Func* func, void *ctx,
 
     case KindOfPersistentString:
     case KindOfString:
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
     case KindOfPersistentArray:
     case KindOfArray:
     case KindOfObject:
     case KindOfResource:
     case KindOfRef: {
       assert(isBuiltinByRef(ret.m_type));
-      auto val = callFuncInt64Impl(f, GP_args, GP_count, SIMD_args, SIMD_count);
-      if (func->isReturnByValue()) ret.m_data.num = val;
+      if (func->isReturnByValue()) {
+        auto val = callFuncInt64Impl(f, GP_args, GP_count, SIMD_args,
+                                     SIMD_count);
+        ret.m_data.num = val;
+      } else {
+        using T = req::ptr<StringData>;
+        new (&ret.m_data) T(callFuncIndirectImpl<T>(f, GP_args, GP_count,
+                                                    SIMD_args, SIMD_count));
+      }
       if (ret.m_data.num == 0) {
         ret.m_type = KindOfNull;
       }
@@ -298,15 +308,10 @@ bool coerceFCallArgs(TypedValue* args,
       targetType = tc.underlyingDataType();
     }
 
-    // Skip tvCoerceParamTo*() call if we're already the right type
-    if (args[-i].m_type == targetType ||
-        (isStringType(args[-i].m_type) && isStringType(targetType)) ||
-        (isArrayType(args[-i].m_type) && isArrayType(targetType))) {
-      continue;
-    }
+    // Skip tvCoerceParamTo*() call if we're already the right type, or if its a
+    // Variant.
+    if (!targetType || equivDataTypes(args[-i].m_type, *targetType)) continue;
 
-    // No coercion or cast for Variants.
-    if (!targetType) continue;
     if (RuntimeOption::PHP7_ScalarTypes && useStrictTypes) {
       tc.verifyParam(&args[-i], func, i, true);
       return true;
@@ -317,6 +322,9 @@ bool coerceFCallArgs(TypedValue* args,
       CASE(Int64)
       CASE(Double)
       CASE(String)
+      CASE(Vec)
+      CASE(Dict)
+      CASE(Keyset)
       CASE(Array)
       CASE(Resource)
 
@@ -332,6 +340,9 @@ bool coerceFCallArgs(TypedValue* args,
       case KindOfUninit:
       case KindOfNull:
       case KindOfPersistentString:
+      case KindOfPersistentVec:
+      case KindOfPersistentDict:
+      case KindOfPersistentKeyset:
       case KindOfPersistentArray:
       case KindOfRef:
       case KindOfClass:
@@ -534,7 +545,7 @@ void getFunctionPointers(const BuiltinFunctionInfo& info,
 static bool tcCheckNative(const TypeConstraint& tc, const NativeSig::Type ty) {
   using T = NativeSig::Type;
 
-  if (tc.isDict() || tc.isVec()) {
+  if (tc.isDict() || tc.isVec() || tc.isKeyset()) {
     return ty == T::Array || ty == T::ArrayArg;
   }
 
@@ -553,6 +564,12 @@ static bool tcCheckNative(const TypeConstraint& tc, const NativeSig::Type ty) {
     case KindOfObject:       return ty == T::Object   || ty == T::ObjectArg;
     case KindOfPersistentString:
     case KindOfString:       return ty == T::String   || ty == T::StringArg;
+    case KindOfPersistentVec:
+    case KindOfVec:          return ty == T::Array    || ty == T::ArrayArg;
+    case KindOfPersistentDict:
+    case KindOfDict:         return ty == T::Array    || ty == T::ArrayArg;
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:       return ty == T::Array    || ty == T::ArrayArg;
     case KindOfPersistentArray:
     case KindOfArray:        return ty == T::Array    || ty == T::ArrayArg;
     case KindOfResource:     return ty == T::Resource || ty == T::ResourceArg;

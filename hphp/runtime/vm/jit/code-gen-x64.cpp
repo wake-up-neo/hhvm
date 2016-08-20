@@ -38,11 +38,8 @@
 #include "hphp/runtime/base/rds-util.h"
 #include "hphp/runtime/base/rds.h"
 #include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/base/shape.h"
 #include "hphp/runtime/base/stats.h"
 #include "hphp/runtime/base/string-data.h"
-//#include "hphp/runtime/base/typed-value.h"
-//#include "hphp/runtime/base/struct-array.h"
 
 #include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/hhbc-codec.h"
@@ -141,29 +138,16 @@ void CodeGenerator::cgInst(IRInstruction* inst) {
     irlower::cg##opcode(m_state, i);                  \
   }
 
-NOOP_OPCODE(DefConst)
-NOOP_OPCODE(DefFP)
-NOOP_OPCODE(AssertLoc)
-NOOP_OPCODE(Nop)
-NOOP_OPCODE(EndGuards)
-NOOP_OPCODE(ExitPlaceholder);
-NOOP_OPCODE(HintLocInner)
-NOOP_OPCODE(HintStkInner)
-NOOP_OPCODE(AssertStk)
 NOOP_OPCODE(FinishMemberOp)
 
 CALL_OPCODE(AddElemStrKey)
 CALL_OPCODE(AddElemIntKey)
 CALL_OPCODE(AddNewElem)
+CALL_OPCODE(DictAddElemStrKey)
+CALL_OPCODE(DictAddElemIntKey)
 CALL_OPCODE(ArrayAdd)
 CALL_OPCODE(MapAddElemC)
 CALL_OPCODE(ColAddNewElemC)
-
-CALL_OPCODE(CoerceCellToBool);
-CALL_OPCODE(CoerceCellToInt);
-CALL_OPCODE(CoerceCellToDbl);
-CALL_OPCODE(CoerceStrToDbl);
-CALL_OPCODE(CoerceStrToInt);
 
 CALL_OPCODE(ConvBoolToArr);
 CALL_OPCODE(ConvDblToArr);
@@ -172,7 +156,23 @@ CALL_OPCODE(ConvObjToArr);
 CALL_OPCODE(ConvStrToArr);
 CALL_OPCODE(ConvVecToArr);
 CALL_OPCODE(ConvDictToArr);
+CALL_OPCODE(ConvKeysetToArr);
 CALL_OPCODE(ConvCellToArr);
+
+CALL_OPCODE(ConvArrToVec);
+CALL_OPCODE(ConvDictToVec);
+CALL_OPCODE(ConvKeysetToVec);
+CALL_OPCODE(ConvObjToVec);
+
+CALL_OPCODE(ConvArrToDict);
+CALL_OPCODE(ConvVecToDict);
+CALL_OPCODE(ConvKeysetToDict);
+CALL_OPCODE(ConvObjToDict);
+
+CALL_OPCODE(ConvArrToKeyset);
+CALL_OPCODE(ConvVecToKeyset);
+CALL_OPCODE(ConvDictToKeyset);
+CALL_OPCODE(ConvObjToKeyset);
 
 CALL_OPCODE(ConvCellToBool);
 
@@ -196,88 +196,14 @@ CALL_OPCODE(ConvObjToStr);
 CALL_OPCODE(ConvResToStr);
 CALL_OPCODE(ConvCellToStr);
 
-CALL_OPCODE(ConcatStrStr);
-CALL_OPCODE(ConcatStrInt);
-CALL_OPCODE(ConcatIntStr);
-CALL_OPCODE(ConcatStr3);
-CALL_OPCODE(ConcatStr4);
-
-CALL_OPCODE(GtStr);
-CALL_OPCODE(GteStr);
-CALL_OPCODE(LtStr);
-CALL_OPCODE(LteStr);
-CALL_OPCODE(EqStr);
-CALL_OPCODE(NeqStr);
-CALL_OPCODE(SameStr);
-CALL_OPCODE(NSameStr);
-CALL_OPCODE(CmpStr);
-CALL_OPCODE(GtStrInt);
-CALL_OPCODE(GteStrInt);
-CALL_OPCODE(LtStrInt);
-CALL_OPCODE(LteStrInt);
-CALL_OPCODE(EqStrInt);
-CALL_OPCODE(NeqStrInt);
-CALL_OPCODE(CmpStrInt);
-CALL_OPCODE(GtObj);
-CALL_OPCODE(GteObj);
-CALL_OPCODE(LtObj);
-CALL_OPCODE(LteObj);
-CALL_OPCODE(EqObj);
-CALL_OPCODE(NeqObj);
-CALL_OPCODE(CmpObj);
-CALL_OPCODE(GtArr);
-CALL_OPCODE(GteArr);
-CALL_OPCODE(LtArr);
-CALL_OPCODE(LteArr);
-CALL_OPCODE(EqArr);
-CALL_OPCODE(NeqArr);
-CALL_OPCODE(SameArr);
-CALL_OPCODE(NSameArr);
-CALL_OPCODE(CmpArr);
-CALL_OPCODE(GtRes);
-CALL_OPCODE(GteRes);
-CALL_OPCODE(LtRes);
-CALL_OPCODE(LteRes);
-CALL_OPCODE(CmpRes);
-
-CALL_OPCODE(ThrowInvalidOperation);
-CALL_OPCODE(HasToString);
-
 CALL_OPCODE(NewArray)
 CALL_OPCODE(NewMixedArray)
 CALL_OPCODE(NewDictArray)
 CALL_OPCODE(NewLikeArray)
 CALL_OPCODE(AllocPackedArray)
 CALL_OPCODE(AllocVecArray)
-CALL_OPCODE(Clone)
-CALL_OPCODE(AllocObj)
-CALL_OPCODE(DebugBacktrace)
-CALL_OPCODE(InitThrowableFileAndLine)
-CALL_OPCODE(RegisterLiveObj)
-CALL_OPCODE(LdClsCtor)
-CALL_OPCODE(LookupClsRDS)
-CALL_OPCODE(PrintStr)
-CALL_OPCODE(PrintInt)
-CALL_OPCODE(PrintBool)
-CALL_OPCODE(DbgAssertPtr)
-CALL_OPCODE(LdSwitchDblIndex)
-CALL_OPCODE(LdSwitchStrIndex)
-CALL_OPCODE(LdSwitchObjIndex)
-CALL_OPCODE(RaiseUninitLoc)
-CALL_OPCODE(RaiseUndefProp)
-CALL_OPCODE(RaiseMissingArg)
-CALL_OPCODE(RaiseError)
-CALL_OPCODE(RaiseWarning)
-CALL_OPCODE(RaiseNotice)
-CALL_OPCODE(RaiseArrayIndexNotice)
-CALL_OPCODE(RaiseArrayKeyNotice)
-CALL_OPCODE(IncStatGrouped)
-CALL_OPCODE(MapIdx)
-CALL_OPCODE(LdClsPropAddrOrNull)
-CALL_OPCODE(LdClsPropAddrOrRaise)
-CALL_OPCODE(LdGblAddrDef)
 
-CALL_OPCODE(MethodExists)
+CALL_OPCODE(MapIdx)
 
 // Vector instruction helpers
 CALL_OPCODE(StringGet)
@@ -287,25 +213,40 @@ CALL_OPCODE(SetOpElem)
 CALL_OPCODE(IncDecElem)
 CALL_OPCODE(SetNewElem)
 CALL_OPCODE(SetNewElemArray)
+CALL_OPCODE(SetNewElemVec)
 CALL_OPCODE(BindNewElem)
 CALL_OPCODE(VectorIsset)
 CALL_OPCODE(PairIsset)
-CALL_OPCODE(ThrowOutOfBounds)
-CALL_OPCODE(ThrowArithmeticError)
-CALL_OPCODE(ThrowDivisionByZeroError)
-
-CALL_OPCODE(ZeroErrorLevel)
-CALL_OPCODE(RestoreErrorLevel)
 
 CALL_OPCODE(Count)
 
-CALL_OPCODE(SuspendHookE)
-CALL_OPCODE(SuspendHookR)
-CALL_OPCODE(ReturnHook)
-
-CALL_OPCODE(OODeclExists)
-
 CALL_OPCODE(GetMemoKey)
+
+DELEGATE_OPCODE(Nop)
+DELEGATE_OPCODE(DefConst)
+DELEGATE_OPCODE(EndGuards)
+DELEGATE_OPCODE(ExitPlaceholder)
+DELEGATE_OPCODE(DefFP)
+DELEGATE_OPCODE(DefSP)
+DELEGATE_OPCODE(EagerSyncVMRegs)
+DELEGATE_OPCODE(Mov)
+DELEGATE_OPCODE(Halt)
+DELEGATE_OPCODE(InterpOne)
+DELEGATE_OPCODE(InterpOneCF)
+DELEGATE_OPCODE(PrintBool)
+DELEGATE_OPCODE(PrintInt)
+DELEGATE_OPCODE(PrintStr)
+DELEGATE_OPCODE(RBTraceEntry)
+DELEGATE_OPCODE(RBTraceMsg)
+
+DELEGATE_OPCODE(IncStat)
+DELEGATE_OPCODE(IncStatGrouped)
+DELEGATE_OPCODE(IncTransCounter)
+DELEGATE_OPCODE(IncProfCounter)
+DELEGATE_OPCODE(CheckCold)
+
+CALL_OPCODE(ElemVecD)
+CALL_OPCODE(ElemVecU)
 
 DELEGATE_OPCODE(Box)
 DELEGATE_OPCODE(BoxPtr)
@@ -341,6 +282,7 @@ DELEGATE_OPCODE(LteInt)
 DELEGATE_OPCODE(EqInt)
 DELEGATE_OPCODE(NeqInt)
 DELEGATE_OPCODE(CmpInt)
+DELEGATE_OPCODE(CheckRange)
 DELEGATE_OPCODE(GtBool)
 DELEGATE_OPCODE(GteBool)
 DELEGATE_OPCODE(LtBool)
@@ -355,10 +297,64 @@ DELEGATE_OPCODE(LteDbl)
 DELEGATE_OPCODE(EqDbl)
 DELEGATE_OPCODE(NeqDbl)
 DELEGATE_OPCODE(CmpDbl)
+DELEGATE_OPCODE(GtStr);
+DELEGATE_OPCODE(GteStr);
+DELEGATE_OPCODE(LtStr);
+DELEGATE_OPCODE(LteStr);
+DELEGATE_OPCODE(EqStr);
+DELEGATE_OPCODE(NeqStr);
+DELEGATE_OPCODE(SameStr);
+DELEGATE_OPCODE(NSameStr);
+DELEGATE_OPCODE(CmpStr);
+DELEGATE_OPCODE(GtStrInt);
+DELEGATE_OPCODE(GteStrInt);
+DELEGATE_OPCODE(LtStrInt);
+DELEGATE_OPCODE(LteStrInt);
+DELEGATE_OPCODE(EqStrInt);
+DELEGATE_OPCODE(NeqStrInt);
+DELEGATE_OPCODE(CmpStrInt);
+DELEGATE_OPCODE(GtObj);
+DELEGATE_OPCODE(GteObj);
+DELEGATE_OPCODE(LtObj);
+DELEGATE_OPCODE(LteObj);
+DELEGATE_OPCODE(EqObj);
+DELEGATE_OPCODE(NeqObj);
 DELEGATE_OPCODE(SameObj)
 DELEGATE_OPCODE(NSameObj)
+DELEGATE_OPCODE(CmpObj);
+DELEGATE_OPCODE(GtArr);
+DELEGATE_OPCODE(GteArr);
+DELEGATE_OPCODE(LtArr);
+DELEGATE_OPCODE(LteArr);
+DELEGATE_OPCODE(EqArr);
+DELEGATE_OPCODE(NeqArr);
+DELEGATE_OPCODE(SameArr);
+DELEGATE_OPCODE(NSameArr);
+DELEGATE_OPCODE(CmpArr);
+DELEGATE_OPCODE(GtVec);
+DELEGATE_OPCODE(GteVec);
+DELEGATE_OPCODE(LtVec);
+DELEGATE_OPCODE(LteVec);
+DELEGATE_OPCODE(EqVec);
+DELEGATE_OPCODE(NeqVec);
+DELEGATE_OPCODE(SameVec);
+DELEGATE_OPCODE(NSameVec);
+DELEGATE_OPCODE(CmpVec);
+DELEGATE_OPCODE(EqDict);
+DELEGATE_OPCODE(NeqDict);
+DELEGATE_OPCODE(SameDict);
+DELEGATE_OPCODE(NSameDict);
+DELEGATE_OPCODE(EqKeyset);
+DELEGATE_OPCODE(NeqKeyset);
+DELEGATE_OPCODE(GtRes);
+DELEGATE_OPCODE(GteRes);
+DELEGATE_OPCODE(LtRes);
+DELEGATE_OPCODE(LteRes);
 DELEGATE_OPCODE(EqRes)
 DELEGATE_OPCODE(NeqRes)
+DELEGATE_OPCODE(CmpRes);
+DELEGATE_OPCODE(EqFunc)
+DELEGATE_OPCODE(DbgAssertFunc)
 
 DELEGATE_OPCODE(EqCls)
 DELEGATE_OPCODE(InstanceOf)
@@ -368,6 +364,9 @@ DELEGATE_OPCODE(ExtendsClass)
 DELEGATE_OPCODE(InstanceOfBitmask)
 DELEGATE_OPCODE(NInstanceOfBitmask)
 DELEGATE_OPCODE(InterfaceSupportsArr)
+DELEGATE_OPCODE(InterfaceSupportsVec)
+DELEGATE_OPCODE(InterfaceSupportsDict)
+DELEGATE_OPCODE(InterfaceSupportsKeyset)
 DELEGATE_OPCODE(InterfaceSupportsStr)
 DELEGATE_OPCODE(InterfaceSupportsInt)
 DELEGATE_OPCODE(InterfaceSupportsDbl)
@@ -382,6 +381,12 @@ DELEGATE_OPCODE(IsNType)
 DELEGATE_OPCODE(IsTypeMem)
 DELEGATE_OPCODE(IsNTypeMem)
 DELEGATE_OPCODE(IsScalarType)
+DELEGATE_OPCODE(AssertType)
+DELEGATE_OPCODE(AssertLoc)
+DELEGATE_OPCODE(AssertStk)
+DELEGATE_OPCODE(HintLocInner)
+DELEGATE_OPCODE(HintStkInner)
+DELEGATE_OPCODE(ProfileType)
 
 DELEGATE_OPCODE(LdLoc)
 DELEGATE_OPCODE(LdLocAddr)
@@ -405,12 +410,14 @@ DELEGATE_OPCODE(LdMIStateAddr)
 DELEGATE_OPCODE(LdMBase)
 DELEGATE_OPCODE(StMBase)
 DELEGATE_OPCODE(LdGblAddr)
+DELEGATE_OPCODE(LdGblAddrDef)
 DELEGATE_OPCODE(LdPropAddr)
+DELEGATE_OPCODE(LdClsPropAddrOrNull)
+DELEGATE_OPCODE(LdClsPropAddrOrRaise)
 DELEGATE_OPCODE(LdRDSAddr)
 DELEGATE_OPCODE(LdTVAux)
 
 DELEGATE_OPCODE(IncRef)
-DELEGATE_OPCODE(IncRefCtx)
 DELEGATE_OPCODE(DecRef)
 DELEGATE_OPCODE(DecRefNZ)
 DELEGATE_OPCODE(DbgAssertRefCount)
@@ -419,26 +426,38 @@ DELEGATE_OPCODE(DefLabel)
 DELEGATE_OPCODE(Jmp)
 DELEGATE_OPCODE(JmpZero)
 DELEGATE_OPCODE(JmpNZero)
+DELEGATE_OPCODE(CheckNullptr)
+DELEGATE_OPCODE(CheckNonNull)
+DELEGATE_OPCODE(AssertNonNull)
+DELEGATE_OPCODE(CheckInit)
+DELEGATE_OPCODE(CheckInitMem)
 DELEGATE_OPCODE(ProfileSwitchDest)
 DELEGATE_OPCODE(JmpSwitchDest)
 DELEGATE_OPCODE(JmpSSwitchDest)
 DELEGATE_OPCODE(LdSSwitchDestFast)
 DELEGATE_OPCODE(LdSSwitchDestSlow)
+DELEGATE_OPCODE(LdSwitchDblIndex)
+DELEGATE_OPCODE(LdSwitchStrIndex)
+DELEGATE_OPCODE(LdSwitchObjIndex)
 
 DELEGATE_OPCODE(ReqBindJmp)
 DELEGATE_OPCODE(ReqRetranslate)
 DELEGATE_OPCODE(ReqRetranslateOpt)
+DELEGATE_OPCODE(LdBindAddr)
 
 DELEGATE_OPCODE(LdClsCtx)
 DELEGATE_OPCODE(LdClsCctx)
 DELEGATE_OPCODE(ConvClsToCctx)
 DELEGATE_OPCODE(CastCtxThis)
 DELEGATE_OPCODE(CheckCtxThis)
+DELEGATE_OPCODE(CheckFuncStatic)
 
 DELEGATE_OPCODE(LdClsName)
+DELEGATE_OPCODE(MethodExists)
 DELEGATE_OPCODE(LdClsMethod)
 DELEGATE_OPCODE(LdIfaceMethod)
 DELEGATE_OPCODE(LdObjInvoke)
+DELEGATE_OPCODE(HasToString)
 DELEGATE_OPCODE(LdFuncVecLen)
 DELEGATE_OPCODE(LdClsInitData)
 DELEGATE_OPCODE(CheckInitProps)
@@ -449,14 +468,23 @@ DELEGATE_OPCODE(InitSProps)
 DELEGATE_OPCODE(LdFuncNumParams)
 
 DELEGATE_OPCODE(LdObjClass)
-DELEGATE_OPCODE(ConstructInstance)
+DELEGATE_OPCODE(AllocObj)
 DELEGATE_OPCODE(NewInstanceRaw)
+DELEGATE_OPCODE(ConstructInstance)
+DELEGATE_OPCODE(Clone)
+DELEGATE_OPCODE(RegisterLiveObj)
 DELEGATE_OPCODE(InitObjProps)
 
 DELEGATE_OPCODE(LdStrLen)
 DELEGATE_OPCODE(OrdStr)
 DELEGATE_OPCODE(OrdStrIdx)
+DELEGATE_OPCODE(ChrInt)
 DELEGATE_OPCODE(StringIsset)
+DELEGATE_OPCODE(ConcatStrStr);
+DELEGATE_OPCODE(ConcatStrInt);
+DELEGATE_OPCODE(ConcatIntStr);
+DELEGATE_OPCODE(ConcatStr3);
+DELEGATE_OPCODE(ConcatStr4);
 
 DELEGATE_OPCODE(BaseG)
 DELEGATE_OPCODE(PropX)
@@ -484,17 +512,47 @@ DELEGATE_OPCODE(EmptyElem)
 DELEGATE_OPCODE(ProfileMixedArrayOffset)
 DELEGATE_OPCODE(CheckMixedArrayOffset)
 DELEGATE_OPCODE(CheckArrayCOW)
+DELEGATE_OPCODE(ProfileDictOffset)
+DELEGATE_OPCODE(CheckDictOffset)
+DELEGATE_OPCODE(ProfileKeysetOffset)
+DELEGATE_OPCODE(CheckKeysetOffset)
 DELEGATE_OPCODE(ElemArray)
 DELEGATE_OPCODE(ElemArrayW)
 DELEGATE_OPCODE(ElemArrayD)
 DELEGATE_OPCODE(ElemArrayU)
 DELEGATE_OPCODE(ElemMixedArrayK)
+DELEGATE_OPCODE(ElemDict)
+DELEGATE_OPCODE(ElemDictW)
+DELEGATE_OPCODE(ElemDictD)
+DELEGATE_OPCODE(ElemDictU)
+DELEGATE_OPCODE(ElemDictK)
+DELEGATE_OPCODE(ElemKeyset)
+DELEGATE_OPCODE(ElemKeysetW)
+DELEGATE_OPCODE(ElemKeysetU)
+DELEGATE_OPCODE(ElemKeysetK)
 DELEGATE_OPCODE(ArrayGet)
-DELEGATE_OPCODE(MixedArrayGetK)
 DELEGATE_OPCODE(ArraySet)
 DELEGATE_OPCODE(ArraySetRef)
 DELEGATE_OPCODE(ArrayIsset)
 DELEGATE_OPCODE(ArrayIdx)
+DELEGATE_OPCODE(MixedArrayGetK)
+DELEGATE_OPCODE(DictGet)
+DELEGATE_OPCODE(DictGetQuiet)
+DELEGATE_OPCODE(DictGetK)
+DELEGATE_OPCODE(DictIsset)
+DELEGATE_OPCODE(DictEmptyElem)
+DELEGATE_OPCODE(DictSet)
+DELEGATE_OPCODE(DictSetRef)
+DELEGATE_OPCODE(DictIdx)
+DELEGATE_OPCODE(VecSet)
+DELEGATE_OPCODE(VecSetRef)
+DELEGATE_OPCODE(KeysetGet)
+DELEGATE_OPCODE(KeysetGetQuiet)
+DELEGATE_OPCODE(KeysetGetK)
+DELEGATE_OPCODE(SetNewElemKeyset)
+DELEGATE_OPCODE(KeysetIsset)
+DELEGATE_OPCODE(KeysetEmptyElem)
+DELEGATE_OPCODE(KeysetIdx)
 DELEGATE_OPCODE(MapGet)
 DELEGATE_OPCODE(MapSet)
 DELEGATE_OPCODE(MapIsset)
@@ -502,21 +560,24 @@ DELEGATE_OPCODE(MapIsset)
 DELEGATE_OPCODE(LdCls)
 DELEGATE_OPCODE(LdClsCached)
 DELEGATE_OPCODE(LdClsCachedSafe)
+DELEGATE_OPCODE(LookupClsRDS)
 DELEGATE_OPCODE(LdFunc)
 DELEGATE_OPCODE(LdFuncCached)
 DELEGATE_OPCODE(LdFuncCachedU)
 DELEGATE_OPCODE(LdFuncCachedSafe)
+DELEGATE_OPCODE(OODeclExists)
 
 DELEGATE_OPCODE(LdObjMethod)
 DELEGATE_OPCODE(LookupClsMethod)
+DELEGATE_OPCODE(LdClsCtor)
+DELEGATE_OPCODE(ProfileMethod)
 DELEGATE_OPCODE(LookupClsMethodCache)
 DELEGATE_OPCODE(LdClsMethodCacheFunc)
 DELEGATE_OPCODE(LdClsMethodCacheCls)
 DELEGATE_OPCODE(LookupClsMethodFCache)
 DELEGATE_OPCODE(LdClsMethodFCacheFunc)
 
-DELEGATE_OPCODE(GetCtxFwdCall)
-DELEGATE_OPCODE(GetCtxFwdCallDyn)
+DELEGATE_OPCODE(FwdCtxStaticCall)
 
 DELEGATE_OPCODE(LdCns)
 DELEGATE_OPCODE(LookupCns)
@@ -563,6 +624,30 @@ DELEGATE_OPCODE(InlineReturnNoFrame)
 DELEGATE_OPCODE(SyncReturnBC)
 DELEGATE_OPCODE(Conjure)
 DELEGATE_OPCODE(ConjureUse)
+
+DELEGATE_OPCODE(BeginCatch)
+DELEGATE_OPCODE(EndCatch)
+DELEGATE_OPCODE(UnwindCheckSideExit)
+DELEGATE_OPCODE(LdUnwinderValue)
+DELEGATE_OPCODE(DebugBacktrace)
+DELEGATE_OPCODE(InitThrowableFileAndLine)
+DELEGATE_OPCODE(ZeroErrorLevel)
+DELEGATE_OPCODE(RestoreErrorLevel)
+
+DELEGATE_OPCODE(RaiseArrayIndexNotice)
+DELEGATE_OPCODE(RaiseArrayKeyNotice)
+DELEGATE_OPCODE(RaiseError)
+DELEGATE_OPCODE(RaiseMissingArg)
+DELEGATE_OPCODE(RaiseNotice)
+DELEGATE_OPCODE(RaiseUndefProp)
+DELEGATE_OPCODE(RaiseUninitLoc)
+DELEGATE_OPCODE(RaiseWarning)
+DELEGATE_OPCODE(RaiseMissingThis)
+DELEGATE_OPCODE(ThrowArithmeticError)
+DELEGATE_OPCODE(ThrowDivisionByZeroError)
+DELEGATE_OPCODE(ThrowInvalidArrayKey)
+DELEGATE_OPCODE(ThrowInvalidOperation);
+DELEGATE_OPCODE(ThrowOutOfBounds)
 
 DELEGATE_OPCODE(LdStaticLoc)
 DELEGATE_OPCODE(InitStaticLoc)
@@ -630,11 +715,19 @@ DELEGATE_OPCODE(CheckSurpriseFlags)
 DELEGATE_OPCODE(CheckStackOverflow)
 DELEGATE_OPCODE(CheckSurpriseFlagsEnter)
 DELEGATE_OPCODE(CheckSurpriseAndStack)
+DELEGATE_OPCODE(SuspendHookE)
+DELEGATE_OPCODE(SuspendHookR)
+DELEGATE_OPCODE(ReturnHook)
 
 DELEGATE_OPCODE(CastStk)
 DELEGATE_OPCODE(CastMem)
 DELEGATE_OPCODE(CoerceStk)
 DELEGATE_OPCODE(CoerceMem)
+DELEGATE_OPCODE(CoerceCellToBool);
+DELEGATE_OPCODE(CoerceCellToInt);
+DELEGATE_OPCODE(CoerceCellToDbl);
+DELEGATE_OPCODE(CoerceStrToDbl);
+DELEGATE_OPCODE(CoerceStrToInt);
 DELEGATE_OPCODE(VerifyParamCallable)
 DELEGATE_OPCODE(VerifyRetCallable)
 DELEGATE_OPCODE(VerifyParamCls)
@@ -656,103 +749,6 @@ void CodeGenerator::emitFwdJcc(Vout& v, ConditionCode cc, Vreg sf,
                                Block* target) {
   irlower::fwdJcc(v, m_state, cc, sf, target);
 }
-
-///////////////////////////////////////////////////////////////////////////////
-
-void CodeGenerator::cgDefSP(IRInstruction* inst) {
-  auto const sp = dstLoc(inst, 0).reg();
-  auto& v = vmain();
-
-  if (inst->marker().resumed()) {
-    v << defvmsp{sp};
-    return;
-  }
-
-  auto const fp = srcLoc(inst, 0).reg();
-  v << lea{fp[-cellsToBytes(inst->extra<DefSP>()->offset.offset)], sp};
-}
-
-void CodeGenerator::cgCheckNullptr(IRInstruction* inst) {
-  if (!inst->taken()) return;
-  auto reg = srcLoc(inst, 0).reg(0);
-  auto& v = vmain();
-  auto const sf = v.makeReg();
-  v << testq{reg, reg, sf};
-  v << jcc{CC_NZ, sf, {label(inst->next()), label(inst->taken())}};
-}
-
-void CodeGenerator::cgCheckNonNull(IRInstruction* inst) {
-  auto srcReg = srcLoc(inst, 0).reg();
-  auto dstReg = dstLoc(inst, 0).reg();
-  auto taken  = inst->taken();
-  assertx(taken);
-
-  auto& v = vmain();
-  auto const sf = v.makeReg();
-  v << testq{srcReg, srcReg, sf};
-  emitFwdJcc(v, CC_Z, sf, taken);
-  v << copy{srcReg, dstReg};
-}
-
-void CodeGenerator::cgAssertNonNull(IRInstruction* inst) {
-  auto& v = vmain();
-  auto srcReg = srcLoc(inst, 0).reg();
-  auto dstReg = dstLoc(inst, 0).reg();
-  if (RuntimeOption::EvalHHIRGenerateAsserts) {
-    auto const sf = v.makeReg();
-    v << testq{srcReg, srcReg, sf};
-    ifThen(v, CC_Z, sf, [&](Vout& v) {
-      v << ud2{};
-    });
-  }
-  v << copy{srcReg, dstReg};
-}
-
-void CodeGenerator::cgAssertType(IRInstruction* inst) {
-  copyTV(vmain(), srcLoc(inst, 0), dstLoc(inst, 0), inst->dst()->type());
-}
-
-void CodeGenerator::cgLdUnwinderValue(IRInstruction* inst) {
-  loadTV(vmain(), inst->dst(), dstLoc(inst, 0), rvmtl()[unwinderTVOff()]);
-}
-
-void CodeGenerator::cgBeginCatch(IRInstruction* inst) {
-  auto& v = vmain();
-  auto const callType = m_state.catch_calls[inst->block()];
-  always_assert(callType != CatchCall::Uninit &&
-                "Tried to emit BeginCatch with Uninit call type. "
-                "Catch blocks must be emitted after their predecessors.");
-
-  v << landingpad{callType == CatchCall::PHP};
-  emitIncStat(v, Stats::TC_CatchTrace);
-}
-
-void CodeGenerator::cgEndCatch(IRInstruction* inst) {
-  auto& v = vmain();
-  // endCatchHelper only expects rvmtl() and rvmfp() to be live.
-  v << jmpi{mcg->ustubs().endCatchHelper, rvmtl() | rvmfp()};
-}
-
-void CodeGenerator::cgUnwindCheckSideExit(IRInstruction* inst) {
-  auto& v = vmain();
-  auto const sf = v.makeReg();
-  v << cmpbim{0, rvmtl()[unwinderSideExitOff()], sf};
-
-  auto done = v.makeBlock();
-  v << jcc{CC_E, sf, {done, label(inst->taken())}};
-  v = done;
-
-  // doSideExit == true, so fall through to the side exit code
-  emitIncStat(v, Stats::TC_CatchSideExit);
-}
-
-//////////////////////////////////////////////////////////////////////
-
-void CodeGenerator::cgHalt(IRInstruction* inst) {
-  vmain() << ud2{};
-}
-
-//////////////////////////////////////////////////////////////////////
 
 void CodeGenerator::cgCallNative(Vout& v, IRInstruction* inst) {
   return irlower::cgCallNative(v, m_state, inst);
@@ -785,23 +781,7 @@ void CodeGenerator::cgCallHelper(Vout& v, CallSpec call,
   irlower::cgCallHelper(v, m_state, call, dstInfo, sync, args);
 }
 
-void CodeGenerator::cgMov(IRInstruction* inst) {
-  always_assert(inst->src(0)->numWords() == inst->dst(0)->numWords());
-  copyTV(vmain(), srcLoc(inst, 0), dstLoc(inst, 0), inst->dst()->type());
-}
-
 ///////////////////////////////////////////////////////////////////////////////
-
-void CodeGenerator::cgEqFunc(IRInstruction* inst) {
-  auto const dst  = dstLoc(inst, 0).reg();
-  auto const src1 = srcLoc(inst, 0).reg();
-  auto const src2 = srcLoc(inst, 1).reg();
-
-  auto& v = vmain();
-  auto const sf = v.makeReg();
-  emitCmpLowPtr<Func>(v, sf, src2, src1);
-  v << setcc{CC_E, sf, dst};
-}
 
 void CodeGenerator::cgConvDblToInt(IRInstruction* inst) {
   auto dstReg = dstLoc(inst, 0).reg();
@@ -1092,26 +1072,6 @@ void CodeGenerator::cgLdStrFPushCuf(IRInstruction* inst) {
   );
 }
 
-void CodeGenerator::cgLdBindAddr(IRInstruction* inst) {
-  auto const extra  = inst->extra<LdBindAddr>();
-  auto const dstReg = dstLoc(inst, 0).reg();
-  auto& v = vmain();
-
-  // Emit service request to smash address of SrcKey into 'addr'.
-  auto const addrPtr = v.allocData<TCA>();
-  v << bindaddr{addrPtr, extra->sk, extra->spOff};
-  v << loadqd{reinterpret_cast<uint64_t*>(addrPtr), dstReg};
-}
-
-void CodeGenerator::cgEagerSyncVMRegs(IRInstruction* inst) {
-  auto const spOff = inst->extra<EagerSyncVMRegs>()->offset;
-  auto& v = vmain();
-  auto const sync_sp = v.makeReg();
-  v << lea{srcLoc(inst, 1).reg()[cellsToBytes(spOff.offset)], sync_sp};
-  emitEagerSyncPoint(v, inst->marker().fixupSk().pc(),
-                     rvmtl(), srcLoc(inst, 0).reg(), sync_sp);
-}
-
 void CodeGenerator::cgProfileArrayKind(IRInstruction* inst) {
   auto const extra = inst->extra<RDSHandleData>();
   auto& v = vmain();
@@ -1119,44 +1079,6 @@ void CodeGenerator::cgProfileArrayKind(IRInstruction* inst) {
   v << lea{rvmtl()[extra->handle], profile};
   cgCallHelper(v, CallSpec::direct(profileArrayKindHelper), kVoidDest,
                SyncOptions::None, argGroup(inst).reg(profile).ssa(0));
-}
-
-void CodeGenerator::cgProfileStructArray(IRInstruction* inst) {
-  auto baseReg = srcLoc(inst, 0).reg();
-  auto handle  = inst->extra<ProfileStructArray>()->handle;
-  auto& v = vmain();
-
-  auto isStruct = v.makeBlock();
-  auto shapeIsDifferent = v.makeBlock();
-  auto notStruct = v.makeBlock();
-  auto done = v.makeBlock();
-
-  auto const sf0 = v.makeReg();
-  static_assert(sizeof(HeaderKind) == 1, "");
-  v << cmpbim{ArrayData::kStructKind, baseReg[HeaderKindOffset], sf0};
-  v << jcc{CC_E, sf0, {notStruct, isStruct}};
-
-  auto const shape = v.makeReg();
-  auto const sf1 = v.makeReg();
-  v = isStruct;
-  v << load{baseReg[StructArray::shapeOffset()], shape};
-  v << cmpqm{shape, rvmtl()[handle + offsetof(StructArrayProfile, shape)], sf1};
-  v << jcc{CC_E, sf1, {shapeIsDifferent, done}};
-
-  v = shapeIsDifferent;
-  v << addlm{v.cns(uint32_t{1}),
-             rvmtl()[handle + offsetof(StructArrayProfile, numShapesSeen)],
-             v.makeReg()};
-  v << store{shape, rvmtl()[handle + offsetof(StructArrayProfile, shape)]};
-  v << jmp{done};
-
-  v = notStruct;
-  v << addlm{v.cns(uint32_t{1}),
-             rvmtl()[handle + offsetof(StructArrayProfile, nonStructCount)],
-             v.makeReg()};
-  v << jmp{done};
-
-  v = done;
 }
 
 void CodeGenerator::cgCheckPackedArrayBounds(IRInstruction* inst) {
@@ -1176,26 +1098,27 @@ void CodeGenerator::cgCheckPackedArrayBounds(IRInstruction* inst) {
   v << jcc{CC_BE, sf, {label(inst->next()), label(inst->taken())}};
 }
 
-void CodeGenerator::cgLdPackedArrayElemAddr(IRInstruction* inst) {
-  auto const idx = inst->src(1);
-  auto const rArr = srcLoc(inst, 0).reg();
-  auto const rIdx = srcLoc(inst, 1).reg();
-  auto const dst = dstLoc(inst, 0).reg();
+Vptr CodeGenerator::emitPackedLayoutAddr(SSATmp* idx, Vloc idxLoc,
+                                         Vloc arrLoc) {
+  auto const rArr = arrLoc.reg();
+  auto const rIdx = idxLoc.reg();
   auto& v = vmain();
 
+  static_assert(sizeof(TypedValue) == 16, "");
+
   if (idx->hasConstVal()) {
-    auto const offset = sizeof(ArrayData) + idx->intVal() * sizeof(TypedValue);
+    auto const offset =
+      PackedArray::entriesOffset() + idx->intVal() * sizeof(TypedValue);
     if (deltaFits(offset, sz::dword)) {
-      v << lea{rArr[offset], dst};
-      return;
+      return rArr[offset];
     }
   }
 
-  static_assert(sizeof(TypedValue) == 16 && sizeof(ArrayData) == 16, "");
   /*
-   * This computes `rArr + rIdx * sizeof(TypedValue) + sizeof(ArrayData)`. The
-   * logic of `scaledIdx * 16` is split in the following two instructions, in
-   * order to save a byte in the shl instruction.
+   * This computes `rArr + rIdx * sizeof(TypedValue) +
+   * PackedArray::entriesOffset()`. The logic of `scaledIdx * 16` is split in
+   * the following two instructions, in order to save a byte in the shl
+   * instruction.
    *
    * TODO(#7728856): We should really move this into vasm-x64.cpp...
    */
@@ -1205,29 +1128,27 @@ void CodeGenerator::cgLdPackedArrayElemAddr(IRInstruction* inst) {
   v << movtql{rIdx, idxl};
   v << shlli{1, idxl, scaled_idxl, v.makeReg()};
   v << movzlq{scaled_idxl, scaled_idx};
-  v << lea{rArr[scaled_idx * int(sizeof(TypedValue) / 2) +
-                int(sizeof(ArrayData))], dst};
+  return rArr[scaled_idx * int(sizeof(TypedValue) / 2)
+              + PackedArray::entriesOffset()];
 }
 
-void CodeGenerator::cgCheckRange(IRInstruction* inst) {
-  auto val = inst->src(0);
-  auto valReg = srcLoc(inst, 0).reg();
-  auto limitReg  = srcLoc(inst, 1).reg();
+void CodeGenerator::cgLdPackedArrayElemAddr(IRInstruction* inst) {
+  auto const addr =
+    emitPackedLayoutAddr(inst->src(1), srcLoc(inst, 1), srcLoc(inst, 0));
+  vmain() << lea{addr, dstLoc(inst, 0).reg()};
+}
 
-  auto& v = vmain();
-  ConditionCode cc;
-  auto const sf = v.makeReg();
-  if (val->hasConstVal()) {
-    // Try to put the constant in a position that can get imm-folded. A
-    // suffiently smart imm-folder could handle this for us.
-    v << cmpq{valReg, limitReg, sf};
-    cc = CC_A;
-  } else {
-    v << cmpq{limitReg, valReg, sf};
-    cc = CC_B;
-  }
 
-  v << setcc{cc, sf, dstLoc(inst, 0).reg()};
+void CodeGenerator::cgLdVecElem(IRInstruction* inst) {
+  auto const addr =
+    emitPackedLayoutAddr(inst->src(1), srcLoc(inst, 1), srcLoc(inst, 0));
+  loadTV(vmain(), inst->dst(), dstLoc(inst, 0), addr);
+}
+
+void CodeGenerator::cgLdVecElemAddr(IRInstruction* inst) {
+  auto const addr =
+    emitPackedLayoutAddr(inst->src(1), srcLoc(inst, 1), srcLoc(inst, 0));
+  vmain() << lea{addr, dstLoc(inst, 0).reg()};
 }
 
 void CodeGenerator::cgLdVectorSize(IRInstruction* inst) {
@@ -1451,6 +1372,40 @@ void CodeGenerator::cgAKExistsArr(IRInstruction* inst) {
   );
 }
 
+void CodeGenerator::cgAKExistsDict(IRInstruction* inst) {
+  auto const keyTy = inst->src(1)->type();
+  auto& v = vmain();
+
+  auto const target = (keyTy <= TInt)
+    ? CallSpec::direct(MixedArray::ExistsIntDict)
+    : CallSpec::direct(MixedArray::ExistsStrDict);
+
+  cgCallHelper(
+    v,
+    target,
+    callDest(inst),
+    SyncOptions::None,
+    argGroup(inst).ssa(0).ssa(1)
+  );
+}
+
+void CodeGenerator::cgAKExistsKeyset(IRInstruction* inst) {
+  auto const keyTy = inst->src(1)->type();
+  auto& v = vmain();
+
+  auto const target = (keyTy <= TInt)
+    ? CallSpec::direct(MixedArray::ExistsIntKeyset)
+    : CallSpec::direct(MixedArray::ExistsStrKeyset);
+
+  cgCallHelper(
+    v,
+    target,
+    callDest(inst),
+    SyncOptions::None,
+    argGroup(inst).ssa(0).ssa(1)
+  );
+}
+
 void CodeGenerator::cgAKExistsObj(IRInstruction* inst) {
   auto const keyTy = inst->src(1)->type();
   auto& v = vmain();
@@ -1494,102 +1449,8 @@ void CodeGenerator::cgNewColFromArray(IRInstruction* inst) {
                argGroup(inst).ssa(0));
 }
 
-void CodeGenerator::cgCheckInit(IRInstruction* inst) {
-  Block* taken = inst->taken();
-  assertx(taken);
-  SSATmp* src = inst->src(0);
-
-  if (!src->type().maybe(TUninit)) return;
-
-  auto typeReg = srcLoc(inst, 0).reg(1);
-  assertx(typeReg != InvalidReg);
-
-  static_assert(KindOfUninit == 0, "cgCheckInit assumes KindOfUninit == 0");
-  auto& v = vmain();
-  auto const sf = v.makeReg();
-  v << testb{typeReg, typeReg, sf};
-  v << jcc{CC_Z, sf, {label(inst->next()), label(taken)}};
-}
-
-void CodeGenerator::cgCheckInitMem(IRInstruction* inst) {
-  Block* taken = inst->taken();
-  assertx(taken);
-  SSATmp* base = inst->src(0);
-  Type t = base->type().deref();
-  if (!t.maybe(TUninit)) return;
-  auto basereg = srcLoc(inst, 0).reg();
-  auto& v = vmain();
-  auto const sf = v.makeReg();
-  emitCmpTVType(v, sf, KindOfUninit, basereg[TVOFF(m_type)]);
-  v << jcc{CC_Z, sf, {label(inst->next()), label(taken)}};
-}
-
-void CodeGenerator::cgCheckCold(IRInstruction* inst) {
-  Block*     taken = inst->taken();
-  TransID  transId = inst->extra<CheckCold>()->transId;
-  auto counterAddr = profData()->transCounterAddr(transId);
-  auto& v = vmain();
-  auto const sf = v.makeReg();
-  v << decqmlock{v.cns(counterAddr)[0], sf};
-  v << jcc{CC_LE, sf, {label(inst->next()), label(taken)}};
-}
-
-void CodeGenerator::cgInterpOne(IRInstruction* inst) {
-  auto const extra = inst->extra<InterpOne>();
-  auto const pcOff = extra->bcOff;
-  auto const spOff = extra->spOffset;
-  auto const op    = extra->opcode;
-  auto const interpOneHelper = interpOneEntryPoints[size_t(op)];
-
-  cgCallHelper(
-    vmain(),
-    CallSpec::direct(reinterpret_cast<void (*)()>(interpOneHelper)),
-    kVoidDest,
-    SyncOptions::None, // interpOne syncs regs manually
-    argGroup(inst)
-      .ssa(1/*fp*/)
-      .addr(srcLoc(inst, 0).reg(), cellsToBytes(spOff.offset))
-      .imm(pcOff)
-  );
-}
-
-void CodeGenerator::cgInterpOneCF(IRInstruction* inst) {
-  auto const extra = inst->extra<InterpOneCF>();
-  auto const op    = extra->opcode;
-  auto const spOff = extra->spOffset;
-  auto const pcOff = extra->bcOff;
-
-  auto& v = vmain();
-  auto const adjustedSp = v.makeReg();
-  v << lea{srcLoc(inst, 0).reg()[cellsToBytes(spOff.offset)], adjustedSp};
-  v << syncvmsp{adjustedSp};
-
-  assertx(mcg->ustubs().interpOneCFHelpers.count(op));
-
-  // We pass the Offset in the third argument register.
-  v << ldimml{pcOff, rarg(2)};
-  v << jmpi{mcg->ustubs().interpOneCFHelpers.at(op),
-            interp_one_cf_regs()};
-}
-
 void CodeGenerator::cgNewStructArray(IRInstruction* inst) {
   auto const data = inst->extra<NewStructData>();
-  if (!RuntimeOption::EvalDisableStructArray) {
-    if (auto shape = Shape::create(data->keys, data->numKeys)) {
-      StructArray* (*f)(uint32_t, const TypedValue*, Shape*) =
-        &MixedArray::MakeStructArray;
-      cgCallHelper(vmain(),
-        CallSpec::direct(f),
-        callDest(inst),
-        SyncOptions::None,
-        argGroup(inst)
-          .imm(data->numKeys)
-          .addr(srcLoc(inst, 0).reg(), cellsToBytes(data->offset.offset))
-          .imm(shape)
-      );
-      return;
-    }
-  }
 
   auto table = vmain().allocData<const StringData*>(data->numKeys);
   memcpy(table, data->keys, data->numKeys * sizeof(*data->keys));
@@ -1607,74 +1468,17 @@ void CodeGenerator::cgNewStructArray(IRInstruction* inst) {
   );
 }
 
-void CodeGenerator::cgIncStat(IRInstruction *inst) {
-  auto stat = Stats::StatCounter(inst->src(0)->intVal());
-  int n = inst->src(1)->intVal();
-  bool force = inst->src(2)->boolVal();
-  emitIncStat(vmain(), stat, n, force);
-}
-
-void CodeGenerator::cgIncTransCounter(IRInstruction* inst) {
-  emitTransCounterInc(vmain());
-}
-
-void CodeGenerator::cgIncProfCounter(IRInstruction* inst) {
-  auto const transId = inst->extra<TransIDData>()->transId;
-  auto const counterAddr = profData()->transCounterAddr(transId);
-  auto& v = vmain();
-  v << decqmlock{v.cns(counterAddr)[0], v.makeReg()};
-}
-
-void CodeGenerator::cgDbgAssertType(IRInstruction* inst) {
-  auto& v = vmain();
-  auto const sf = v.makeReg();
-  auto data_reg = srcLoc(inst, 0).reg(0);
-  auto type_reg = srcLoc(inst, 0).reg(0);
-  irlower::emitTypeTest(
-    vmain(), m_state, inst->typeParam(), type_reg, data_reg, sf,
-    [&](ConditionCode cc, Vreg sfTaken) {
-      ifThen(v, ccNegate(cc), sfTaken, [&](Vout& v) {
-        v << ud2{};
-      });
-    });
-}
-
-void CodeGenerator::cgDbgAssertFunc(IRInstruction* inst) {
-  auto& v = vmain();
-  auto const sf = v.makeReg();
-  auto r0 = srcLoc(inst, 0).reg(0);
-  auto r1 = srcLoc(inst, 1).reg(0);
-  v << cmpq{r0, r1, sf};
-  ifThen(v, CC_NE, sf, [&](Vout& v) {
-    v << ud2{};
-  });
-}
-
-void CodeGenerator::cgRBTraceEntry(IRInstruction* inst) {
-  auto const& extra = *inst->extra<RBTraceEntry>();
-  auto& v = vmain();
-  auto args = argGroup(inst);
-  cgCallHelper(v,
-               CallSpec::direct(Trace::ringbufferEntryRip),
-               kVoidDest,
-               SyncOptions::None,
-               argGroup(inst)
-                 .imm(extra.type)
-                 .imm(extra.sk.toAtomicInt()));
-}
-
-void CodeGenerator::cgRBTraceMsg(IRInstruction* inst) {
-  auto const& extra = *inst->extra<RBTraceMsg>();
-  auto& v = vmain();
-  assertx(extra.msg->isStatic());
-  cgCallHelper(v,
-               CallSpec::direct(Trace::ringbufferMsg),
-               kVoidDest,
-               SyncOptions::None,
-               argGroup(inst)
-                 .immPtr(extra.msg->data())
-                 .imm(extra.msg->size())
-                 .imm(extra.type));
+void CodeGenerator::cgNewKeysetArray(IRInstruction* inst) {
+  auto const data = inst->extra<NewKeysetArray>();
+  cgCallHelper(
+    vmain(),
+    CallSpec::direct(MixedArray::MakeKeyset),
+    callDest(inst),
+    SyncOptions::Sync,
+    argGroup(inst)
+      .imm(data->size)
+      .addr(srcLoc(inst, 0).reg(), cellsToBytes(data->offset.offset))
+  );
 }
 
 void CodeGenerator::cgCountArray(IRInstruction* inst) {
@@ -1701,11 +1505,28 @@ void CodeGenerator::cgCountArray(IRInstruction* inst) {
   );
 }
 
+void CodeGenerator::arrayLikeCountImpl(IRInstruction* inst) {
+  static_assert(ArrayData::sizeofSize() == 4, "");
+  vmain() << loadzlq{
+    srcLoc(inst, 0).reg()[ArrayData::offsetofSize()],
+    dstLoc(inst, 0).reg()
+  };
+}
+
 void CodeGenerator::cgCountArrayFast(IRInstruction* inst) {
-  auto const baseReg = srcLoc(inst, 0).reg();
-  auto const dstReg  = dstLoc(inst, 0).reg();
-  auto& v = vmain();
-  v << loadzlq{baseReg[ArrayData::offsetofSize()], dstReg};
+  arrayLikeCountImpl(inst);
+}
+
+void CodeGenerator::cgCountVec(IRInstruction* inst) {
+  arrayLikeCountImpl(inst);
+}
+
+void CodeGenerator::cgCountDict(IRInstruction* inst) {
+  arrayLikeCountImpl(inst);
+}
+
+void CodeGenerator::cgCountKeyset(IRInstruction* inst) {
+  arrayLikeCountImpl(inst);
 }
 
 void CodeGenerator::cgCountCollection(IRInstruction* inst) {
@@ -1715,18 +1536,18 @@ void CodeGenerator::cgCountCollection(IRInstruction* inst) {
   v << loadzlq{baseReg[collections::FAST_SIZE_OFFSET], dstReg};
 }
 
-void CodeGenerator::cgInitPackedArray(IRInstruction* inst) {
+void CodeGenerator::cgInitPackedLayoutArray(IRInstruction* inst) {
   auto const arrReg = srcLoc(inst, 0).reg();
-  auto const index = inst->extra<InitPackedArray>()->index;
+  auto const index = inst->extra<InitPackedLayoutArray>()->index;
 
   auto slotOffset = PackedArray::entriesOffset() + index * sizeof(TypedValue);
   storeTV(vmain(), arrReg[slotOffset], srcLoc(inst, 1), inst->src(1));
 }
 
-void CodeGenerator::cgInitPackedArrayLoop(IRInstruction* inst) {
+void CodeGenerator::cgInitPackedLayoutArrayLoop(IRInstruction* inst) {
   auto const arrReg = srcLoc(inst, 0).reg();
-  int const count = inst->extra<InitPackedArrayLoop>()->size;
-  auto const offset = inst->extra<InitPackedArrayLoop>()->offset;
+  int const count = inst->extra<InitPackedLayoutArrayLoop>()->size;
+  auto const offset = inst->extra<InitPackedLayoutArrayLoop>()->offset;
   auto const spIn = srcLoc(inst, 1).reg();
 
   auto& v = vmain();
@@ -1760,41 +1581,6 @@ void CodeGenerator::cgInitPackedArrayLoop(IRInstruction* inst) {
       return sf;
     }
   );
-}
-
-void CodeGenerator::cgLdStructArrayElem(IRInstruction* inst) {
-  auto const array = srcLoc(inst, 0).reg();
-  auto const key = inst->src(1)->strVal();
-  auto const shape = inst->src(0)->type().arrSpec().shape();
-  auto const offset = shape->offsetFor(key);
-  assertx(offset != PropertyTable::kInvalidOffset);
-
-  auto const actualOffset = StructArray::dataOffset() +
-    sizeof(TypedValue) * offset;
-  loadTV(vmain(), inst->dst(), dstLoc(inst, 0), array[actualOffset]);
-}
-
-void CodeGenerator::cgProfileMethod(IRInstruction* inst) {
-  auto const extra = inst->extra<ProfileMethodData>();
-  auto const sp = srcLoc(inst, 0).reg();
-
-  auto& v = vmain();
-  auto const profile = v.makeReg();
-  auto const ar = v.makeReg();
-  v << lea{rvmtl()[extra->handle], profile};
-  v << lea{sp[cellsToBytes(extra->spOffset.offset)], ar};
-  cgCallHelper(v, CallSpec::direct(profileClassMethodHelper),
-               kVoidDest, SyncOptions::None,
-               argGroup(inst).reg(profile).reg(ar).ssa(1));
-}
-
-void CodeGenerator::cgProfileType(IRInstruction* inst) {
-  auto const extra = inst->extra<RDSHandleData>();
-  auto& v = vmain();
-  auto const profile = v.makeReg();
-  v << lea{rvmtl()[extra->handle], profile};
-  cgCallHelper(v, CallSpec::direct(profileTypeHelper), kVoidDest,
-               SyncOptions::None, argGroup(inst).reg(profile).typedValue(0));
 }
 
 void CodeGenerator::cgSetOpCell(IRInstruction* inst) {

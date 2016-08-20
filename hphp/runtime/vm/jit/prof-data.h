@@ -20,6 +20,8 @@
 #include "hphp/util/atomic-vector.h"
 #include "hphp/util/hash-map-typedefs.h"
 
+#include "hphp/runtime/base/rds.h"
+
 #include "hphp/runtime/vm/func.h"
 #include "hphp/runtime/vm/srckey.h"
 
@@ -62,6 +64,8 @@ inline ProfData* profData() {
   return tl_profData;
 }
 
+const ProfData* globalProfData();
+
 /*
  * Mark the current ProfData for deletion.
  *
@@ -90,7 +94,7 @@ struct ProfCounters {
   ProfCounters& operator=(const ProfCounters&) = delete;
 
   T get(uint32_t id) const {
-    return id / kCountersPerChunk > m_chunks.size()
+    return id / kCountersPerChunk >= m_chunks.size()
       ? m_initVal
       : m_chunks[id / kCountersPerChunk][id % kCountersPerChunk];
   }
@@ -374,8 +378,9 @@ struct ProfData {
    */
   void setOptimized(FuncId funcId) {
     m_optimizedFuncs.ensureSize(funcId + 1);
+    assertx(!m_optimizedFuncs[funcId].load(std::memory_order_relaxed));
     m_optimizedFuncs[funcId].store(true, std::memory_order_release);
-    m_currentlyProfilingFuncs.fetch_sub(1, std::memory_order_relaxed);
+    m_optimizedFuncCount.fetch_add(1, std::memory_order_relaxed);
   }
   void setOptimized(SrcKey sk) {
     m_optimizedSKs.emplace(sk.toAtomicInt(), true).first->second = true;
@@ -403,17 +408,34 @@ struct ProfData {
    * Indicate that a function is being profiled.
    */
   void setProfiling(FuncId funcId) {
+    if (profiling(funcId)) return;
+
     m_profilingFuncs.ensureSize(funcId + 1);
     m_profilingFuncs[funcId].store(true, std::memory_order_release);
-    m_currentlyProfilingFuncs.fetch_add(1, std::memory_order_relaxed);
+    m_profilingFuncCount.fetch_add(1, std::memory_order_relaxed);
+
+    auto const func = Func::fromFuncId(funcId);
+    auto const bcSize = func->past() - func->base();
+    m_profilingBCSize.fetch_add(bcSize, std::memory_order_relaxed);
   }
 
   /*
-   * Returns whether or not all functions that were profiled have already been
-   * optimized.
+   * Returns the count of functions that are or were profiling or have been
+   * optimized, respectively.
    */
-  bool optimizedAllProfiledFuncs() const {
-    return m_currentlyProfilingFuncs.load(std::memory_order_relaxed) == 0;
+  int64_t profilingFuncs() const {
+    return m_profilingFuncCount.load(std::memory_order_relaxed);
+  }
+  int64_t optimizedFuncs() const {
+    return m_optimizedFuncCount.load(std::memory_order_relaxed);
+  }
+
+  /*
+   * Returns the total size, in bytes of bytecode, of all functions marked as
+   * profiling.
+   */
+  int64_t profilingBCSize() const {
+    return m_profilingBCSize.load(std::memory_order_relaxed);
   }
 
   /*
@@ -448,10 +470,12 @@ struct ProfData {
   /*
    * Forget the TransID for the translation owning the jmp at the given address.
    */
-  void clearJmpTransID(TCA jmp) {
+  TransID clearJmpTransID(TCA jmp) {
     auto const it = m_jmpToTransID.find(jmp);
-    if (it == m_jmpToTransID.end()) return;
+    if (it == m_jmpToTransID.end()) return kInvalidTransID;
+    auto const ret = it->second;
     it->second = kInvalidTransID;
+    return ret;
   }
 
   /*
@@ -463,6 +487,13 @@ struct ProfData {
     auto const it = m_jmpToTransID.find(jmp);
     return it == m_jmpToTransID.end() ? kInvalidTransID : it->second;
   }
+
+  /*
+   * Support storing debug info about target profiles in profiling translations.
+   */
+  struct TargetProfileInfo { rds::Profile key; std::string debugInfo; };
+  void addTargetProfile(const TargetProfileInfo& info);
+  std::vector<TargetProfileInfo> getTargetProfiles(TransID transID) const;
 
 private:
   struct PrologueID {
@@ -488,11 +519,15 @@ private:
 
   /*
    * Funcs that are being profiled or have already been optimized,
-   * respectively.
+   * respectively. Values in m_profilingFuncs and m_optimizedFuncs only ever
+   * transition from false -> true, and as a result, the atomic counters that
+   * go along with them are monotonically increasing.
    */
   AtomicVector<bool> m_profilingFuncs;
   AtomicVector<bool> m_optimizedFuncs;
-  std::atomic<int64_t> m_currentlyProfilingFuncs{0};
+  std::atomic<int64_t> m_profilingFuncCount{0};
+  std::atomic<int64_t> m_profilingBCSize{0};
+  std::atomic<int64_t> m_optimizedFuncCount{0};
 
   /*
    * SrcKeys that have already been optimized. SrcKeys are marked as not
@@ -526,6 +561,9 @@ private:
    */
   folly::AtomicHashMap<FuncId, const std::unordered_set<Offset>>
     m_blockEndOffsets;
+
+  mutable ReadWriteMutex m_targetProfilesLock;
+  std::unordered_map<TransID, std::vector<TargetProfileInfo>> m_targetProfiles;
 };
 
 //////////////////////////////////////////////////////////////////////

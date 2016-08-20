@@ -20,43 +20,19 @@
 #include <string>
 #include <vector>
 
+#include <folly/portability/Unistd.h>
+
 #include <sys/types.h>
 #ifdef _MSC_VER
 # include <windows.h>
 #else
 # include <sys/syscall.h>
-# include <unistd.h>
 #endif
+
 #include <pthread.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
-// helper class
-
-struct CPipe {
-  CPipe()  { m_fds[0] = m_fds[1] = 0;}
-  ~CPipe() { close();}
-
-  bool open()  { close(); return !pipe(m_fds);}
-  void close() {
-    for (int i = 0; i <= 1; i++) {
-      if (m_fds[i]) {
-        ::close(m_fds[i]);
-        m_fds[i] = 0;
-      }
-    }
-  }
-
-  int getIn() const  { return m_fds[1];}
-  int getOut() const { return m_fds[0];}
-  int detachIn()  { int fd = m_fds[1]; m_fds[1] = 0; return fd;}
-  int detachOut() { int fd = m_fds[0]; m_fds[0] = 0; return fd;}
-  bool dupIn2(int fd) { return dup2(m_fds[1], fd) >= 0;}
-  bool dupOut2(int fd) { return dup2(m_fds[0], fd) >= 0;}
-
-private:
-  int m_fds[2];
-};
 
 struct MemInfo {
   int64_t freeMb{-1};
@@ -86,35 +62,13 @@ struct Process {
   static std::string GetHostName();
 
   /**
-   * Process identifier.
-   */
-  static pid_t GetProcessId() {
-    return getpid();
-  }
-
-  /**
-   * Parent's process identifier.
-   */
-  static pid_t GetParentProcessId() {
-    return getppid();
-  }
-
-  /**
-   * Search for a process by command line. If matchAll is false, only binary
-   * file's name, not the whole path + command line options, will be matched.
-   */
-  static pid_t GetProcessId(const std::string &cmd, bool matchAll = false);
-  static void GetProcessId(const std::string &cmd, std::vector<pid_t> &pids,
-                           bool matchAll = false);
-
-  /**
    * Get command line with a process ID.
    */
   static std::string GetCommandLine(pid_t pid);
 
   /**
    * Check if the current process is being run under GDB.  Will return false if
-   * we're unable to read /proc/{Process::GetProcessId()}/status.
+   * we're unable to read /proc/{getpid()}/status.
    */
   static bool IsUnderGDB();
 
@@ -177,7 +131,7 @@ struct Process {
    * Are we in the main thread still?
    */
   static bool IsInMainThread() {
-    return Process::GetThreadPid() == Process::GetProcessId();
+    return Process::GetThreadPid() == getpid();
   }
 
   /**
@@ -205,51 +159,9 @@ struct Process {
    * Get current user's home directory.
    */
   static std::string GetHomeDirectory();
-
-public:
-  /**
-   * Execute an external program.
-   *
-   * @param   path   binary file's full path
-   * @param   argv   argument array
-   * @param   in     stdin
-   * @param   out    stdout
-   * @param   err    stderr; NULL for don't care
-   * @return         true if program was executed, even if there was stderr;
-   *                 false if anything failed and unable to run the specified
-   *                 program
-   */
-  static bool Exec(const char *path, const char *argv[], const char *in,
-                   std::string &out, std::string *err = nullptr,
-                   bool color = false);
-
-  /**
-   * Execute an external program.
-   *
-   * @param   cmd    command line
-   * @param   outf   save stdout to this file
-   * @param   errf   save stderr to this file
-   * @return         exit code of the program
-   */
-  static int Exec(const std::string &cmd, const std::string &outf,
-                  const std::string &errf);
-
-  /**
-   * Daemonize current process.
-   */
-  static void Daemonize(const char *stdoutFile = "/dev/null",
-                        const char *stderrFile = "/dev/null");
-
-private:
-  static int Exec(const char *path, const char *argv[], int *fdin, int *fdout,
-                  int *fderr
-#ifdef _MSC_VER
-                  , PROCESS_INFORMATION* procInfo
-#endif
-                 );
 };
 
 ///////////////////////////////////////////////////////////////////////////////
 }
 
-#endif // incl_HPHP_PROCESS_H_
+#endif

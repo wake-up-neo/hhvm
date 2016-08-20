@@ -23,6 +23,7 @@
 
 #include "hphp/util/alloc.h"
 #include "hphp/util/lock.h"
+#include "hphp/util/hphp-config.h"
 
 #include "hphp/runtime/base/backtrace.h"
 #include "hphp/runtime/base/code-coverage.h"
@@ -178,32 +179,27 @@ static Exception* generate_memory_exceeded_exception(c_WaitableWaitHandle* wh) {
     "request has exceeded memory limit", exceptionStack);
 }
 
-size_t handle_request_surprise(c_WaitableWaitHandle* wh) {
+size_t handle_request_surprise(c_WaitableWaitHandle* wh, size_t mask) {
   auto& info = TI();
   auto& p = info.m_reqInjectionData;
 
-  auto const flags = fetchAndClearSurpriseFlags();
-  auto const do_timedout = (flags & TimedOutFlag) && !p.getDebuggerAttached();
-  auto const do_memExceeded = flags & MemExceededFlag;
-  auto const do_signaled = flags & SignaledFlag;
-  auto const do_cpuTimedOut =
-    (flags & CPUTimedOutFlag) && !p.getDebuggerAttached();
-  auto const do_GC = flags & PendingGCFlag;
+  auto const flags = fetchAndClearSurpriseFlags() & mask;
+  auto const debugging = p.getDebuggerAttached();
 
   // Start with any pending exception that might be on the thread.
   auto pendingException = info.m_pendingException;
   info.m_pendingException = nullptr;
 
-  if (do_timedout) {
+  if ((flags & TimedOutFlag) && !debugging) {
     p.setCPUTimeout(0);  // Stop CPU timer so we won't time out twice.
     if (pendingException) {
       setSurpriseFlag(TimedOutFlag);
     } else {
       pendingException = generate_request_timeout_exception(wh);
     }
-  }
-  // Don't bother with the CPU timeout if we're already handling a wall timeout.
-  if (do_cpuTimedOut && !do_timedout) {
+  } else if ((flags & CPUTimedOutFlag) && !debugging) {
+    // Don't bother with the CPU timeout if we're already handling a wall
+    // timeout.
     p.setTimeout(0);  // Stop wall timer so we won't time out twice.
     if (pendingException) {
       setSurpriseFlag(CPUTimedOutFlag);
@@ -211,14 +207,14 @@ size_t handle_request_surprise(c_WaitableWaitHandle* wh) {
       pendingException = generate_request_cpu_timeout_exception(wh);
     }
   }
-  if (do_memExceeded) {
+  if (flags & MemExceededFlag) {
     if (pendingException) {
       setSurpriseFlag(MemExceededFlag);
     } else {
       pendingException = generate_memory_exceeded_exception(wh);
     }
   }
-  if (do_GC) {
+  if (flags & PendingGCFlag) {
     if (StickyFlags & PendingGCFlag) {
       clearSurpriseFlag(PendingGCFlag);
     }
@@ -228,7 +224,7 @@ size_t handle_request_surprise(c_WaitableWaitHandle* wh) {
       MM().checkHeap("surprise");
     }
   }
-  if (do_signaled) {
+  if (flags & SignaledFlag) {
     HHVM_FN(pcntl_signal_dispatch)();
   }
 

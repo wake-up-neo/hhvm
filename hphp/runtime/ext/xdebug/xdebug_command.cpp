@@ -97,6 +97,7 @@ namespace HPHP {
   FEATURE("supports_postmortem", "1", "1", false)                              \
   FEATURE("show_hidden", "1",                                                  \
           xdebug_sprintf("%d", m_server.m_showHidden), true)                   \
+  FEATURE("notify_ok", "1", "1", false)                                        \
 
 ////////////////////////////////////////////////////////////////////////////////
 // Helpers
@@ -127,16 +128,18 @@ static Unit* compile_expression(const String& expr) {
 
 // Evaluates the given unit at the given depth and returns the result or throws
 // and error on failure.
-static Variant do_eval(Unit* evalUnit, int depth) {
+static Variant do_eval(Unit* evalUnit, int depth, bool bypassCheck) {
   // Set the error reporting level to 0 to ensure non-fatal errors are hidden
   auto& req_data = ThreadInfo::s_threadInfo->m_reqInjectionData;
   auto const old_level = req_data.getErrorReportingLevel();
   req_data.setErrorReportingLevel(0);
 
+  g_context->debuggerSettings.bypassCheck = bypassCheck;
   // Do the eval
   Variant result;
   bool failure = g_context->evalPHPDebugger((TypedValue*)&result,
                                             evalUnit, depth);
+  g_context->debuggerSettings.bypassCheck = false;
 
   // Restore the error reporting level and then either return or throw
   req_data.setErrorReportingLevel(old_level);
@@ -147,14 +150,16 @@ static Variant do_eval(Unit* evalUnit, int depth) {
 }
 
 // Same as do_eval(const Unit*, int) except that this evaluates a string
-static Variant do_eval(const String& evalStr, int depth) {
-  return do_eval(compile(evalStr), depth);
+static Variant do_eval(const String& evalStr, int depth, bool bypassCheck) {
+  return do_eval(compile(evalStr), depth, bypassCheck);
 }
 
 // Helper for the breakpoint commands that returns an xml node containing
 // breakpoint information
-static xdebug_xml_node* breakpoint_xml_node(int id,
-                                            const XDebugBreakpoint& bp) {
+xdebug_xml_node* breakpoint_xml_node(
+  int id,
+  const XDebugBreakpoint& bp
+) {
   // Initialize the xml node
   auto xml = xdebug_xml_node_init("breakpoint");
   xdebug_xml_add_attribute(xml, "id", id);
@@ -237,7 +242,7 @@ static xdebug_xml_node* breakpoint_xml_node(int id,
 
 // Given a symbol name and a depth, returns the symbol's value. Throws an error
 // if the symbol is not found
-static Variant find_symbol(const String& name, int depth) {
+static Variant find_symbol(const String& name, int depth, bool bypassCheck) {
   // Retrieve the symbol by treating it as an expression.
   // NOTE: This does not match php5 xdebug. php5 xdebug allows 'special'
   // semantics to select the symbol. However, there is no evidence so far of an
@@ -246,7 +251,7 @@ static Variant find_symbol(const String& name, int depth) {
   auto eval_unit = compile_expression(name);
 
   // If the result is unitialized, the property must be undefined
-  auto result = do_eval(eval_unit, depth);
+  auto result = do_eval(eval_unit, depth, bypassCheck);
   if (!result.isInitialized()) {
     throw_exn(Error::PropertyNonExistent);
   }
@@ -368,7 +373,7 @@ struct FeatureSetCmd : XDebugCommand {
     } else if (m_feature == "max_depth") {
       m_server.m_maxDepth = strtol(value_str, nullptr, 10);
     } else if (m_feature == "show_hidden") {
-      m_server.m_showHidden = strtol(value_str, nullptr, 10);
+      m_server.m_showHidden = (strtol(value_str, nullptr, 10) != 0);
     } else if (m_feature == "multiple_sessions") {
       // php5 xdebug doesn't do anything here with this value, but it is doesn't
       // throw an error, either
@@ -376,6 +381,8 @@ struct FeatureSetCmd : XDebugCommand {
       if (m_value != "iso-8859-1") {
         throw_exn(Error::EncodingNotSupported);
       }
+    } else if (m_feature == "notify_ok" ) {
+      m_server.m_supportsNotify = (strtol(value_str, nullptr, 10) != 0);
     } else {
       throw_exn(Error::InvalidArgs);
     }
@@ -561,8 +568,7 @@ struct BreakCmd : XDebugCommand {
   ~BreakCmd() {}
 
   void handleImpl(xdebug_xml_node& xml) override {
-    // If we got here, then we were already paused.
-    m_server.addStatus(xml);
+    xdebug_xml_add_attribute(&xml, "success", "1");
   }
 };
 
@@ -1293,7 +1299,7 @@ struct PropertyGetCmd : XDebugCommand {
       // Globals and superglobals can be fetched by finding the symbol
       case XDebugContext::LOCAL:
       case XDebugContext::SUPERGLOBALS: {
-        Variant val = find_symbol(m_name, m_depth);
+        Variant val = find_symbol(m_name, m_depth, m_server.m_showHidden);
         auto node = xdebug_get_value_xml_node(m_name.data(), val,
                                               XDebugVarType::Normal,
                                               exporter);
@@ -1396,7 +1402,7 @@ struct PropertySetCmd : XDebugCommand {
     // with errors in property_get and eval, php5 xdebug sends back success = 0
     // on failure, not an error.
     try {
-      do_eval(eval_str, m_depth);
+      do_eval(eval_str, m_depth, m_server.m_showHidden);
       xdebug_xml_add_attribute(&xml, "success", "1");
     } catch (...) {
       xdebug_xml_add_attribute(&xml, "success", "0");
@@ -1589,7 +1595,7 @@ struct EvalCmd : XDebugCommand {
   ~EvalCmd() {}
 
   void handleImpl(xdebug_xml_node& xml) override {
-    auto result = do_eval(m_evalUnit, 0);
+    auto result = do_eval(m_evalUnit, 0, m_server.m_showHidden);
     m_server.setStatus(Status::Break, Reason::Ok);
 
     // Construct the exporter

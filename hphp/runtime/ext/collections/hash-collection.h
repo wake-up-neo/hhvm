@@ -625,7 +625,8 @@ struct HashCollection : ObjectData {
   }
 
   static void initHash(int32_t* table, size_t tableSize) {
-    wordfill(table, Empty, tableSize);
+    static_assert(Empty == -1, "Cannot use wordfillones().");
+    wordfillones(table, tableSize);
   }
 
   [[noreturn]] void throwTooLarge();
@@ -652,6 +653,7 @@ struct HashCollection : ObjectData {
   // *not* contain any references.  WARNING: does not update intLikeStrKeys
   void replaceArray(ArrayData* adata) {
     auto* oldAd = m_arr;
+    dropImmCopy();
     m_arr = MixedArray::asMixed(adata);
     adata->incRefCount();
     m_size = adata->size();

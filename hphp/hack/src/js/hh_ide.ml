@@ -113,12 +113,12 @@ let declare_file fn content =
   List.iter old_funs begin fun (_, fname) ->
     Naming_heap.FunPosHeap.remove fname;
     Naming_heap.FunCanonHeap.remove (NamingGlobal.canon_key fname);
-    Typing_heap.Funs.remove fname;
+    Decl_heap.Funs.remove fname;
   end;
   List.iter old_classes begin fun (_, cname) ->
     Naming_heap.TypeIdHeap.remove cname;
     Naming_heap.TypeCanonHeap.remove (NamingGlobal.canon_key cname);
-    Typing_heap.Classes.remove cname;
+    Decl_heap.Classes.remove cname;
   end;
   try
     Autocomplete.auto_complete := false;
@@ -161,7 +161,7 @@ let hh_add_file fn content =
   let fn = make_path fn in
   Hashtbl.replace files fn content;
   try
-    let errors, _ = Errors.do_ begin fun () ->
+    let errors, _, _ = Errors.do_ begin fun () ->
       declare_file fn content
     end in
     Hashtbl.replace parse_errors fn (last_error (Errors.get_error_list errors))

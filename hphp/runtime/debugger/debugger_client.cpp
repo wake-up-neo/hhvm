@@ -18,25 +18,29 @@
 #include <signal.h>
 #include <fstream>
 
-#include "hphp/runtime/debugger/debugger_command.h"
-#include "hphp/runtime/debugger/cmd/all.h"
 #include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/builtin-functions.h"
-#include "hphp/runtime/base/string-util.h"
+#include "hphp/runtime/base/config.h"
 #include "hphp/runtime/base/preg.h"
 #include "hphp/runtime/base/program-functions.h"
+#include "hphp/runtime/base/string-util.h"
 #include "hphp/runtime/base/variable-serializer.h"
+#include "hphp/runtime/debugger/cmd/all.h"
+#include "hphp/runtime/debugger/debugger_command.h"
 #include "hphp/runtime/ext/sockets/ext_sockets.h"
 #include "hphp/runtime/ext/std/ext_std_network.h"
 #include "hphp/runtime/ext/string/ext_string.h"
-#include "hphp/util/text-color.h"
-#include "hphp/util/text-art.h"
 #include "hphp/util/logger.h"
+#include "hphp/util/process-exec.h"
 #include "hphp/util/process.h"
+#include "hphp/util/stack-trace.h"
 #include "hphp/util/string-vsnprintf.h"
-#include "hphp/runtime/base/config.h"
+#include "hphp/util/text-art.h"
+#include "hphp/util/text-color.h"
+
 #include <boost/scoped_ptr.hpp>
 #include <folly/Conv.h>
+#include <folly/portability/Unistd.h>
 
 #define USE_VARARGS
 #define PREFER_STDARG
@@ -699,8 +703,8 @@ void DebuggerClient::init(const DebuggerClientOptions &options) {
   loadConfig();
 
   if (m_scriptMode) {
-    print("running in script mode, pid=%d\n",
-        (int32_t)Process::GetProcessId());
+    print("running in script mode, pid=%" PRId64 "\n",
+          (int64_t)getpid());
   }
 
   if (!options.cmds.empty()) {
@@ -756,6 +760,7 @@ void DebuggerClient::run() {
   } else {
     hphp_invoke_simple(m_options.extension, false);
   }
+
   while (true) {
     bool reconnect = false;
     try {
@@ -1099,8 +1104,9 @@ DebuggerCommandPtr DebuggerClient::eventLoop(EventLoopKind loopKind,
         Logger::Error("Unable to communicate with server. Server's down?");
         throw DebuggerServerLostException();
       }
-      if (cmd->is(DebuggerCommand::KindOfSignal)) {
-        // Respond to signal polling from the server.
+      if (cmd->is(DebuggerCommand::KindOfSignal) ||
+          cmd->is(DebuggerCommand::KindOfAuth)) {
+        // Respond to polling from the server.
         cmd->onClient(*this);
         continue;
       }

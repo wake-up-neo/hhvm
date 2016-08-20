@@ -396,6 +396,54 @@ PROFILE_MIXED_ARRAY_OFFSET_HELPER_TABLE(X)
 
 //////////////////////////////////////////////////////////////////////
 
+inline void profileDictOffsetHelper(const ArrayData* ad, int64_t i,
+                                    MixedArrayOffsetProfile* prof) {
+  prof->update(ad, i);
+}
+inline void profileDictOffsetHelper(const ArrayData* ad, const StringData* sd,
+                                    MixedArrayOffsetProfile* prof) {
+  prof->update(ad, sd, false);
+}
+
+#define PROFILE_DICT_OFFSET_HELPER_TABLE(m)                 \
+  /* name                keyType  */                        \
+  m(profileDictOffsetS,  KeyType::Str)                      \
+  m(profileDictOffsetI,  KeyType::Int)                      \
+
+#define X(nm, keyType)                                      \
+inline void nm(const ArrayData* a, key_type<keyType> k,     \
+               MixedArrayOffsetProfile* p) {                \
+  profileDictOffsetHelper(a, k, p);                         \
+}
+PROFILE_DICT_OFFSET_HELPER_TABLE(X)
+#undef X
+
+//////////////////////////////////////////////////////////////////////
+
+inline void profileKeysetOffsetHelper(const ArrayData* ad, int64_t i,
+                                      MixedArrayOffsetProfile* prof) {
+  prof->update(ad, i);
+}
+inline void profileKeysetOffsetHelper(const ArrayData* ad, const StringData* sd,
+                                      MixedArrayOffsetProfile* prof) {
+  prof->update(ad, sd, false);
+}
+
+#define PROFILE_KEYSET_OFFSET_HELPER_TABLE(m)               \
+  /* name                keyType  */                        \
+  m(profileKeysetOffsetS,  KeyType::Str)                    \
+  m(profileKeysetOffsetI,  KeyType::Int)                    \
+
+#define X(nm, keyType)                                      \
+inline void nm(const ArrayData* a, key_type<keyType> k,     \
+               MixedArrayOffsetProfile* p) {                \
+  profileKeysetOffsetHelper(a, k, p);                       \
+}
+PROFILE_KEYSET_OFFSET_HELPER_TABLE(X)
+#undef X
+
+//////////////////////////////////////////////////////////////////////
+
 template <KeyType keyType, MOpFlags flags>
 TypedValue* elemImpl(TypedValue* base,
                      key_type<keyType> key,
@@ -404,7 +452,7 @@ TypedValue* elemImpl(TypedValue* base,
     return ElemU<keyType>(tvRef, base, key);
   }
   if (flags & MOpFlags::Define) {
-    return ElemD<flags, keyType>(tvRef, base, key);
+    return ElemD<flags, false, keyType>(tvRef, base, key);
   }
   // We won't really modify the TypedValue in the non-D case, so
   // this const_cast is safe.
@@ -415,17 +463,14 @@ TypedValue* elemImpl(TypedValue* base,
   /* name      keyType         attrs  */              \
   m(elemC,     KeyType::Any,   MOpFlags::None)        \
   m(elemCD,    KeyType::Any,   MOpFlags::Define)      \
-  m(elemCDR,   KeyType::Any,   MOpFlags::DefineReffy) \
   m(elemCU,    KeyType::Any,   MOpFlags::Unset)       \
   m(elemCW,    KeyType::Any,   MOpFlags::Warn)        \
   m(elemI,     KeyType::Int,   MOpFlags::None)        \
   m(elemID,    KeyType::Int,   MOpFlags::Define)      \
-  m(elemIDR,   KeyType::Int,   MOpFlags::DefineReffy) \
   m(elemIU,    KeyType::Int,   MOpFlags::Unset)       \
   m(elemIW,    KeyType::Int,   MOpFlags::Warn)        \
   m(elemS,     KeyType::Str,   MOpFlags::None)        \
   m(elemSD,    KeyType::Str,   MOpFlags::Define)      \
-  m(elemSDR,   KeyType::Str,   MOpFlags::DefineReffy) \
   m(elemSU,    KeyType::Str,   MOpFlags::Unset)       \
   m(elemSW,    KeyType::Str,   MOpFlags::Warn)        \
 
@@ -492,7 +537,7 @@ inline const TypedValue* elemArrayImpl(ArrayData* ad, key_type<keyType> key) {
 inline TypedValue* nm(TypedValue* base, key_type<keyType> key) {       \
   auto cbase = tvToCell(base);                                         \
   assertx(isArrayType(cbase->m_type));                                 \
-  return ElemDArray<MOpFlags::None, keyType>(cbase, key);              \
+  return ElemDArray<MOpFlags::None, false, keyType>(cbase, key);       \
 }
 ELEM_ARRAY_D_HELPER_TABLE(X)
 #undef X
@@ -555,6 +600,112 @@ ARRAYGET_HELPER_TABLE(X)
 
 //////////////////////////////////////////////////////////////////////
 
+#define ELEM_DICT_D_HELPER_TABLE(m)  \
+  /* name           keyType */       \
+  m(elemDictSD,    KeyType::Str)     \
+  m(elemDictID,    KeyType::Int)     \
+
+#define X(nm, keyType)                                                 \
+inline TypedValue* nm(TypedValue* base, key_type<keyType> key) {       \
+  auto cbase = tvToCell(base);                                         \
+  assertx(isDictType(cbase->m_type));                                  \
+  return ElemDDict<false, keyType>(cbase, key);                        \
+}
+ELEM_DICT_D_HELPER_TABLE(X)
+#undef X
+
+#define ELEM_DICT_U_HELPER_TABLE(m)  \
+  /* name        keyType */          \
+  m(elemDictSU, KeyType::Str)        \
+  m(elemDictIU, KeyType::Int)        \
+
+#define X(nm, keyType)                                                 \
+inline TypedValue* nm(TypedValue* base, key_type<keyType> key) {       \
+  auto cbase = tvToCell(base);                                         \
+  assertx(isDictType(cbase->m_type));                                  \
+  return ElemUDict<keyType>(cbase, key);                               \
+}
+ELEM_DICT_U_HELPER_TABLE(X)
+#undef X
+
+#define ELEM_DICT_HELPER_TABLE(m)                               \
+  /* name               keyType        warn */                  \
+  m(elemDictS,     KeyType::Str,       MOpFlags::None)          \
+  m(elemDictI,     KeyType::Int,       MOpFlags::None)          \
+  m(elemDictSW,    KeyType::Str,       MOpFlags::Warn)          \
+  m(elemDictIW,    KeyType::Int,       MOpFlags::Warn)          \
+
+#define X(nm, keyType, flags)                                       \
+inline const TypedValue* nm(ArrayData* ad, key_type<keyType> key) { \
+  return HPHP::ElemDict<flags, keyType>(ad, key);                   \
+}
+ELEM_DICT_HELPER_TABLE(X)
+#undef X
+
+//////////////////////////////////////////////////////////////////////
+
+#define ELEM_KEYSET_U_HELPER_TABLE(m)  \
+  /* name         keyType */          \
+  m(elemKeysetSU, KeyType::Str)        \
+  m(elemKeysetIU, KeyType::Int)        \
+
+#define X(nm, keyType)                                                 \
+inline TypedValue* nm(TypedValue* base, key_type<keyType> key) {       \
+  auto cbase = tvToCell(base);                                         \
+  assertx(isKeysetType(cbase->m_type));                                \
+  return ElemUKeyset<keyType>(cbase, key);                             \
+}
+ELEM_KEYSET_U_HELPER_TABLE(X)
+#undef X
+
+#define ELEM_KEYSET_HELPER_TABLE(m)                               \
+  /* name            keyType             warn */                  \
+  m(elemKeysetS,     KeyType::Str,       MOpFlags::None)          \
+  m(elemKeysetI,     KeyType::Int,       MOpFlags::None)          \
+  m(elemKeysetSW,    KeyType::Str,       MOpFlags::Warn)          \
+  m(elemKeysetIW,    KeyType::Int,       MOpFlags::Warn)          \
+
+#define X(nm, keyType, flags)                                       \
+inline const TypedValue* nm(ArrayData* ad, key_type<keyType> key) { \
+  return HPHP::ElemKeyset<flags, keyType>(ad, key);                 \
+}
+ELEM_KEYSET_HELPER_TABLE(X)
+#undef X
+
+//////////////////////////////////////////////////////////////////////
+
+#define DICTGET_HELPER_TABLE(m)                                  \
+  /* name          keyType        flags */                       \
+  m(dictGetS,      KeyType::Str,  MOpFlags::Warn)                \
+  m(dictGetI,      KeyType::Int,  MOpFlags::Warn)                \
+  m(dictGetSQuiet, KeyType::Str,  MOpFlags::None)                \
+  m(dictGetIQuiet, KeyType::Int,  MOpFlags::None)                \
+
+#define X(nm, keyType, flags)                                \
+inline TypedValue nm(ArrayData* a, key_type<keyType> key) {  \
+  return *HPHP::ElemDict<flags, keyType>(a, key);            \
+}
+DICTGET_HELPER_TABLE(X)
+#undef X
+
+//////////////////////////////////////////////////////////////////////
+
+#define KEYSETGET_HELPER_TABLE(m)                                  \
+  /* name            keyType        flags */                       \
+  m(keysetGetS,      KeyType::Str,  MOpFlags::Warn)                \
+  m(keysetGetI,      KeyType::Int,  MOpFlags::Warn)                \
+  m(keysetGetSQuiet, KeyType::Str,  MOpFlags::None)                \
+  m(keysetGetIQuiet, KeyType::Int,  MOpFlags::None)                \
+
+#define X(nm, keyType, flags)                                \
+inline TypedValue nm(ArrayData* a, key_type<keyType> key) {  \
+  return *HPHP::ElemKeyset<flags, keyType>(a, key);          \
+}
+KEYSETGET_HELPER_TABLE(X)
+#undef X
+
+//////////////////////////////////////////////////////////////////////
+
 template <KeyType keyType, MOpFlags flags>
 TypedValue cGetElemImpl(TypedValue* base, key_type<keyType> key) {
   TypedValue localTvRef;
@@ -583,7 +734,7 @@ CGETELEM_HELPER_TABLE(X)
 template <KeyType keyType>
 RefData* vGetElemImpl(TypedValue* base, key_type<keyType> key) {
   TypedValue localTvRef;
-  auto result = ElemD<MOpFlags::DefineReffy, keyType>(localTvRef, base, key);
+  auto result = ElemD<MOpFlags::Define, true, keyType>(localTvRef, base, key);
   return vGetRefShuffle(localTvRef, result);
 }
 
@@ -623,10 +774,12 @@ arraySetImpl(ArrayData* a, key_type<keyType> key, Cell value, RefData* ref) {
   static_assert(keyType != KeyType::Any,
                 "KeyType::Any is not supported in arraySetMImpl");
   assertx(cellIsPlausible(value));
+  assertx(a->isPHPArray());
   const bool copy = a->cowCheck();
   ArrayData* ret = checkForInt ? checkedSet(a, key, value, copy)
                                : a->set(key, value, copy);
-  return arrayRefShuffle<setRef>(a, ret, setRef ? ref->tv() : nullptr);
+  return arrayRefShuffle<setRef, KindOfArray>(a, ret,
+                                              setRef ? ref->tv() : nullptr);
 }
 
 #define ARRAYSET_HELPER_TABLE(m)                             \
@@ -648,6 +801,101 @@ ARRAYSET_HELPER_TABLE(X)
 
 //////////////////////////////////////////////////////////////////////
 
+template<bool setRef>
+typename ShuffleReturn<setRef>::return_type
+vecSetImpl(ArrayData* a, int64_t key, Cell value, RefData* ref) {
+  assertx(cellIsPlausible(value));
+  assertx(a->isVecArray());
+  const bool copy = a->cowCheck();
+  ArrayData* ret = PackedArray::SetIntVec(a, key, value, copy);
+  return arrayRefShuffle<setRef, KindOfVec>(a, ret,
+                                            setRef ? ref->tv() : nullptr);
+}
+
+#define VECSET_HELPER_TABLE(m) \
+  /* name      setRef */       \
+  m(vecSetI,   false)          \
+  m(vecSetIR,  true)           \
+
+#define X(nm, setRef)                                                   \
+ShuffleReturn<setRef>::return_type                                      \
+inline nm(ArrayData* a, int64_t key, Cell value, RefData* ref) {        \
+  return vecSetImpl<setRef>(a, key, value, ref);                        \
+}
+VECSET_HELPER_TABLE(X)
+#undef X
+
+//////////////////////////////////////////////////////////////////////
+
+inline ArrayData* dictSetImplPre(ArrayData* a, int64_t i, Cell val) {
+  return MixedArray::SetIntDict(a, i, val, a->cowCheck());
+}
+inline ArrayData* dictSetImplPre(ArrayData* a, StringData* s, Cell val) {
+  return MixedArray::SetStrDict(a, s, val, a->cowCheck());
+}
+
+template<KeyType keyType, bool setRef>
+typename ShuffleReturn<setRef>::return_type
+dictSetImpl(ArrayData* a, key_type<keyType> key, Cell value, RefData* ref) {
+  assertx(cellIsPlausible(value));
+  assertx(a->isDict());
+  auto ret = dictSetImplPre(a, key, value);
+  return arrayRefShuffle<setRef, KindOfDict>(a, ret,
+                                             setRef ? ref->tv() : nullptr);
+}
+
+#define DICTSET_HELPER_TABLE(m) \
+  /* name       keyType        setRef */         \
+  m(dictSetI,   KeyType::Int,  false)            \
+  m(dictSetIR,  KeyType::Int,  true)             \
+  m(dictSetS,   KeyType::Str,  false)            \
+  m(dictSetSR,  KeyType::Str,  true)             \
+
+#define X(nm, keyType, setRef)                                           \
+ShuffleReturn<setRef>::return_type                                       \
+inline nm(ArrayData* a, key_type<keyType> key, Cell val, RefData* ref) { \
+  return dictSetImpl<keyType, setRef>(a, key, val, ref);                 \
+}
+DICTSET_HELPER_TABLE(X)
+#undef X
+
+//////////////////////////////////////////////////////////////////////
+
+inline ArrayData* keysetSetNewElemImplPre(ArrayData* a, int64_t i) {
+  return MixedArray::AddToKeyset(a, i, a->cowCheck());
+}
+
+inline ArrayData* keysetSetNewElemImplPre(ArrayData* a, StringData* s) {
+  return MixedArray::AddToKeyset(a, s, a->cowCheck());
+}
+
+template<KeyType keyType>
+void keysetSetNewElemImpl(TypedValue* tv, key_type<keyType> key) {
+  assertx(tvIsPlausible(*tv));
+  assertx(tvIsKeyset(tv));
+  auto oldArr = tv->m_data.parr;
+  auto newArr = keysetSetNewElemImplPre(oldArr, key);
+  if (oldArr != newArr) {
+    tv->m_type = KindOfKeyset;
+    tv->m_data.parr = newArr;
+    assertx(tvIsPlausible(*tv));
+    decRefArr(oldArr);
+  }
+}
+
+#define KEYSET_SETNEWELEM_HELPER_TABLE(m)       \
+  /* name              keyType      */          \
+  m(keysetSetNewElemI, KeyType::Int)            \
+  m(keysetSetNewElemS, KeyType::Str)            \
+
+#define X(nm, keyType)                                   \
+inline void nm(TypedValue* tv, key_type<keyType> key) {  \
+  keysetSetNewElemImpl<keyType>(tv, key);                \
+}
+KEYSET_SETNEWELEM_HELPER_TABLE(X)
+#undef X
+
+//////////////////////////////////////////////////////////////////////
 template <KeyType keyType>
 StringData* setElemImpl(TypedValue* base, key_type<keyType> key, Cell val) {
   return HPHP::SetElem<false, keyType>(base, key, &val);
@@ -687,6 +935,48 @@ inline uint64_t nm(ArrayData* a, key_type<keyType> key) {\
   return arrayIssetImpl<keyType, checkForInt>(a, key);\
 }
 ARRAY_ISSET_HELPER_TABLE(X)
+#undef X
+
+//////////////////////////////////////////////////////////////////////
+
+template<KeyType keyType, bool isEmpty>
+uint64_t dictIssetImpl(ArrayData* a, key_type<keyType> key) {
+  return IssetEmptyElemDict<isEmpty, keyType>(a, key);
+}
+
+#define DICT_ISSET_EMPTY_ELEM_HELPER_TABLE(m)         \
+  /* name              keyType      isEmpty */        \
+  m(dictIssetElemS,    KeyType::Str,  false)          \
+  m(dictIssetElemSE,   KeyType::Str,  true)           \
+  m(dictIssetElemI,    KeyType::Int,  false)          \
+  m(dictIssetElemIE,   KeyType::Int,  true)           \
+
+#define X(nm, keyType, isEmpty)                               \
+inline uint64_t nm(ArrayData* a, key_type<keyType> key) {     \
+  return dictIssetImpl<keyType, isEmpty>(a, key);             \
+}
+DICT_ISSET_EMPTY_ELEM_HELPER_TABLE(X)
+#undef X
+
+//////////////////////////////////////////////////////////////////////
+
+template<KeyType keyType, bool isEmpty>
+uint64_t keysetIssetImpl(ArrayData* a, key_type<keyType> key) {
+  return IssetEmptyElemKeyset<isEmpty, keyType>(a, key);
+}
+
+#define KEYSET_ISSET_EMPTY_ELEM_HELPER_TABLE(m)         \
+  /* name                keyType      isEmpty */        \
+  m(keysetIssetElemS,    KeyType::Str,  false)          \
+  m(keysetIssetElemSE,   KeyType::Str,  true)           \
+  m(keysetIssetElemI,    KeyType::Int,  false)          \
+  m(keysetIssetElemIE,   KeyType::Int,  true)           \
+
+#define X(nm, keyType, isEmpty)                               \
+inline uint64_t nm(ArrayData* a, key_type<keyType> key) {     \
+  return keysetIssetImpl<keyType, isEmpty>(a, key);           \
+}
+KEYSET_ISSET_EMPTY_ELEM_HELPER_TABLE(X)
 #undef X
 
 //////////////////////////////////////////////////////////////////////

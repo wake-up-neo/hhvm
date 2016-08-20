@@ -27,6 +27,8 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
+extern const StaticString s_InvalidKeysetOperationMsg;
+
 namespace {
 inline bool isIntKey(const Cell* cell) {
   return isIntKeyType(cell->m_type);
@@ -65,12 +67,12 @@ inline const Variant& ArrayData::get(const String& k, bool error) const {
 }
 
 inline const Variant& ArrayData::get(int64_t k, bool error) const {
-  auto tv = nvGet(k);
+  auto tv = error ? nvTryGet(k) : nvGet(k);
   return tv ? tvAsCVarRef(tv) : getNotFound(k, error);
 }
 
 inline const Variant& ArrayData::get(const StringData* k, bool error) const {
-  auto tv = nvGet(k);
+  auto tv = error ? nvTryGet(k) : nvGet(k);
   return tv ? tvAsCVarRef(tv) : getNotFound(k, error);
 }
 
@@ -383,16 +385,20 @@ inline ArrayData* ArrayData::prepend(Cell v, bool copy) {
   return g_array_funcs.prepend[kind()](this, v, copy);
 }
 
-inline ArrayData* ArrayData::toDict() {
-  return g_array_funcs.toDict[kind()](this);
+inline ArrayData* ArrayData::toPHPArray(bool copy) {
+  return g_array_funcs.toPHPArray[kind()](this, copy);
 }
 
-inline ArrayData* ArrayData::toVec() const {
-  return g_array_funcs.toVec[kind()](this);
+inline ArrayData* ArrayData::toDict(bool copy) {
+  return g_array_funcs.toDict[kind()](this, copy);
 }
 
-inline ArrayData* ArrayData::toKeyset() {
-  return g_array_funcs.toKeyset[kind()](this);
+inline ArrayData* ArrayData::toVec(bool copy) {
+  return g_array_funcs.toVec[kind()](this, copy);
+}
+
+inline ArrayData* ArrayData::toKeyset(bool copy) {
+  return g_array_funcs.toKeyset[kind()](this, copy);
 }
 
 inline void ArrayData::renumber() {

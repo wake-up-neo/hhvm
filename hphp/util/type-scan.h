@@ -92,7 +92,7 @@ constexpr const Index kIndexUnknownNoPtrs = 1;
 // Various ugly internal implementation details put here not to muddle the
 // external interface. Look in here if you're interested in implementation
 // comments.
-#include "type-scan-detail.h"
+#include "hphp/util/type-scan-detail.h"
 
 namespace HPHP { namespace type_scan { namespace Action {
 
@@ -142,12 +142,29 @@ template <typename T> struct WithSuffix {};
 // usually easiest to have the type T derive from MarkCountable<T>.
 template <typename T> struct MarkCountable {};
 
-// Obtain a type index for the given type T and an optional action.
+// Normally countable types are never scanned, even if explicitly
+// requested. However, you may want to scan a countable type in certain contexts
+// (for example, a countable type which can be both allocated in memory and the
+// stack). In that case, use this marker instead.
+template <typename T> struct MarkScannableCountable {};
+
+// Obtain a type index for the given type T and an optional action. Asserts that
+// this index will be used to scan T, and that T is being allocated here.
 template <typename T, typename Action = Action::Auto>
 inline Index getIndexForMalloc() {
   // Why do this instead of detail::Indexer<>::s_index ? Because otherwise Clang
   // decides not to emit all the debug information related to the Indexer.
   detail::Indexer<typename std::remove_cv<T>::type, Action> temp;
+  return temp.s_index;
+}
+
+// Obtain a type index for the given type T. Asserts that this index will be
+// used only to scan the T, and that T is *not* being allocated here.
+template <typename T>
+inline Index getIndexForScan() {
+  // Why do this instead of detail::Indexer<>::s_index ? Because otherwise Clang
+  // decides not to emit all the debug information related to the Indexer.
+  detail::Indexer<typename std::remove_cv<T>::type, detail::ScanAction> temp;
   return temp.s_index;
 }
 
@@ -252,7 +269,7 @@ struct Scanner {
     static_assert(!detail::UnboundedArray<T>::value,
                   "Trying to scan unbounded array");
     assert(size % sizeof(T) == 0);
-    scanByIndex(detail::getIndexForScan<T>(), &val, size);
+    scanByIndex(getIndexForScan<T>(), &val, size);
   }
 
   // Report a range to be conservative scanned. Meant to be called from a type
@@ -277,8 +294,13 @@ struct Scanner {
   // mutually referential objects.
   template <typename T>
   void scanPtr(const T* ptr, std::size_t size = sizeof(T)) {
-    if (!m_visited.insert(ptr).second) return;
-    scan(*ptr, size);
+    // Scan this pointer only if it already isn't on the visited list. IE, we
+    // have not already traversed through it to reach here.
+    if (std::find(m_visited.begin(), m_visited.end(), ptr) == m_visited.end()) {
+      m_visited.push_back(ptr);
+      SCOPE_EXIT { m_visited.pop_back(); };
+      scan(*ptr, size);
+    }
   }
 
   // Called once all the scanning is done. Reports enqueued pointers via the
@@ -286,12 +308,7 @@ struct Scanner {
   // callback. Afterwards, all the state is cleared. The Scanner can be re-used
   // after this.
   template <typename F1, typename F2> void finish(F1&& f1, F2&& f2) {
-    if (m_visited.bucket_count() < 500) {
-      m_visited.clear();
-    } else {
-      // TODO: #11247510 tune this better
-      m_visited = std::unordered_set<const void*>();
-    }
+    assert(m_visited.empty());
     for (const auto& p : m_ptrs) if (p) { f1(p); }
     for (const auto& p : m_conservative) f2(p.first, p.second);
     m_ptrs.clear();
@@ -302,7 +319,7 @@ struct Scanner {
   // functions can manipulate them directly.
   std::vector<const void*> m_ptrs;
   std::vector<std::pair<const void*, std::size_t>> m_conservative;
-  std::unordered_set<const void*> m_visited;
+  std::vector<const void*> m_visited;
 };
 
 /*

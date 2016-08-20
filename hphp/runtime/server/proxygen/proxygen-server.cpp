@@ -31,6 +31,8 @@
 #include "hphp/util/alloc.h"
 #include "hphp/util/compatibility.h"
 #include "hphp/util/process.h"
+
+#include <folly/portability/Unistd.h>
 #include <proxygen/lib/http/codec/HTTP2Constants.h>
 
 namespace HPHP {
@@ -115,18 +117,18 @@ void HPHPWorkerThread::cleanup() {
 
 ///////////////////////////////////////////////////////////////////////////////
 ProxygenServer::ProxygenServer(
-    const ServerOptions& options
-  ) : Server(options.m_address, options.m_port, options.m_numThreads),
+  const ServerOptions& options
+  ) : Server(options.m_address, options.m_port),
       m_accept_sock(options.m_serverFD),
       m_accept_sock_ssl(options.m_sslFD),
       m_worker(&m_eventBaseManager),
-      m_dispatcher(options.m_numThreads, RuntimeOption::ServerThreadRoundRobin,
+      m_dispatcher(options.m_maxThreads,
                    RuntimeOption::ServerThreadDropCacheTimeoutSeconds,
                    RuntimeOption::ServerThreadDropStack,
                    this, RuntimeOption::ServerThreadJobLIFOSwitchThreshold,
                    RuntimeOption::ServerThreadJobMaxQueuingMilliSeconds,
-                   kNumPriorities, RuntimeOption::QueuedJobsReleaseRate) {
-
+                   kNumPriorities, RuntimeOption::QueuedJobsReleaseRate,
+                   0, options.m_initThreads) {
   SocketAddress address;
   if (options.m_address.empty()) {
     address.setFromLocalPort(options.m_port);
@@ -398,6 +400,14 @@ void ProxygenServer::stopListening(bool hard) {
   }
 }
 
+void ProxygenServer::returnPartialPosts() {
+  for (auto& transport : m_pendingTransports) {
+    if (!transport.getClientComplete()) {
+      transport.beginPartialPostEcho();
+    }
+  }
+}
+
 void ProxygenServer::abortPendingTransports() {
   if (!m_pendingTransports.empty()) {
     Logger::Warning("aborting %lu incomplete requests",
@@ -537,7 +547,7 @@ void ProxygenServer::reportShutdownStatus() {
                 getQueuedJobs(),
                 getLibEventConnectionCount(),
                 m_pendingTransports.size(),
-                Process::GetProcessRSS(Process::GetProcessId()));
+                Process::GetProcessRSS(getpid()));
   m_worker.getEventBase()->runAfterDelay([this]{reportShutdownStatus();}, 500);
 }
 

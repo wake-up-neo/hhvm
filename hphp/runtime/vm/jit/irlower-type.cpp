@@ -19,12 +19,15 @@
 #include "hphp/runtime/base/datatype.h"
 #include "hphp/runtime/base/ref-data.h"
 
-#include "hphp/runtime/vm/jit/types.h"
+#include "hphp/runtime/vm/jit/abi.h"
+#include "hphp/runtime/vm/jit/code-gen-cf.h"
 #include "hphp/runtime/vm/jit/extra-data.h"
 #include "hphp/runtime/vm/jit/ir-instruction.h"
 #include "hphp/runtime/vm/jit/ssa-tmp.h"
+#include "hphp/runtime/vm/jit/target-profile.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/type.h"
+#include "hphp/runtime/vm/jit/types.h"
 #include "hphp/runtime/vm/jit/vasm-gen.h"
 #include "hphp/runtime/vm/jit/vasm-instr.h"
 #include "hphp/runtime/vm/jit/vasm-reg.h"
@@ -126,7 +129,7 @@ void cgCheckType(IRLS& env, const IRInstruction* inst) {
    */
   if (!typeParam.isSpecialized() &&
       typeParam <= TUncounted &&
-      src->type().subtypeOfAny(TStr, TArr) &&
+      src->type().subtypeOfAny(TStr, TArrLike) &&
       src->type().maybe(typeParam)) {
     assertx(src->type().maybe(TPersistent));
 
@@ -225,22 +228,15 @@ void cgIsScalarType(IRLS& env, const IRInstruction* inst) {
   auto rtype = srcLoc(env, inst, 0).reg(1);
   auto dst = dstLoc(env, inst, 0).reg(0);
 
-  // Static asserts for KindOfBoolean <= scalar type <= KindOfString.
-  static_assert(KindOfUninit < KindOfBoolean, "fix checks for IsScalar");
-  static_assert(KindOfNull < KindOfBoolean,   "fix checks for IsScalar");
-  static_assert(KindOfInt64 > KindOfBoolean,  "fix checks for IsScalar");
-  static_assert(KindOfDouble > KindOfBoolean, "fix checks for IsScalar");
-  static_assert(KindOfPersistentString > KindOfBoolean,
+  static_assert(KindOfInt64 < KindOfPersistentString,
                 "fix checks for IsScalar");
-  static_assert(KindOfString > KindOfBoolean, "fix checks for IsScalar");
+  static_assert(KindOfBoolean < KindOfPersistentString,
+                "fix checks for IsScalar");
 
-  static_assert(KindOfInt64 < KindOfString,   "fix checks for IsScalar");
-  static_assert(KindOfDouble < KindOfString,  "fix checks for IsScalar");
-  static_assert(KindOfPersistentString < KindOfString,
+  static_assert(KindOfDouble > KindOfPersistentString,
                 "fix checks for IsScalar");
-  static_assert(KindOfArray > KindOfString,   "fix checks for IsScalar");
-  static_assert(KindOfObject > KindOfString,  "fix checks for IsScalar");
-  static_assert(KindOfResource > KindOfString, "fix checks for IsScalar");
+  static_assert(KindOfString > KindOfPersistentString,
+                "fix checks for IsScalar");
 
   static_assert(sizeof(DataType) == 1, "");
 
@@ -253,11 +249,77 @@ void cgIsScalarType(IRLS& env, const IRInstruction* inst) {
     return;
   }
 
-  auto const diff = v.makeReg();
-  v << subbi{KindOfBoolean, rtype, diff, v.makeReg()};
   auto const sf = v.makeReg();
-  v << cmpbi{KindOfString - KindOfBoolean, diff, sf};
-  v << setcc{CC_BE, sf, dst};
+  v << cmpbi{KindOfPersistentString, rtype, sf};
+  cond(
+    v, CC_L, sf, dst,
+    [&](Vout& v) {
+      auto const sf = v.makeReg();
+      auto const dst = v.makeReg();
+      v << cmpbi{KindOfInt64, rtype, sf};
+      cond(
+        v, CC_E, sf, dst,
+        [&](Vout& v) { return v.cns(true); },
+        [&](Vout& v) {
+          auto const sf = v.makeReg();
+          auto const dst = v.makeReg();
+          v << cmpbi{KindOfBoolean, rtype, sf};
+          v << setcc{CC_E, sf, dst};
+          return dst;
+        }
+      );
+      return dst;
+    },
+    [&](Vout& v) {
+      auto const sf = v.makeReg();
+      auto const dst = v.makeReg();
+      emitTestTVType(v, sf, KindOfStringBit, rtype);
+      cond(
+        v, CC_NZ, sf, dst,
+        [&](Vout& v) { return v.cns(true); },
+        [&](Vout& v) {
+          auto const sf = v.makeReg();
+          auto const dst = v.makeReg();
+          v << cmpbi{KindOfDouble, rtype, sf};
+          v << setcc{CC_E, sf, dst};
+          return dst;
+        }
+      );
+      return dst;
+    }
+  );
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void cgAssertType(IRLS& env, const IRInstruction* inst) {
+  auto& v = vmain(env);
+  auto const& dtype = inst->dst()->type();
+  if (dtype == TBottom) {
+    v << ud2();
+    v = v.makeBlock();
+    return;
+  }
+
+  auto const dst = dstLoc(env, inst, 0);
+  auto const src = srcLoc(env, inst, 0);
+  copyTV(v, src, dst, dtype);
+}
+
+void cgAssertLoc(IRLS&, const IRInstruction*) {}
+void cgAssertStk(IRLS&, const IRInstruction*) {}
+void cgHintLocInner(IRLS&, const IRInstruction*) {}
+void cgHintStkInner(IRLS&, const IRInstruction*) {}
+
+void cgProfileType(IRLS& env, const IRInstruction* inst) {
+  auto const extra = inst->extra<RDSHandleData>();
+
+  auto const args = argGroup(env, inst)
+    .addr(rvmtl(), safe_cast<int32_t>(extra->handle))
+    .typedValue(0);
+
+  cgCallHelper(vmain(env), env, CallSpec::method(&TypeProfile::report),
+               kVoidDest, SyncOptions::None, args);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

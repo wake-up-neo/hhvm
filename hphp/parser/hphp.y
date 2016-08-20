@@ -1,4 +1,13 @@
 %{
+
+/* By default this grammar is set up to be used by HPHP's compile parser.
+ * However, it can be used to make parsers for different purposes by
+ * making a Parser implementation with the same interface as
+ * HPHP::Compiler::Parser in a header file specified by
+ * PARSER_DEFINITIONS_HEADER, and specifying an alternate namespace with
+ * HPHP_PARSER_NS.
+ */
+
 // macros for bison
 #define YYSTYPE HPHP::HPHP_PARSER_NS::Token
 #define YYSTYPE_IS_TRIVIAL false
@@ -8,7 +17,11 @@
 #define YYINITDEPTH 500
 #define YYLEX_PARAM _p
 
+#ifdef PARSER_DEFINITIONS_HEADER
+#include PARSER_DEFINITIONS_HEADER
+#else
 #include "hphp/compiler/parser/parser.h"
+#endif
 
 #include <folly/Conv.h>
 #include <folly/String.h>
@@ -728,6 +741,7 @@ static int yylex(YYSTYPE* token, HPHP::Location* loc, Parser* _p) {
 %token T_LAMBDA_OP
 %token T_LAMBDA_CP
 %token T_UNRESOLVED_OP
+%token T_WHERE
 
 %%
 
@@ -788,6 +802,7 @@ top_statement:
 ident_no_semireserved:
     T_STRING                           { $$ = $1;}
   | T_SUPER                            { $$ = $1;}
+  | T_WHERE                            { $$ = $1;}
   | T_XHP_ATTRIBUTE                    { $$ = $1;}
   | T_XHP_CATEGORY                     { $$ = $1;}
   | T_XHP_CHILDREN                     { $$ = $1;}
@@ -1599,8 +1614,9 @@ class_statement:
                                          _p->pushLabelInfo();}
     method_parameter_list ')'
     opt_return_type
+    opt_type_constraint_where_clause
     method_body
-                                       { _p->onMethod($$,$1,$9,$3,$4,$7,$10,nullptr);
+                                       { _p->onMethod($$,$1,$9,$3,$4,$7,$11,nullptr);
                                          _p->popLabelInfo();
                                          _p->popTypeScope();
                                          _p->onCompleteLabelScope(true);}
@@ -1613,8 +1629,9 @@ class_statement:
                                          _p->pushLabelInfo();}
     method_parameter_list ')'
     opt_return_type
+    opt_type_constraint_where_clause
     method_body
-                                       { _p->onMethod($$,$2,$10,$4,$5,$8,$11,&$1);
+                                       { _p->onMethod($$,$2,$10,$4,$5,$8,$12,&$1);
                                          _p->popLabelInfo();
                                          _p->popTypeScope();
                                          _p->onCompleteLabelScope(true);}
@@ -3302,6 +3319,23 @@ hh_func_type_list:
   | hh_type_list                       { $$ = $1; }
   | T_ELLIPSIS                         { $$.reset(); }
   |                                    { $$.reset(); }
+;
+
+opt_type_constraint_where_clause:
+    /* empty */
+  | T_WHERE
+    non_empty_constraint_list
+    hh_possible_comma
+;
+
+non_empty_constraint_list:
+    hh_generalised_constraint
+  | non_empty_constraint_list ',' hh_generalised_constraint
+;
+
+hh_generalised_constraint:
+    hh_type '=' hh_type
+  | hh_type hh_constraint
 ;
 
 opt_return_type:

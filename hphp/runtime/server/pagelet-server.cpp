@@ -180,6 +180,7 @@ bool PageletTransport::isPipelineEmpty() {
 
 bool PageletTransport::getResults(
   Array &results,
+  int &code,
   PageletServerTaskEvent* next_event
 ) {
   {
@@ -191,6 +192,8 @@ bool PageletTransport::getResults(
       results.append(response);
       m_pipeline.pop_front();
     }
+
+    code = m_code;
     if (m_done) {
       String response(m_response.c_str(), m_response.size(), CopyString);
       results.append(response);
@@ -352,7 +355,6 @@ void PageletServer::Restart() {
       Lock l(s_dispatchMutex);
       s_dispatcher = new JobQueueDispatcher<PageletWorker>
         (RuntimeOption::PageletServerThreadCount,
-         RuntimeOption::PageletServerThreadRoundRobin,
          RuntimeOption::PageletServerThreadDropCacheTimeoutSeconds,
          RuntimeOption::PageletServerThreadDropStack,
          nullptr);

@@ -40,9 +40,16 @@ enum class APCKind: uint8_t {
   Int, Double,
   StaticString, UncountedString,
   StaticArray, UncountedArray,
-  SharedString, SharedArray, SharedPackedArray,
+  StaticVec, UncountedVec,
+  StaticDict, UncountedDict,
+  StaticKeyset, UncountedKeyset,
+  SharedString, SharedArray,
+  SharedPackedArray, SharedVec,
+  SharedDict, SharedKeyset,
   SharedObject, SharedCollection,
-  SerializedArray, SerializedObject
+  SerializedArray, SerializedVec,
+  SerializedDict, SerializedKeyset,
+  SerializedObject
 };
 
 /*
@@ -91,11 +98,23 @@ enum class APCKind: uint8_t {
  *  UncountedString   APCTypedValue   KindOfString
  *  StaticArray       APCTypedValue   KindOfPersistentArray
  *  UncountedArray    APCTypedValue   KindOfPersistentArray
+ *  StaticVec         APCTypedValue   KindOfPersistentVec
+ *  UncountedVec      APCTypedValue   KindOfPersistentVec
+ *  StaticDict        APCTypedValue   KindOfPersistentDict
+ *  UncountedDict     APCTypedValue   KindOfPersistentDict
+ *  StaticKeyset      APCTypedValue   KindOfPersistentKeyset
+ *  UncountedKeyset   APCTypedValue   KindOfPersistentKeyset
  *  SharedString      APCString       kInvalidDataType
  *  SharedArray       APCArray        kInvalidDataType
  *  SharedPackedArray APCArray        kInvalidDataType
+ *  SharedVec         APCArray        kInvalidDataType
+ *  SharedDict        APCArray        kInvalidDataType
+ *  SharedKeyset      APCArray        kInvalidDataType
  *  SharedObject      APCObject       kInvalidDataType
  *  SerializedArray   APCString       kInvalidDataType
+ *  SerializedVec     APCString       kInvalidDataType
+ *  SerializedDict    APCString       kInvalidDataType
+ *  SerializedKeyset  APCString       kInvalidDataType
  *  SerializedObject  APCString       kInvalidDataType
  *  Collection        APCObject       kInvalidDataType
  *
@@ -172,11 +191,24 @@ struct APCHandle {
     assert(savedKind == m_kind);
     return savedKind == APCKind::UncountedArray ?
       Variant{getUncountedArray(),
+              KindOfPersistentArray,
               Variant::PersistentArrInit{}} :
       toLocal();
   }
   ArrayData* getUncountedArray() const {
     assert(m_kind == APCKind::UncountedArray);
+    return reinterpret_cast<ArrayData*>(const_cast<APCHandle*>(this) + 1);
+  }
+  ArrayData* getUncountedVec() const {
+    assert(m_kind == APCKind::UncountedVec);
+    return reinterpret_cast<ArrayData*>(const_cast<APCHandle*>(this) + 1);
+  }
+  ArrayData* getUncountedDict() const {
+    assert(m_kind == APCKind::UncountedDict);
+    return reinterpret_cast<ArrayData*>(const_cast<APCHandle*>(this) + 1);
+  }
+  ArrayData* getUncountedKeyset() const {
+    assert(m_kind == APCKind::UncountedKeyset);
     return reinterpret_cast<ArrayData*>(const_cast<APCHandle*>(this) + 1);
   }
 
@@ -214,7 +246,10 @@ struct APCHandle {
    */
   bool isUncounted() const {
     return m_kind == APCKind::UncountedString ||
-           m_kind == APCKind::UncountedArray;
+           m_kind == APCKind::UncountedArray ||
+           m_kind == APCKind::UncountedVec ||
+           m_kind == APCKind::UncountedDict ||
+           m_kind == APCKind::UncountedKeyset;
   }
 
   /*

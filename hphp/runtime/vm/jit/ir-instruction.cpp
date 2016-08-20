@@ -26,6 +26,7 @@
 #include "hphp/runtime/vm/jit/ir-opcode.h"
 #include "hphp/runtime/vm/jit/minstr-effects.h"
 #include "hphp/runtime/vm/jit/print.h"
+#include "hphp/runtime/vm/jit/simplify.h"
 #include "hphp/runtime/vm/jit/ssa-tmp.h"
 #include "hphp/runtime/vm/jit/type.h"
 
@@ -144,6 +145,10 @@ bool IRInstruction::consumesReference(int srcNo) const {
 
     case ArraySet:
     case ArraySetRef:
+    case VecSet:
+    case VecSetRef:
+    case DictSet:
+    case DictSetRef:
       // Only consumes the reference to its input array
       return srcNo == 0;
 
@@ -166,10 +171,10 @@ bool IRInstruction::consumesReference(int srcNo) const {
     case CreateAFWHNoVV:
       return srcNo == 4;
 
-    case InitPackedArray:
+    case InitPackedLayoutArray:
       return srcNo == 1;
 
-    case InitPackedArrayLoop:
+    case InitPackedLayoutArrayLoop:
       return srcNo > 0;
 
     default:
@@ -237,7 +242,7 @@ Type allocObjReturn(const IRInstruction* inst) {
 }
 
 Type arrElemReturn(const IRInstruction* inst) {
-  assertx(inst->is(LdStructArrayElem, ArrayGet, MixedArrayGetK));
+  assertx(inst->is(ArrayGet, MixedArrayGetK));
   assertx(!inst->hasTypeParam() || inst->typeParam() <= TGen);
 
   auto resultType = inst->hasTypeParam() ? inst->typeParam() : TGen;
@@ -263,12 +268,13 @@ Type arrElemReturn(const IRInstruction* inst) {
       if (idx->hasConstVal(TInt) &&
           idx->intVal() >= 0 &&
           idx->intVal() < arrTy->size()) {
-        resultType &= typeFromRAT(arrTy->packedElem(idx->intVal()));
+        resultType &= typeFromRAT(arrTy->packedElem(idx->intVal()),
+                                  inst->ctx());
       }
       break;
     }
     case T::PackedN:
-      resultType &= typeFromRAT(arrTy->elemType());
+      resultType &= typeFromRAT(arrTy->elemType(), inst->ctx());
       break;
   }
 
@@ -278,12 +284,46 @@ Type arrElemReturn(const IRInstruction* inst) {
   return resultType;
 }
 
+Type vecElemReturn(const IRInstruction* inst) {
+  assertx(inst->is(LdVecElem));
+  assertx(inst->src(0)->isA(TVec));
+  assertx(inst->src(1)->isA(TInt));
+
+  auto resultType = vecElemType(inst->src(0), inst->src(1));
+  if (inst->hasTypeParam()) resultType &= inst->typeParam();
+  return resultType;
+}
+
+Type dictElemReturn(const IRInstruction* inst) {
+  assertx(inst->is(DictGet, DictGetK, DictGetQuiet, DictIdx));
+  assertx(inst->src(0)->isA(TDict));
+  assertx(inst->src(1)->isA(TInt | TStr));
+
+  auto resultType = dictElemType(inst->src(0), inst->src(1));
+  if (inst->is(DictGetQuiet)) resultType |= TInitNull;
+  if (inst->is(DictIdx)) resultType |= inst->src(2)->type();
+  if (inst->hasTypeParam()) resultType &= inst->typeParam();
+  return resultType;
+}
+
+Type keysetElemReturn(const IRInstruction* inst) {
+  assertx(inst->is(KeysetGet, KeysetGetK, KeysetGetQuiet, KeysetIdx));
+  assertx(inst->src(0)->isA(TKeyset));
+  assertx(inst->src(1)->isA(TInt | TStr));
+
+  auto resultType = keysetElemType(inst->src(0), inst->src(1));
+  if (inst->is(KeysetGetQuiet)) resultType |= TInitNull;
+  if (inst->is(KeysetIdx)) resultType |= inst->src(2)->type();
+  if (inst->hasTypeParam()) resultType &= inst->typeParam();
+  return resultType;
+}
+
 Type thisReturn(const IRInstruction* inst) {
-  auto const func = inst->marker().func();
+  auto const func = inst->func();
 
   // If the function is a cloned closure which may have a re-bound $this which
   // is not a subclass of the context return an unspecialized type.
-  if (func->hasForeignThis()) return TObj;
+  if (!func || func->hasForeignThis()) return TObj;
 
   if (auto const cls = func->cls()) {
     return Type::SubObj(cls);
@@ -292,6 +332,18 @@ Type thisReturn(const IRInstruction* inst) {
 }
 
 Type ctxReturn(const IRInstruction* inst) {
+  auto const func = inst->func();
+  if (!func) return TCtx;
+  if (func->hasForeignThis()) {
+    return func->isStatic() ? TCctx : TCtx;
+  }
+  auto const cls = inst->ctx();
+  if (inst->is(LdCctx) || func->isStatic()) {
+    if (cls->attrs() & AttrNoOverride) {
+      return Type::cns(ConstCctx::cctx(cls));
+    }
+    return TCctx;
+  }
   return thisReturn(inst) | TCctx;
 }
 
@@ -314,7 +366,7 @@ Type newColReturn(const IRInstruction* inst) {
   assertx(inst->is(NewCol, NewColFromArray));
   auto getColClassType = [&](CollectionType ct) -> Type {
     auto name = collections::typeToString(ct);
-    auto cls = Unit::lookupClassOrUniqueClass(name);
+    auto cls = Unit::lookupUniqueClassInContext(name, inst->ctx());
     if (cls == nullptr) return TObj;
     return Type::ExactObj(cls);
   };
@@ -362,8 +414,10 @@ Type outputType(const IRInstruction* inst, int dstId) {
 #define DBoxPtr         return boxPtr(inst->src(0)->type());
 #define DAllocObj       return allocObjReturn(inst);
 #define DArrElem        return arrElemReturn(inst);
+#define DVecElem        return vecElemReturn(inst);
+#define DDictElem       return dictElemReturn(inst);
+#define DKeysetElem     return keysetElemReturn(inst);
 #define DArrPacked      return Type::Array(ArrayData::kPackedKind);
-#define DArrVec         return Type::Array(ArrayData::kVecKind);
 #define DCol            return newColReturn(inst);
 #define DThis           return thisReturn(inst);
 #define DCtx            return ctxReturn(inst);
@@ -395,8 +449,10 @@ Type outputType(const IRInstruction* inst, int dstId) {
 #undef DBoxPtr
 #undef DAllocObj
 #undef DArrElem
+#undef DVecElem
+#undef DDictElem
+#undef DKeysetElem
 #undef DArrPacked
-#undef DArrVec
 #undef DCol
 #undef DThis
 #undef DCtx

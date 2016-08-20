@@ -31,7 +31,7 @@ void FastCGIAcceptor::onNewConnection(
   folly::AsyncTransportWrapper::UniquePtr sock,
   const folly::SocketAddress* peerAddress,
   const std::string& nextProtocolName,
-  SecureTransportType secureProtocolType,
+  wangle::SecureTransportType secureProtocolType,
   const ::wangle::TransportInfo& tinfo)
 {
   folly::SocketAddress localAddress;
@@ -66,10 +66,9 @@ FastCGIServer::FastCGIServer(const std::string &address,
                              int port,
                              int workers,
                              bool useFileSocket)
-  : Server(address, port, workers),
+  : Server(address, port),
     m_worker(&m_eventBaseManager),
     m_dispatcher(workers,
-                 RuntimeOption::ServerThreadRoundRobin,
                  RuntimeOption::ServerThreadDropCacheTimeoutSeconds,
                  RuntimeOption::ServerThreadDropStack,
                  this,
@@ -87,7 +86,7 @@ FastCGIServer::FastCGIServer(const std::string &address,
   m_socketConfig.bindAddress = sock_addr;
   m_socketConfig.acceptBacklog = RuntimeOption::ServerBacklog;
   std::chrono::seconds timeout;
-  if (RuntimeOption::ConnectionTimeoutSeconds > 0) {
+  if (RuntimeOption::ConnectionTimeoutSeconds >= 0) {
     timeout = std::chrono::seconds(RuntimeOption::ConnectionTimeoutSeconds);
   } else {
     // default to 2 minutes

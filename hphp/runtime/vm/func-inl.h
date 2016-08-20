@@ -68,6 +68,12 @@ inline bool Func::ParamInfo::isVariadic() const {
 ///////////////////////////////////////////////////////////////////////////////
 // Func.
 
+inline const void* Func::mallocEnd() const {
+  return reinterpret_cast<const char*>(this)
+         + Func::prologueTableOff()
+         + numPrologues() * sizeof(m_prologueTable[0]);
+}
+
 inline void Func::validate() const {
 #ifdef DEBUG
   assert(m_magic == kMagic);
@@ -336,12 +342,17 @@ inline bool Func::isStatic() const {
   return m_attrs & AttrStatic;
 }
 
+inline bool Func::isStaticInProlog() const {
+  return
+    (m_attrs & (AttrStatic | AttrRequiresThis)) == AttrStatic;
+}
+
 inline bool Func::isAbstract() const {
   return m_attrs & AttrAbstract;
 }
 
 inline bool Func::mayHaveThis() const {
-  return isPseudoMain() || (cls() && !isStatic());
+  return cls() && !isStatic();
 }
 
 inline bool Func::isPreFunc() const {
@@ -358,10 +369,6 @@ inline bool Func::isBuiltin() const {
 inline bool Func::isCPPBuiltin() const {
   auto const ex = extShared();
   return UNLIKELY(!!ex) && ex->m_builtinFuncPtr;
-}
-
-inline bool Func::isNative() const {
-  return m_attrs & AttrNative;
 }
 
 inline BuiltinFunction Func::builtinFuncPtr() const {
@@ -478,10 +485,6 @@ inline bool Func::isNoInjection() const {
   return m_attrs & AttrNoInjection;
 }
 
-inline bool Func::isAllowOverride() const {
-  return m_attrs & AttrAllowOverride;
-}
-
 inline bool Func::isSkipFrame() const {
   return m_attrs & AttrSkipFrame;
 }
@@ -533,12 +536,6 @@ inline int Func::getMaxNumPrologues(int numParams) {
   // where the number of actual params equals numParams and the case where the
   // number of actual params is greater than numParams.
   return numParams + 2;
-}
-
-inline void Func::resetPrologues() {
-  // Useful when killing code; forget what we've learned about the contents
-  // of the translation cache.
-  initPrologues(numParams());
 }
 
 ///////////////////////////////////////////////////////////////////////////////

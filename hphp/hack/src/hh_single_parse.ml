@@ -17,7 +17,7 @@ let print_error error = error
 
 let parse_and_print filename =
   let file = Relative_path.create Relative_path.Dummy filename in
-  let errorl, result =
+  let errorl, result, _ =
     Errors.do_ begin fun () ->
       Parser_hack.from_file file
     end
@@ -31,7 +31,7 @@ let parse_and_print filename =
 
 let main filename =
   EventLogger.init (Daemon.devnull ()) 0.0;
-  let _handle = SharedMem.init_default () in
+  let _handle = SharedMem.init GlobalConfig.default_sharedmem_config in
   if (String.length filename) = 0 then begin
     Printf.eprintf "%s" usage;
     exit 1

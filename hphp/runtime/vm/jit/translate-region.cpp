@@ -29,6 +29,7 @@
 #include "hphp/runtime/vm/hhbc-codec.h"
 #include "hphp/runtime/vm/jit/inlining-decider.h"
 #include "hphp/runtime/vm/jit/irgen.h"
+#include "hphp/runtime/vm/jit/irgen-internal.h"
 #include "hphp/runtime/vm/jit/ir-unit.h"
 #include "hphp/runtime/vm/jit/location.h"
 #include "hphp/runtime/vm/jit/mc-generator.h"
@@ -50,7 +51,6 @@ namespace HPHP { namespace jit {
 namespace {
 
 enum class TranslateResult {
-  Failure,
   Retry,
   Success
 };
@@ -172,6 +172,10 @@ bool blockHasUnprocessedPred(
  */
 void emitEntryAssertions(irgen::IRGS& irgs, const Func* func, SrcKey sk) {
   if (sk.offset() != func->base()) return;
+
+  // The assertions inserted here are only valid if the first bytecode
+  // instruction does not have unprocessed predecessors.  This invariant is
+  // ensured by the emitter using an EntryNop instruction when necessary.
   for (auto& pinfo : func->params()) {
     if (pinfo.hasDefaultValue()) return;
   }
@@ -515,13 +519,8 @@ RegionDescPtr getInlinableCalleeRegion(const ProfSrcKey& psk,
 
   // Make sure the FPushOp wasn't interpreted, based on an FPushCuf, or spanned
   // another call
-  auto const info = fpiStack.back();
+  auto const& info = fpiStack.back();
   if (isFPushCuf(info.fpushOpc) || info.interp || info.spansCall) {
-    return nullptr;
-  }
-
-  // We can't inline FPushClsMethod when the callee may have a $this pointer
-  if (isFPushClsMethod(info.fpushOpc) && callee->mayHaveThis()) {
     return nullptr;
   }
 
@@ -800,6 +799,8 @@ TranslateResult irGenRegionImpl(irgen::IRGS& irgs,
 
           // Don't emit the FCall
           skipTrans = true;
+        } else {
+          inl.registerEndInlining(callee);
         }
       }
 
@@ -894,8 +895,7 @@ std::unique_ptr<IRUnit> irGenRegion(const RegionDesc& region,
       result = irGenRegionImpl(irgs, region, retry, inl,
                                budgetBCInstrs, 1, &annotations);
     } catch (const FailedTraceGen& e) {
-      FTRACE(2, "irGenRegion failed with {}\n", e.what());
-      result = TranslateResult::Failure;
+      always_assert_flog(false, "irGenRegion failed with {}\n", e.what());
     }
     assertx(budgetBCInstrs >= 0);
     FTRACE(1, "translateRegion: final budgetBCInstrs = {}\n", budgetBCInstrs);
@@ -960,8 +960,10 @@ std::unique_ptr<IRUnit> irGenInlineRegion(const TransContext& ctx,
 
     SCOPE_ASSERT_DETAIL("Inline-IRUnit") { return show(*unit); };
     irb.startBlock(entry, false /* hasUnprocPred */);
-    irgen::conjureBeginInlining(irgs, func, ctxType, argTypes,
-                                irgen::ReturnTarget{returnBlock});
+    if (!irgen::conjureBeginInlining(irgs, func, ctxType, argTypes,
+                                     irgen::ReturnTarget{returnBlock})) {
+      return nullptr;
+    }
 
     int32_t budgetBcInstrs = RuntimeOption::EvalJitMaxRegionInstrs;
     try {
@@ -976,7 +978,7 @@ std::unique_ptr<IRUnit> irGenInlineRegion(const TransContext& ctx,
       );
     } catch (const FailedTraceGen& e) {
       FTRACE(2, "irGenInlineRegion failed with {}\n", e.what());
-      result = TranslateResult::Failure;
+      always_assert_flog(false, "irGenInlineRegion failed with {}\n", e.what());
     }
 
     if (result == TranslateResult::Success) {

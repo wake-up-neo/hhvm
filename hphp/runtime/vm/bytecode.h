@@ -32,6 +32,7 @@
 #include "hphp/runtime/vm/jit/types.h"
 
 #include "hphp/util/arena.h"
+#include "hphp/util/type-traits.h"
 
 #include <type_traits>
 
@@ -589,13 +590,38 @@ public:
     *m_top = make_tv<KindOfPersistentString>(s);
   }
 
-  // This should only be called directly when the caller has
+  // These should only be called directly when the caller has
   // already adjusted the refcount appropriately
   ALWAYS_INLINE
   void pushArrayNoRc(ArrayData* a) {
+    assert(a->isPHPArray());
     assert(m_top != m_elms);
     m_top--;
     *m_top = make_tv<KindOfArray>(a);
+  }
+
+  ALWAYS_INLINE
+  void pushVecNoRc(ArrayData* a) {
+    assert(a->isVecArray());
+    assert(m_top != m_elms);
+    m_top--;
+    *m_top = make_tv<KindOfVec>(a);
+  }
+
+  ALWAYS_INLINE
+  void pushDictNoRc(ArrayData* a) {
+    assert(a->isDict());
+    assert(m_top != m_elms);
+    m_top--;
+    *m_top = make_tv<KindOfDict>(a);
+  }
+
+  ALWAYS_INLINE
+  void pushKeysetNoRc(ArrayData* a) {
+    assert(a->isKeyset());
+    assert(m_top != m_elms);
+    m_top--;
+    *m_top = make_tv<KindOfKeyset>(a);
   }
 
   ALWAYS_INLINE
@@ -606,11 +632,60 @@ public:
   }
 
   ALWAYS_INLINE
+  void pushVec(ArrayData* a) {
+    assert(a);
+    pushVecNoRc(a);
+    a->incRefCount();
+  }
+
+  ALWAYS_INLINE
+  void pushDict(ArrayData* a) {
+    assert(a);
+    pushDictNoRc(a);
+    a->incRefCount();
+  }
+
+  ALWAYS_INLINE
+  void pushKeyset(ArrayData* a) {
+    assert(a);
+    pushKeysetNoRc(a);
+    a->incRefCount();
+  }
+
+  ALWAYS_INLINE
   void pushStaticArray(const ArrayData* a) {
     assert(a->isStatic()); // No need to call a->incRefCount().
+    assert(a->isPHPArray());
     assert(m_top != m_elms);
     m_top--;
     *m_top = make_tv<KindOfPersistentArray>(a);
+  }
+
+  ALWAYS_INLINE
+  void pushStaticVec(const ArrayData* a) {
+    assert(a->isStatic()); // No need to call a->incRefCount().
+    assert(a->isVecArray());
+    assert(m_top != m_elms);
+    m_top--;
+    *m_top = make_tv<KindOfPersistentVec>(a);
+  }
+
+  ALWAYS_INLINE
+  void pushStaticDict(const ArrayData* a) {
+    assert(a->isStatic()); // No need to call a->incRefCount().
+    assert(a->isDict());
+    assert(m_top != m_elms);
+    m_top--;
+    *m_top = make_tv<KindOfPersistentDict>(a);
+  }
+
+  ALWAYS_INLINE
+  void pushStaticKeyset(const ArrayData* a) {
+    assert(a->isStatic()); // No need to call a->incRefCount().
+    assert(a->isKeyset());
+    assert(m_top != m_elms);
+    m_top--;
+    *m_top = make_tv<KindOfPersistentKeyset>(a);
   }
 
   // This should only be called directly when the caller has
@@ -782,18 +857,15 @@ public:
  * perform the requested visitation independent of modifications to
  * the VM stack or frame pointer.
  */
-template<class MaybeConstTVPtr, class ARFun, class TVFun>
-typename std::enable_if<
-  std::is_same<MaybeConstTVPtr,const TypedValue*>::value ||
-  std::is_same<MaybeConstTVPtr,      TypedValue*>::value
->::type
+template<class TV, class ARFun, class TVFun>
+typename maybe_const<TV, TypedValue>::type
 visitStackElems(const ActRec* const fp,
-                MaybeConstTVPtr const stackTop,
+                TV* const stackTop,
                 Offset const bcOffset,
                 ARFun arFun,
                 TVFun tvFun) {
   const TypedValue* const base = Stack::anyFrameStackBase(fp);
-  MaybeConstTVPtr cursor = stackTop;
+  auto cursor = stackTop;
   assert(cursor <= base);
 
   if (auto fe = fp->m_func->findFPI(bcOffset)) {

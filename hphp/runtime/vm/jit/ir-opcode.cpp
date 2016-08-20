@@ -55,8 +55,10 @@ TRACE_SET_MOD(hhir);
 #define DBoxPtr        HasDest
 #define DAllocObj      HasDest
 #define DArrElem       HasDest
+#define DVecElem       HasDest
+#define DDictElem      HasDest
+#define DKeysetElem    HasDest
 #define DArrPacked     HasDest
-#define DArrVec        HasDest
 #define DCol           HasDest
 #define DThis          HasDest
 #define DCtx           HasDest
@@ -113,8 +115,10 @@ OpInfo g_opInfo[] = {
 #undef DUnboxPtr
 #undef DBoxPtr
 #undef DArrElem
+#undef DVecElem
+#undef DDictElem
+#undef DKeysetElem
 #undef DArrPacked
-#undef DArrVec
 #undef DCol
 #undef DAllocObj
 #undef DThis
@@ -214,12 +218,25 @@ folly::Optional<Opcode> negateCmpOp(Opcode opc) {
     case SameObj:             return NSameObj;
     case NSameObj:            return SameObj;
 
-    // Arrays can contain an element with NaN, so only equality comparisons can
-    // be negated.
+    // Arrays/vec/dicts can contain an element with NaN, so only equality
+    // comparisons can be negated.
     case EqArr:               return NeqArr;
     case NeqArr:              return EqArr;
     case SameArr:             return NSameArr;
     case NSameArr:            return SameArr;
+
+    case EqVec:               return NeqVec;
+    case NeqVec:              return EqVec;
+    case SameVec:             return NSameVec;
+    case NSameVec:            return SameVec;
+
+    case EqDict:              return NeqDict;
+    case NeqDict:             return EqDict;
+    case SameDict:            return NSameDict;
+    case NSameDict:           return SameDict;
+
+    case EqKeyset:            return NeqKeyset;
+    case NeqKeyset:           return EqKeyset;
 
     case GtRes:               return LteRes;
     case GteRes:              return LtRes;

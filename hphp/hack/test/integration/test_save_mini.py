@@ -117,6 +117,12 @@ load_mini_script = %s
             output.splitlines())
         return err
 
+    def assertEqualString(self, first, second, msg=None):
+        root = self.repo_dir + os.path.sep
+        second = second.format(root=root)
+        self.assertEqual(first, second, msg)
+
+
 class LazyDeclTestDriver(MiniStateTestDriver):
     def write_local_conf(self):
         with open(os.path.join(self.repo_dir, 'hh.conf'), 'w') as f:
@@ -141,7 +147,8 @@ class MiniStateHierarchyTests(hierarchy_tests.HierarchyTests,
 
 class LazyDeclHierarchyTests(hierarchy_tests.HierarchyTests,
         LazyDeclTestDriver, unittest.TestCase):
-    pass
+    def test_failed_decl(self):
+        super().test_failed_decl()
 
 class MiniStateTests(MiniStateTestDriver, unittest.TestCase):
     """

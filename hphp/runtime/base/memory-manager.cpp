@@ -69,8 +69,6 @@ uint32_t getRequestHeapFlags() {
  return mmapFlags;
 }
 
-static auto s_mmapFlags = getRequestHeapFlags();
-
 #ifdef USE_JEMALLOC
 bool MemoryManager::s_statsEnabled = false;
 size_t MemoryManager::s_cactiveLimitCeiling = 0;
@@ -110,7 +108,7 @@ void MemoryManager::threadStatsInit() {
   //   cactiveLimit == s_cactiveLimitCeiling - headRoom
   // where
   //   s_cactiveLimitCeiling == MemTotal - footprint
-  size_t footprint = Process::GetCodeFootprint(Process::GetProcessId());
+  size_t footprint = Process::GetCodeFootprint(getpid());
   size_t MemTotal  = 0;
 #ifndef __APPLE__
   size_t pageSize = size_t(sysconf(_SC_PAGESIZE));
@@ -195,6 +193,7 @@ MemoryManager::MemoryManager() {
 #endif
   resetStatsImpl(true);
   setMemoryLimit(std::numeric_limits<int64_t>::max());
+  resetGC(); // so each thread has unique req_num at startup
   // make the circular-lists empty.
   m_strings.next = m_strings.prev = &m_strings;
   m_bypassSlabAlloc = RuntimeOption::DisableSmallAllocator;
@@ -205,8 +204,8 @@ MemoryManager::~MemoryManager() {
   if (debug) {
     // Check that every allocation in heap has been freed before destruction.
     forEachHeader([&](Header* h) {
-        assert(h->kind() == HeaderKind::Free);
-      });
+      assert(h->kind() == HeaderKind::Free);
+    });
   }
   // ~BigHeap releases its slabs/bigs.
 }
@@ -278,9 +277,6 @@ void MemoryManager::resetStatsImpl(bool isInternalCall) {
     // This is only set by the jemalloc stats sync which we don't enable until
     // after this has been called.
     assert(m_stats.totalAlloc == 0);
-#ifdef USE_JEMALLOC
-    assert(m_stats.mallocDebt >= m_stats.capacity);
-#endif
 
     // The effect of this call is simply to ignore anything we've done *outside*
     // the MemoryManager allocator after we initialized to avoid attributing
@@ -393,24 +389,22 @@ void MemoryManager::refreshStatsImpl(MemoryUsageStats& stats) {
     FTRACE(1, "usage: {}\ntotal (je) alloc: {}\nje debt: {}\n",
       stats.usage(), stats.totalAlloc, stats.mallocDebt);
 
-    if (!contiguous_heap) {
-      // Since these deltas potentially include memory allocated from another
-      // thread but deallocated on this one, it is possible for these nubmers to
-      // go negative.
-      int64_t jeDeltaAllocated =
-        int64_t(jeAllocated) - int64_t(jeDeallocated);
-      int64_t mmDeltaAllocated =
-        int64_t(m_prevAllocated) - int64_t(m_prevDeallocated);
-      FTRACE(1, "je delta:\ncurrent: {}\nprevious: {}\n",
-          jeDeltaAllocated, mmDeltaAllocated);
+    // Since these deltas potentially include memory allocated from another
+    // thread but deallocated on this one, it is possible for these numbers to
+    // go negative.
+    int64_t jeDeltaAllocated =
+      int64_t(jeAllocated) - int64_t(jeDeallocated);
+    int64_t mmDeltaAllocated =
+      int64_t(m_prevAllocated) - int64_t(m_prevDeallocated);
+    FTRACE(1, "je delta:\ncurrent: {}\nprevious: {}\n",
+        jeDeltaAllocated, mmDeltaAllocated);
 
-      // Subtract the old jemalloc adjustment (delta0) and add the current one
-      // (delta) to arrive at the new combined usage number.
-      stats.auxUsage += jeDeltaAllocated - mmDeltaAllocated;
-      // Remove the "debt" accrued from allocating the slabs so we don't double
-      // count the slab-based allocations.
-      stats.auxUsage -= stats.mallocDebt;
-    }
+    // Subtract the old jemalloc adjustment (delta0) and add the current one
+    // (delta) to arrive at the new combined usage number.
+    stats.auxUsage += jeDeltaAllocated - mmDeltaAllocated;
+    // Remove the "debt" accrued from allocating the slabs so we don't double
+    // count the slab-based allocations.
+    stats.auxUsage -= stats.mallocDebt;
 
     stats.mallocDebt = 0;
     // We need to do the calculation instead of just setting it to jeAllocated
@@ -426,8 +420,8 @@ void MemoryManager::refreshStatsImpl(MemoryUsageStats& stats) {
       stats.usage(), stats.totalAlloc);
   }
 #endif
-  assert(stats.maxUsage > 0);
-  if (live && stats.usage() > stats.maxUsage && m_couldOOM) {
+  assert(stats.limit > 0);
+  if (live && stats.usage() > stats.limit && m_couldOOM) {
     refreshStatsHelperExceeded();
   }
   if (stats.usage() > stats.peakUsage) {
@@ -528,7 +522,7 @@ void MemoryManager::resetAllocator() {
   m_sweeping = false;
   m_exiting = false;
   resetStatsImpl(true);
-  updateNextGc();
+  resetGC();
   FTRACE(1, "reset: strings {}\n", nstrings);
   if (debug) resetEagerGC();
 }
@@ -589,7 +583,7 @@ void MemoryManager::flush() {
  */
 
 const char* header_names[] = {
-  "PackedArray", "StructArray", "MixedArray", "EmptyArray", "ApcArray",
+  "PackedArray", "MixedArray", "EmptyArray", "ApcArray",
   "GlobalsArray", "ProxyArray", "DictArray", "VecArray", "KeysetArray",
   "String", "Resource", "Ref", "Object", "WaitHandle", "ResumableObj",
   "AwaitAllWH", "Vector", "Map", "Set", "Pair", "ImmVector", "ImmMap", "ImmSet",
@@ -615,8 +609,16 @@ void MemoryManager::initHole() {
 void MemoryManager::initFree() {
   initHole();
   for (auto i = 0; i < kNumSmallSizes; i++) {
-    for (auto n = m_freelists[i].head; n; n = n->next) {
-      n->hdr.init(HeaderKind::Free, smallIndex2Size(i));
+    auto size = smallIndex2Size(i);
+    auto n = m_freelists[i].head;
+    for (; n && n->hdr.kind != HeaderKind::Free; n = n->next) {
+      n->hdr.init(HeaderKind::Free, size);
+    }
+    if (debug) {
+      // ensure the freelist tail is already initialized.
+      for (; n; n = n->next) {
+        assert(n->hdr.kind == HeaderKind::Free && n->size() == size);
+      }
     }
   }
 }
@@ -661,7 +663,6 @@ void MemoryManager::checkHeap(const char* phase) {
         if (h->str_.isProxy()) apc_strings.insert(h);
         break;
       case HeaderKind::Packed:
-      case HeaderKind::Struct:
       case HeaderKind::Mixed:
       case HeaderKind::Dict:
       case HeaderKind::Empty:
@@ -745,7 +746,8 @@ inline void MemoryManager::storeTail(void* tail, uint32_t tailBytes) {
     assert((fragBytes & kSmallSizeAlignMask) == 0);
     unsigned fragInd = smallSize2Index(fragBytes + 1) - 1;
     uint32_t fragUsable = smallIndex2Size(fragInd);
-    void* frag = (void*)(uintptr_t(rem) + remBytes - fragUsable);
+    auto frag = FreeNode::InitFrom((char*)rem + remBytes - fragUsable,
+                                   fragUsable, HeaderKind::Hole);
     FTRACE(4, "MemoryManager::storeTail({}, {}): rem={}, remBytes={}, "
               "frag={}, fragBytes={}, fragUsable={}, fragInd={}\n", tail,
               (void*)uintptr_t(tailBytes), rem, (void*)uintptr_t(remBytes),
@@ -766,8 +768,10 @@ inline void MemoryManager::splitTail(void* tail, uint32_t tailBytes,
   assert((tailBytes & kSmallSizeAlignMask) == 0);
   assert((splitUsable & kSmallSizeAlignMask) == 0);
   assert(nSplit * splitUsable <= tailBytes);
+  assert(splitUsable == smallIndex2Size(splitInd));
   for (uint32_t i = nSplit; i--;) {
-    void* split = (void*)(uintptr_t(tail) + i * splitUsable);
+    auto split = FreeNode::InitFrom((char*)tail + i * splitUsable,
+                                    splitUsable, HeaderKind::Hole);
     FTRACE(4, "MemoryManager::splitTail(tail={}, tailBytes={}, tailPast={}): "
               "split={}, splitUsable={}, splitInd={}\n", tail,
               (void*)uintptr_t(tailBytes), (void*)(uintptr_t(tail) + tailBytes),
@@ -786,7 +790,7 @@ inline void MemoryManager::splitTail(void* tail, uint32_t tailBytes,
  * slab list.  Return the newly allocated nbytes-sized block.
  */
 NEVER_INLINE void* MemoryManager::newSlab(uint32_t nbytes) {
-  if (UNLIKELY(m_stats.usage() > m_stats.maxUsage)) {
+  if (UNLIKELY(m_stats.usage() > m_stats.limit)) {
     refreshStats();
   }
   requestGC();
@@ -883,7 +887,7 @@ inline void MemoryManager::updateBigStats() {
   // was too large for one of the existing slabs. When we're not using jemalloc
   // this check won't do anything so avoid the extra overhead.
   if (debug) requestEagerGC();
-  if (use_jemalloc || UNLIKELY(m_stats.usage() > m_stats.maxUsage)) {
+  if (use_jemalloc || UNLIKELY(m_stats.usage() > m_stats.limit)) {
     refreshStats();
   }
 }
@@ -1237,240 +1241,67 @@ MemBlock BigHeap::resizeBig(void* ptr, size_t newsize) {
   return {newNode + 1, newsize};
 }
 
-/////////////////////////////////////////////////////////////////////////
-//Contiguous Heap
+/*
+ * To find `p', we sort the slabs, bisect them, then iterate the slab
+ * containing `p'.  If there is no such slab, we bisect the bigs to try to find
+ * a big containing `p'.
+ *
+ * If that fails, we return nullptr.
+ */
+Header* BigHeap::find(const void* p) {
+  std::sort(std::begin(m_slabs), std::end(m_slabs),
+    [] (const MemBlock& l, const MemBlock& r) {
+      assertx(static_cast<char*>(l.ptr) + l.size <= r.ptr ||
+              static_cast<char*>(r.ptr) + r.size <= l.ptr);
+      return l.ptr < r.ptr;
+    }
+  );
 
-void ContiguousHeap::reset() {
-  m_requestCount++;
+  auto const slab = std::lower_bound(
+    std::begin(m_slabs), std::end(m_slabs), p,
+    [] (const MemBlock& slab, const void* p) {
+      return static_cast<const char*>(slab.ptr) + slab.size <= p;
+    }
+  );
 
-  // if there is a new peak, store it
-  if (m_peak < m_used) {
-    m_peak = m_used;
-    // convert usage to MB.. used later for comparison with water marks
-    m_heapUsage = ((uintptr_t)m_peak - (uintptr_t) m_base) >> 20;
+  if (slab != std::end(m_slabs) && slab->ptr <= p) {
+    // std::lower_bound() finds the first slab that is not less than `p'.  By
+    // our comparison predicate, a slab is less than `p' iff its entire range
+    // is below `p', so if the returned slab's start address is <= `p', then
+    // the slab must contain `p'.  Within the slab, we just do a linear search.
+    auto const slab_end = static_cast<char*>(slab->ptr) + slab->size;
+    auto h = reinterpret_cast<char*>(slab->ptr);
+    while (h < slab_end) {
+      auto const hdr = reinterpret_cast<Header*>(h);
+      auto const size = hdr->allocSize();
+      if (p < h + size) return hdr;
+      h += size;
+    }
+    // We know `p' is in the slab, so it must belong to one of the headers.
+    always_assert(false);
   }
 
-  // should me reset?
-  bool resetHeap = false;
+  std::sort(std::begin(m_bigs), std::end(m_bigs));
 
-  // check if we are above low water mark
-  if (m_heapUsage > RuntimeOption::HeapLowWaterMark) {
-    // check if we are above below water mark
-    if (m_heapUsage > RuntimeOption::HeapHighWaterMark) {
-      // we are above high water mark... always reset
-      resetHeap = true;
+  auto const big = std::lower_bound(
+    std::begin(m_bigs), std::end(m_bigs), p,
+    [] (const MallocNode* big, const void* p) {
+      auto const h = reinterpret_cast<const Header*>(big + 1);
+      return reinterpret_cast<const char*>(big) + h->size() <= p;
+    }
+  );
+
+  if (big != std::end(m_bigs) && *big <= p) {
+    if (p < *big + 1) {
+      // `p' is part of the MallocNode.
+      return reinterpret_cast<Header*>(*big);
     } else {
-      // if between watermarks, free based on request count and usage
-      int requestCount = RuntimeOption::HeapResetCountBase;
-
-      // Assumption : low and high water mark are power of 2 aligned
-      for( auto resetStep = RuntimeOption::HeapHighWaterMark / 2 ;
-           resetStep > m_heapUsage ;
-           resetStep /= 2 ) {
-        requestCount *= RuntimeOption::HeapResetCountMultiple;
-      }
-      if (requestCount <= m_requestCount) {
-        resetHeap = true;
-      }
+      // `p' is part of the allocated object.
+      return reinterpret_cast<Header*>(*big + 1);
     }
   }
-
-
-  if (resetHeap) {
-    auto oldPeak = m_peak;
-    m_peak -= ((m_peak - m_base) / 2);
-    m_peak = (char*)((uintptr_t)m_peak & ~(s_pageSize - 1));
-    if (madvise(m_peak,
-                (uintptr_t)oldPeak - (uintptr_t)m_peak,
-                MADV_DONTNEED) == 0)
-    {
-      m_requestCount = 0;
-      TRACE(1, "ContiguousHeap-reset: bytes %lu\n",
-            (uintptr_t)m_end - (uintptr_t)m_peak);
-    } else {
-      TRACE(1,
-          "ContiguousHeap-reset: madvise failed, trying again next request");
-    }
-  } else {
-    TRACE(1, "ContiguousHeap-reset: nothing release");
-  }
-  m_used = m_base;
-  m_freeList.next = nullptr;
-  m_freeList.size() = 0;
-  always_assert(m_base);
-  m_slabs.clear();
-  m_bigs.clear();
+  return nullptr;
 }
 
-void ContiguousHeap::flush() {
-  madvise(m_base, m_peak-m_base, MADV_DONTNEED);
-  m_used = m_peak = m_base;
-  m_freeList.size() = 0;
-  m_freeList.next = nullptr;
-  m_slabs = std::vector<MemBlock>{};
-  m_bigs = std::vector<MallocNode*>{};
-}
-
-MemBlock ContiguousHeap::allocSlab(size_t size) {
-  size_t cap;
-  void* slab = heapAlloc(size, cap);
-  m_slabs.push_back({slab, cap});
-  return {slab, cap};
-}
-
-MemBlock ContiguousHeap::allocBig(size_t bytes,
-                                  HeaderKind kind,
-                                  type_scan::Index tyindex) {
-  size_t cap;
-  auto n = static_cast<MallocNode*>(heapAlloc(bytes + sizeof(MallocNode), cap));
-  enlist(n, kind, cap, tyindex);
-  return {n + 1, cap - sizeof(MallocNode)};
-}
-
-MemBlock ContiguousHeap::callocBig(size_t nbytes, HeaderKind kind,
-                                   type_scan::Index tyindex) {
-  size_t cap;
-  auto const n = static_cast<MallocNode*>(
-        heapAlloc(nbytes + sizeof(MallocNode), cap));
-  memset(n, 0, cap);
-  enlist(n, kind, cap, tyindex);
-  return {n + 1, cap - sizeof(MallocNode)};
-}
-
-bool ContiguousHeap::contains(void* ptr) const {
-  auto const ptrInt = reinterpret_cast<uintptr_t>(ptr);
-  return ptrInt >= reinterpret_cast<uintptr_t>(m_base) &&
-         ptrInt <  reinterpret_cast<uintptr_t>(m_used);
-}
-
-NEVER_INLINE
-void ContiguousHeap::freeBig(void* ptr) {
-  // remove from big list
-  auto n = static_cast<MallocNode*>(ptr) - 1;
-  auto i = n->index();
-  auto last = m_bigs.back();
-  auto size = n->nbytes;
-  last->index() = i;
-  m_bigs[i] = last;
-  m_bigs.pop_back();
-
-  // free heap space
-  // freed nodes are stored in address ordered freelist
-  auto free = &m_freeList;
-  auto node = reinterpret_cast<FreeNode*>(n);
-  node->size() = size;
-  while (free->next != nullptr && free->next < node) {
-    free = free->next;
-  }
-  // Coalesce Nodes if possible with adjacent free nodes
-  if ((uintptr_t)free + free->size() + node->size() == (uintptr_t)free->next) {
-    free->size() += node->size() + free->next->size();
-    free->next = free->next->next;
-  } else if ((uintptr_t)free + free->size() == (uintptr_t)ptr) {
-    free->size() += node->size();
-  } else if ((uintptr_t)node + node->size() == (uintptr_t)free->next){
-    node->next = free->next->next;
-    node->size() += free->next->size();
-    free->next = node;
-  } else {
-    node->next = free->next;
-    free->next = node;
-  }
-}
-
-MemBlock ContiguousHeap::resizeBig(void* ptr, size_t newsize) {
-  // Since we don't know how big it is (i.e. how much data we should memcpy),
-  // we have no choice but to ask malloc to realloc for us.
-  auto const n = static_cast<MallocNode*>(ptr) - 1;
-  size_t cap = 0;
-  MallocNode* newNode = nullptr;
-  if (n->nbytes >= newsize + sizeof(MallocNode)) {
-    newNode = n;
-  } else {
-    newNode = static_cast<MallocNode*>(
-      heapAlloc(newsize + sizeof(MallocNode),cap)
-    );
-    memcpy(newNode, ptr, n->nbytes);
-    newNode->nbytes = cap;
-  }
-  if (newNode != n) {
-    m_bigs[newNode->index()] = newNode;
-    freeBig(n);
-  }
-  return {newNode + 1, n->nbytes - sizeof(MallocNode)};
-}
-
-void* ContiguousHeap::heapAlloc(size_t nbytes, size_t &cap) {
-  if (UNLIKELY(!m_base)) {
-    // Lazy allocation of heap
-    createRequestHeap();
-  }
-
-  void* ptr = nullptr;
-  auto alignedSize = (nbytes + s_pageSize - 1) & ~(s_pageSize - 1);
-
-  // freeList is address ordered first fit
-  auto prev = &m_freeList;
-  auto cur = m_freeList.next;
-  while (cur != nullptr ) {
-    if (cur->size() >= alignedSize &&
-        cur->size() < alignedSize + kMaxSmallSize) {
-      // found freed heap node that fits allocation and doesn't need to split
-      ptr = cur;
-      prev->next = cur->next;
-      cap = cur->size();
-      return ptr;
-    }
-    if (cur->size() > alignedSize) {
-      // split free heap node
-      prev->next = reinterpret_cast<FreeNode*>(((char*)cur) + alignedSize);
-      prev->next->next = cur->next;
-      prev->next->size() = cur->size() - alignedSize;
-      ptr = cur;
-      cap = alignedSize;
-      return ptr;
-    }
-    prev = cur;
-    cur = cur->next;
-  }
-  ptr = (void*)m_used;
-  m_used += alignedSize;
-  cap = alignedSize;
-  if (UNLIKELY(m_used > m_end)) {
-    always_assert_flog(0,
-        "Heap address space exhausted\nbase:{}\nend:{}\nused{}",
-        m_base, m_end, m_used);
-    // Throw exception when t4840214 is fixed
-    // raise_fatal_error("Request heap out of memory");
-  } else if (UNLIKELY(m_used > m_OOMMarker)) {
-    setSurpriseFlag(MemExceededFlag);
-  }
-  return ptr;
-}
-
-void ContiguousHeap::createRequestHeap() {
-  // convert to bytes
-  m_contiguousHeapSize = RuntimeOption::HeapSizeMB * 1024 * 1024;
-
-  if (( m_base = (char*)mmap(NULL,
-                            m_contiguousHeapSize,
-                            PROT_WRITE | PROT_READ,
-                            s_mmapFlags,
-                            -1,
-                            0)) != MAP_FAILED) {
-    m_used = m_base;
-  } else {
-    always_assert_flog(0, "Heap Creation Failed");
-  }
-  m_end = m_base + m_contiguousHeapSize;
-  m_peak = m_base;
-  m_OOMMarker = m_end - (m_contiguousHeapSize/2);
-  m_freeList.next = nullptr;
-  m_freeList.size() = 0;
-}
-
-ContiguousHeap::~ContiguousHeap(){
-  flush();
-  // ~BigHeap releases its slabs/bigs.
-}
+///////////////////////////////////////////////////////////////////////////////
 }

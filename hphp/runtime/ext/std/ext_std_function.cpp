@@ -100,8 +100,7 @@ String HHVM_FUNCTION(create_function, const String& args, const String& code) {
 
 ALWAYS_INLINE
 static Variant func_get_arg_impl(int arg_num) {
-  CallerFrame cf;
-  ActRec* ar = cf.actRecForArgs();
+  auto const ar = GetCallerFrameForArgs();
 
   if (ar == nullptr) {
     return false;
@@ -169,7 +168,7 @@ Array hhvm_get_frame_args(const ActRec* ar, int offset) {
   );
   if (variadic && numArgs > numParams) {
     auto arr = local - numParams;
-    if (isArrayType(arr->m_type) && arr->m_data.parr->isPacked()) {
+    if (isArrayType(arr->m_type) && arr->m_data.parr->isPackedLayout()) {
       numArgs = numParams + arr->m_data.parr->size();
     } else {
       numArgs = numParams;

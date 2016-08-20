@@ -34,6 +34,16 @@ namespace HPHP { namespace jit {
 
 ///////////////////////////////////////////////////////////////////////////////
 
+std::string MixedArrayOffsetProfile::toString() const {
+  if (!m_init) return std::string("uninitialized");
+  std::ostringstream out;
+  for (auto const& line : m_hits) {
+    out << folly::format("{}:{},", line.pos, line.count);
+  }
+  out << folly::format("untracked:{}", m_untracked);
+  return out.str();
+}
+
 folly::Optional<uint32_t>
 MixedArrayOffsetProfile::choose() const {
   Line hottest;
@@ -83,7 +93,7 @@ bool MixedArrayOffsetProfile::update(int32_t pos, uint32_t count) {
 }
 
 void MixedArrayOffsetProfile::update(const ArrayData* ad, int64_t i) {
-  auto const pos = ad->isMixed()
+  auto const pos = ad->isMixedLayout()
     ? MixedArray::asMixed(ad)->find(i, hashint(i))
     : -1;
   update(pos, 1);
@@ -93,7 +103,7 @@ void MixedArrayOffsetProfile::update(const ArrayData* ad,
                                      const StringData* sd,
                                      bool checkForInt) {
   auto const pos = [&]() -> int32_t {
-    if (!ad->isMixed()) return -1;
+    if (!ad->isMixedLayout()) return -1;
     auto const a = MixedArray::asMixed(ad);
 
     int64_t i;

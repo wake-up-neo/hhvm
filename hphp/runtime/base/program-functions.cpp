@@ -26,6 +26,7 @@
 #include "hphp/runtime/base/file-util.h"
 #include "hphp/runtime/base/hhprof.h"
 #include "hphp/runtime/base/ini-setting.h"
+#include "hphp/runtime/base/member-reflection.h"
 #include "hphp/runtime/base/memory-manager.h"
 #include "hphp/runtime/base/php-globals.h"
 #include "hphp/runtime/base/plain-file.h"
@@ -74,15 +75,18 @@
 #include "hphp/util/abi-cxx.h"
 #include "hphp/util/arch.h"
 #include "hphp/util/boot_timer.h"
+#include "hphp/util/build-info.h"
 #include "hphp/util/compatibility.h"
 #include "hphp/util/capability.h"
 #include "hphp/util/embedded-data.h"
 #include "hphp/util/hardware-counter.h"
+#include "hphp/util/hphp-config.h"
+#include "hphp/util/kernel-version.h"
 #ifndef _MSC_VER
 #include "hphp/util/light-process.h"
 #endif
+#include "hphp/util/process-exec.h"
 #include "hphp/util/process.h"
-#include "hphp/util/build-info.h"
 #include "hphp/util/service-data.h"
 #include "hphp/util/shm-counter.h"
 #include "hphp/util/stack-trace.h"
@@ -988,6 +992,32 @@ static int start_server(const std::string &username, int xhprof) {
         BootStats::Block timer("Readahead Repo");
         auto path = RuntimeOption::RepoLocalPath.c_str();
         Logger::Info("readahead %s", path);
+#ifdef __linux__
+        // glibc doesn't have a wrapper for ioprio_set(), so we need to use
+        // syscall().  The constants here are consistent with the kernel source.
+        // See http://lxr.free-electrons.com/source/include/linux/ioprio.h
+        auto constexpr IOPRIO_CLASS_SHIFT = 13;
+        enum {
+          IOPRIO_CLASS_NONE,
+          IOPRIO_CLASS_RT,
+          IOPRIO_CLASS_BE,
+          IOPRIO_CLASS_IDLE,
+        };
+        // Set to lowest IO priority.
+        constexpr int ioprio = (IOPRIO_CLASS_IDLE << IOPRIO_CLASS_SHIFT);
+
+        // ioprio_set() is available starting kernel 2.6.13
+        KernelVersion version;
+        if (version.m_major > 2 ||
+            (version.m_major == 2 &&
+             (version.m_minor > 6 ||
+              (version.m_minor == 6 && version.m_release >= 13)))) {
+          syscall(SYS_ioprio_set,
+                  1 /* IOPRIO_WHO_PROCESS, in fact, it is this thread */,
+                  0 /* current thread */,
+                  ioprio);
+        }
+#endif
         const auto mbPerSec = RuntimeOption::RepoLocalReadaheadRate;
         if (!readahead_rate(path, mbPerSec)) {
           Logger::Error("readahead failed: %s", strerror(errno));
@@ -1057,11 +1087,6 @@ static int start_server(const std::string &username, int xhprof) {
   }
   BootStats::mark("warmup");
 
-  if (readaheadThread.get()) {
-    readaheadThread->join();
-    readaheadThread.reset();
-  }
-
   if (RuntimeOption::StopOldServer) HttpServer::StopOldServer();
 
   if (RuntimeOption::EvalEnableNuma) {
@@ -1090,6 +1115,11 @@ static int start_server(const std::string &username, int xhprof) {
 #endif
 
   HttpServer::CheckMemAndWait(true); // Final wait
+  if (readaheadThread.get()) {
+    readaheadThread->join();
+    readaheadThread.reset();
+  }
+
   HttpServer::Server->runOrExitProcess();
   HttpServer::Server.reset();
   return 0;
@@ -1101,7 +1131,7 @@ std::string translate_stack(const char *hexencoded, bool with_frame_numbers) {
   }
 
   StackTrace st(hexencoded);
-  std::vector<std::shared_ptr<StackTrace::Frame>> frames;
+  std::vector<std::shared_ptr<StackFrameExtra>> frames;
   st.get(frames);
 
   std::ostringstream out;
@@ -1269,27 +1299,26 @@ static int compute_hhvm_argc(const options_description& desc,
 }
 
 /*
- * AsyncFuncImpl defines a minimum C++ stack size but that only applies to
- * threads we manually create. When the main thread will be executing PHP
- * rather than just managing a server, make sure its stack is big enough.
+ * alloc.h defines a minimum C++ stack size but that only applies to threads we
+ * manually create.  When the main thread will be executing PHP rather than just
+ * managing a server, make sure its stack is big enough.
  */
 static void set_stack_size() {
   struct rlimit rlim;
   if (getrlimit(RLIMIT_STACK, &rlim) != 0) return;
 
-  if (rlim.rlim_cur < AsyncFuncImpl::kStackSizeMinimum
+  if (rlim.rlim_cur < kStackSizeMinimum
 #ifndef __CYGWIN__
       || rlim.rlim_cur == RLIM_INFINITY
 #endif
       ) {
 #ifdef __CYGWIN__
     Logger::Error("stack limit too small, use peflags -x to increase  %zd\n",
-                  AsyncFuncImpl::kStackSizeMinimum);
+                  kStackSizeMinimum);
 #else
-    rlim.rlim_cur = AsyncFuncImpl::kStackSizeMinimum;
+    rlim.rlim_cur = kStackSizeMinimum;
     if (setrlimit(RLIMIT_STACK, &rlim)) {
-      Logger::Error("failed to set stack limit to %zd\n",
-                    AsyncFuncImpl::kStackSizeMinimum);
+      Logger::Error("failed to set stack limit to %zd\n", kStackSizeMinimum);
     }
 #endif
   }
@@ -1644,7 +1673,7 @@ static int execute_program_impl(int argc, char** argv) {
     if (!opened_logs) {
       Logger::Error("Log file not specified under daemon mode.\n\n");
     }
-    Process::Daemonize();
+    proc::daemonize();
   }
 
   if (RuntimeOption::ServerExecutionMode()) {
@@ -1680,6 +1709,9 @@ static int execute_program_impl(int argc, char** argv) {
       exit(HPHP_EXIT_FAILURE);
     }
   }
+
+  // It's okay if this fails.
+  init_member_reflection();
 
   if (!ShmCounters::initialize(true, Logger::Error)) {
     exit(HPHP_EXIT_FAILURE);
@@ -1966,7 +1998,7 @@ static void update_constants_and_options() {
 void hphp_thread_init() {
   ServerStats::GetLogger();
   zend_get_bigint_data();
-  zend_get_rand_data();
+  zend_rand_init();
   get_server_note();
   MemoryManager::TlsWrapper::getCheck();
 
@@ -2328,14 +2360,16 @@ void hphp_session_exit() {
   // finishes.
   Treadmill::finishRequest();
 
+  // The treadmill must be flushed before profData is reset as the data may
+  // be read during cleanup if EvalEnableReuseTC = true
+  jit::mcg->requestExit();
+
   TI().onSessionExit();
 
   {
     ServerStatsHelper ssh("rollback");
 
     hphp_memory_cleanup();
-    // Do any post-sweep cleanup necessary for global variables
-    free_global_variables_after_sweep();
   }
 
   assert(MM().empty());

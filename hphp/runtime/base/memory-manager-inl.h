@@ -24,20 +24,28 @@
 
 namespace HPHP {
 
-//////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
 
 static_assert(
   kMaxSmallSize <= std::numeric_limits<uint32_t>::max(),
   "Size-specified small block alloc functions assume this"
 );
 
-//////////////////////////////////////////////////////////////////////
-
 inline MemoryManager& MM() {
   return *MemoryManager::TlsWrapper::getNoCheck();
 }
 
-//////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+
+inline BigHeap::~BigHeap() {
+  reset();
+}
+
+inline bool BigHeap::empty() const {
+  return m_slabs.empty() && m_bigs.empty();
+}
+
+///////////////////////////////////////////////////////////////////////////////
 
 struct MemoryManager::MaskAlloc {
   explicit MaskAlloc(MemoryManager& mm) : m_mm(mm) {
@@ -90,7 +98,7 @@ private:
   bool m_savedCouldOOM;
 };
 
-//////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
 
 inline int operator<<(HeaderKind k, int bits) {
   return int(k) << bits;
@@ -103,19 +111,31 @@ inline void* MemoryManager::FreeList::maybePop() {
   return ret;
 }
 
+inline FreeNode*
+FreeNode::InitFrom(void* addr, uint32_t size, HeaderKind kind) {
+  auto node = static_cast<FreeNode*>(addr);
+  node->hdr.init(kind, size);
+  return node;
+}
+
+inline FreeNode*
+FreeNode::UninitFrom(void* addr, FreeNode* next) {
+  // The extra store to initialize a HeaderKind::Free here would be expensive.
+  // Instead, initFree() initializes free headers just before iterating
+  auto node = static_cast<FreeNode*>(addr);
+  node->next = next;
+  return node;
+}
+
 inline void MemoryManager::FreeList::push(void* val, size_t size) {
   FTRACE(4, "FreeList::push({}, {}), prev head = {}\n", val, size, head);
   auto constexpr kMaxFreeSize = std::numeric_limits<uint32_t>::max();
   static_assert(kMaxSmallSize <= kMaxFreeSize, "");
   assert(size > 0 && size <= kMaxFreeSize);
-  auto const node = static_cast<FreeNode*>(val);
-  node->next = head;
-  // The extra store to initialize a free header here is expensive.
-  // Instead, initFree() initializes all free headers just before iterating
-  head = node;
+  head = FreeNode::UninitFrom(val, head);
 }
 
-//////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
 
 inline uint32_t MemoryManager::estimateCap(uint32_t requested) {
   return requested <= kMaxSmallSize ? smallSizeClass(requested)
@@ -254,7 +274,7 @@ inline void MemoryManager::freeSmallSize(void* ptr, uint32_t bytes) {
   FTRACE(3, "freeSmallSize: {} ({} bytes)\n", ptr, bytes);
 }
 
-//////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
 
 ALWAYS_INLINE
 void* MemoryManager::objMalloc(size_t size) {
@@ -268,7 +288,7 @@ void MemoryManager::objFree(void* vp, size_t size) {
   freeBigSize(vp, size);
 }
 
-//////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
 
 inline int64_t MemoryManager::getAllocated() const {
 #ifdef USE_JEMALLOC
@@ -324,7 +344,7 @@ inline bool MemoryManager::stopStatsInterval() {
 }
 
 inline bool MemoryManager::preAllocOOM(int64_t size) {
-  if (m_couldOOM && m_stats.usage() + size > m_stats.maxUsage) {
+  if (m_couldOOM && m_stats.usage() + size > m_stats.limit) {
     refreshStatsHelperExceeded();
     return true;
   }
@@ -339,13 +359,13 @@ inline void MemoryManager::forceOOM() {
 
 inline void MemoryManager::resetExternalStats() { resetStatsImpl(false); }
 
-//////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
 
 inline bool MemoryManager::empty() const {
   return m_heap.empty();
 }
 
-inline bool MemoryManager::contains(void *p) const {
+inline bool MemoryManager::contains(void* p) const {
   return m_heap.contains(p);
 }
 
@@ -356,7 +376,12 @@ inline bool MemoryManager::checkContains(void* p) const {
   return true;
 }
 
-//////////////////////////////////////////////////////////////////////
+inline Header* MemoryManager::find(const void* p) {
+  initFree();
+  return m_heap.find(p);
+}
+
+///////////////////////////////////////////////////////////////////////////////
 
 inline bool MemoryManager::sweeping() {
   return !TlsWrapper::isNull() && MM().m_sweeping;
@@ -374,7 +399,7 @@ inline StringDataNode& MemoryManager::getStringList() {
   return m_strings;
 }
 
-//////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
 
 template <typename T>
 MemoryManager::RootId MemoryManager::addRoot(req::ptr<T>&& ptr) {
@@ -421,7 +446,7 @@ bool MemoryManager::removeRoot(const T* ptr) {
   return (bool)removeRoot<T>(ptr->getId());
 }
 
-//////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
 
 }
 

@@ -39,6 +39,9 @@ Type arithOpResult(Type t1, Type t2) {
   auto both = t1 | t2;
   if (both.maybe(TDbl)) return TDbl;
   if (both.maybe(TArr)) return TArr;
+  if (both.maybe(TVec)) return TVec;
+  if (both.maybe(TDict)) return TDict;
+  if (both.maybe(TKeyset)) return TKeyset;
   if (both.maybe(TStr)) return TCell;
   return TInt;
 }
@@ -123,7 +126,13 @@ folly::Optional<Type> interpOutputType(IRGS& env,
     case OutBooleanImm:  return TBool;
     case OutInt64:       return TInt;
     case OutArray:       return TArr;
-    case OutArrayImm:    return TArr; // Should be StaticArr: t2124292
+    case OutArrayImm:    return TArr; // Should be StaticArr/Vec/Dict: t2124292
+    case OutVec:         return TVec;
+    case OutVecImm:      return TVec;
+    case OutDict:        return TDict;
+    case OutDictImm:     return TDict;
+    case OutKeyset:      return TKeyset;
+    case OutKeysetImm:   return TKeyset;
     case OutObject:
     case OutThisObject:  return TObj;
     case OutResource:    return TRes;
@@ -132,7 +141,9 @@ folly::Optional<Type> interpOutputType(IRGS& env,
     case OutCns:         return TCell;
     case OutVUnknown:    return TBoxedInitCell;
 
-    case OutSameAsInput: return topType(env, BCSPRelOffset{0});
+    case OutSameAsInput1: return topType(env, BCSPRelOffset{0});
+    case OutSameAsInput2: return topType(env, BCSPRelOffset{1});
+    case OutSameAsInput3: return topType(env, BCSPRelOffset{2});
     case OutVInput:      return boxed(topType(env, BCSPRelOffset{0}));
     case OutVInputL:     return boxed(localType());
     case OutFInputL:
@@ -451,7 +462,6 @@ void emitYieldFromDelegate(IRGS& env, int32_t, int32_t)
                                               { INTERP }
 void emitContUnsetDelegate(IRGS& env, int32_t, int32_t)
                                               { INTERP }
-void emitNewKeysetArray(IRGS& env, int32_t)   { INTERP }
 void emitHighInvalid(IRGS& env)               { std::abort(); }
 
 //////////////////////////////////////////////////////////////////////

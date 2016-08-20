@@ -32,6 +32,9 @@ extern const StaticString s_parent;
 extern const StaticString s_static;
 
 extern const StaticString s_cmpWithCollection;
+extern const StaticString s_cmpWithVec;
+extern const StaticString s_cmpWithDict;
+extern const StaticString s_cmpWithKeyset;
 
 ///////////////////////////////////////////////////////////////////////////////
 // operators
@@ -46,6 +49,8 @@ String concat4(const String& s1, const String& s2, const String& s3,
 
 ///////////////////////////////////////////////////////////////////////////////
 
+void NEVER_INLINE raise_missing_this(const Func* f);
+bool NEVER_INLINE needs_missing_this_check(const Func* f);
 void NEVER_INLINE throw_invalid_property_name(const String& name);
 void NEVER_INLINE throw_null_get_object_prop();
 void NEVER_INLINE raise_null_object_prop();
@@ -62,13 +67,10 @@ inline bool is_bool(const Variant& v)   { return v.is(KindOfBoolean);}
 inline bool is_int(const Variant& v)    { return v.isInteger();}
 inline bool is_double(const Variant& v) { return v.is(KindOfDouble);}
 inline bool is_string(const Variant& v) { return v.isString();}
-inline bool is_array(const Variant& v)  { return v.isArray();}
-inline bool is_vec(const Variant& v) {
-  return v.isArray() && v.toCArrRef()->isVecArray();
-}
-inline bool is_dict(const Variant& v) {
-  return v.isArray() && v.toCArrRef()->isDict();
-}
+inline bool is_array(const Variant& v)  { return v.isPHPArray();}
+inline bool is_vec(const Variant& v)    { return v.isVecArray();}
+inline bool is_dict(const Variant& v)   { return v.isDict();}
+inline bool is_keyset(const Variant& v) { return v.isKeyset();}
 
 inline bool is_object(const Variant& var) {
   if (!var.is(KindOfObject)) {
@@ -97,6 +99,7 @@ bool is_callable(const Variant& v, bool syntax_only, RefData* name);
 bool is_callable(const Variant& v);
 bool array_is_valid_callback(const Array& arr);
 
+enum class DecodeFlags { Warn, NoWarn, LookupOnly };
 const HPHP::Func*
 vm_decode_function(const Variant& function,
                    ActRec* ar,
@@ -104,16 +107,16 @@ vm_decode_function(const Variant& function,
                    ObjectData*& this_,
                    HPHP::Class*& cls,
                    StringData*& invName,
-                   bool warn = true);
+                   DecodeFlags flags = DecodeFlags::Warn);
 
 inline void
 vm_decode_function(const Variant& function,
                    ActRec* ar,
                    bool forwarding,
                    CallCtx& ctx,
-                   bool warn = true) {
+                   DecodeFlags flags = DecodeFlags::Warn) {
   ctx.func = vm_decode_function(function, ar, forwarding, ctx.this_, ctx.cls,
-                                ctx.invName, warn);
+                                ctx.invName, flags);
 }
 
 Variant vm_call_user_func(const Variant& function, const Variant& params,
@@ -136,6 +139,9 @@ void throw_instance_method_fatal(const char *name);
 [[noreturn]] void throw_collection_modified();
 [[noreturn]] void throw_collection_property_exception();
 [[noreturn]] void throw_collection_compare_exception();
+[[noreturn]] void throw_vec_compare_exception();
+[[noreturn]] void throw_dict_compare_exception();
+[[noreturn]] void throw_keyset_compare_exception();
 [[noreturn]] void throw_param_is_not_container();
 [[noreturn]]
 void throw_cannot_modify_immutable_object(const char* className);
@@ -148,8 +154,8 @@ Object create_object(const String& s, const Array &params, bool init = true);
 Object init_object(const String& s, const Array &params, ObjectData* o);
 
 [[noreturn]] void throw_object(const Object& e);
-#if ((__GNUC__ != 4) || (__GNUC_MINOR__ != 8) || __GNUC_PATCHLEVEL__ >= 2)
-// gcc-4.8.1 has a bug that causes incorrect code if we
+#if ((__GNUC__ != 4) || (__GNUC_MINOR__ != 8))
+// gcc-4.8 has a bug that causes incorrect code if we
 // define this function.
 [[noreturn]] void throw_object(Object&& e);
 #endif

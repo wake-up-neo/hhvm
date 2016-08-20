@@ -26,6 +26,7 @@
 #include "hphp/runtime/vm/instance-bits.h"
 #include "hphp/runtime/vm/native-data.h"
 #include "hphp/runtime/vm/native-prop-handler.h"
+#include "hphp/runtime/vm/reverse-data-map.h"
 #include "hphp/runtime/vm/vm-regs.h"
 #include "hphp/runtime/vm/treadmill.h"
 
@@ -222,12 +223,19 @@ Class* Class::newClass(PreClass* preClass, Class* parent) {
     funcVecLen += numTraitMethodsEstimate;
   }
 
-  auto const size = sizeof_Class
-                    + sizeof(m_classVec[0]) * classVecLen
-                    + sizeof(LowPtr<Func>) * funcVecLen;
+  // We need to pad this allocation so that the actual start of the Class is
+  // 8-byte aligned.
+  auto const mask = alignof(Class) - 1;
+  auto const funcvec_sz = sizeof(LowPtr<Func>) * funcVecLen;
+  auto const prefix_sz = (funcvec_sz + mask) & ~mask;
+
+  auto const size = sizeof_Class + prefix_sz
+                    + sizeof(m_classVec[0]) * classVecLen;
+
   auto const mem = low_malloc_data(size);
-  auto const classPtr = (void *)((uintptr_t)mem +
-                                 funcVecLen * sizeof(LowPtr<Func>));
+  auto const classPtr = reinterpret_cast<void*>(
+    reinterpret_cast<uintptr_t>(mem) + prefix_sz
+  );
   try {
     return new (classPtr) Class(preClass, parent, std::move(usedTraits),
                                 classVecLen, funcVecLen);
@@ -256,7 +264,14 @@ Class* Class::rescope(Class* ctx, Attr attrs /* = AttrNone */) {
     bool const ctx_match = invoke->cls() == ctx;
     bool const attrs_match = (attrs == AttrNone || attrs == invoke->attrs());
 
-    return ctx_match && attrs_match ? template_cls : nullptr;
+    // The first scoping will never be for `template_cls' (since it's
+    // impossible to define a closure in the context of its own Closure
+    // subclass), so if this happens, it means that `template_cls' is in a
+    // "de-scoped" state and we shouldn't use it.  (See Class::releaseRefs().)
+    bool const ctx_override = template_cls->m_scoped &&
+                              invoke->cls() == template_cls;
+
+    return ctx_match && attrs_match && !ctx_override ? template_cls : nullptr;
   };
 
   // If the template class has already been scoped to `ctx', we're done.  This
@@ -266,7 +281,7 @@ Class* Class::rescope(Class* ctx, Attr attrs /* = AttrNone */) {
   template_cls->allocExtraData();
   auto& scopedClones = template_cls->m_extra.raw()->m_scopedClones;
 
-  auto const key = reinterpret_cast<uintptr_t>(ctx) | uintptr_t(attrs) << 32;
+  auto const key = CloneScope { ctx, attrs };
 
   auto const try_cache = [&] {
     auto it = scopedClones.find(key);
@@ -297,12 +312,35 @@ Class* Class::rescope(Class* ctx, Attr attrs /* = AttrNone */) {
 
   WriteLock l(s_scope_cache_mutex);
 
+  if (fermeture->m_scoped) {
+    // We raced with someone who scoped the template_cls just as we were about
+    // to, so make a new Class.  (Note that we don't want to do this with the
+    // lock held, since it's very expensive.)
+    //
+    // This race should be far less likely than a race between two attempted
+    // first-scopings for `template_cls', which is why we don't do an test-and-
+    // set when we first check `m_scoped' before acquiring the lock.
+    s_scope_cache_mutex.release();
+    SCOPE_EXIT { s_scope_cache_mutex.acquireWrite(); };
+    fermeture = ClassPtr { newClass(m_preClass.get(), m_parent.get()) };
+  }
+
   // Check the caches again.
   if (auto cls = try_template()) return cls;
   if (auto cls = try_cache()) return cls;
 
   fermeture->m_invoke->rescope(ctx, attrs);
   fermeture->m_scoped = true;
+
+  if (ctx != nullptr &&
+      !RuntimeOption::RepoAuthoritative &&
+      !classHasPersistentRDS(ctx)) {
+    // If the context Class might be destroyed, we need to do extra accounting
+    // so that we can drop all clones scoped to it at the time of destruction.
+    ctx->allocExtraData();
+    ctx->m_extra.raw()->m_clonesWithThisScope.push_back(
+      ScopedCloneBackref { ClassPtr(template_cls), attrs });
+  }
 
   InstanceBits::ifInitElse(
     [&] { fermeture->setInstanceBits();
@@ -348,6 +386,10 @@ void Class::destroy() {
 void Class::atomicRelease() {
   assert(!m_cachedClass.bound());
   assert(!getCount());
+
+  if (RuntimeOption::EvalEnableReverseDataMap) {
+    data_map::deregister(this);
+  }
   this->~Class();
   low_free_data(mallocPtr());
 }
@@ -421,6 +463,49 @@ void Class::releaseRefs() {
   if (m_extra) {
     auto xtra = m_extra.raw();
     xtra->m_usedTraits.clear();
+
+    if (xtra->m_clonesWithThisScope.size() > 0) {
+      WriteLock l(s_scope_cache_mutex);
+
+      // Purge all references to scoped closure clones that are scoped to
+      // `this'---there is no way anyone can find them at this point.
+      for (auto const& cloneref : xtra->m_clonesWithThisScope) {
+        auto const template_cls = cloneref.template_cls;
+        auto const attrs = cloneref.ctx_attrs;
+
+        auto const invoke = template_cls->m_invoke;
+
+        if (invoke->cls() == this && attrs == AttrNone) {
+          // We only hijack the `template_cls' as a clone for static rescopings
+          // (which are signified by AttrNone).  To undo this, we need to make
+          // sure that /no/ scoping will match with that of `template_cls'.  We
+          // can accomplish this by using `template_cls' itself as the context.
+          // Any instance of this closure will have its own scoped clone, and
+          // we are de-scoping `template_cls' here, so the only way to obtain
+          // it for dynamic binding is to reference it by name, which is
+          // logically private (in PHP7, it's always just "Closure").  In HHVM,
+          // this is possible by obtaining the Closure subclass's name, in
+          // which case we'll just force a fresh clone via a special-case check
+          // in Class::rescope().
+          invoke->rescope(template_cls.get(), AttrNone);
+          // We explicitly decline to reset template_cls->m_scoped.  This lets
+          // us simplify some assertions in rescope(), gives us a nice sanity
+          // check for debugging, and avoids having to play around too much
+          // with how Func::rescope() works, at the cost of preventing the
+          // template from being scoped again.  This should only happen outside
+          // of RepoAuthoritative mode while code is being modified, so the
+          // extra memory usage is not a substantial concern.
+        } else {
+          assertx(template_cls->m_extra);
+          auto& scopedClones = template_cls->m_extra.raw()->m_scopedClones;
+
+          auto const key = CloneScope { this, attrs };
+          assertx(scopedClones.count(key));
+          scopedClones.erase(key);
+        }
+      }
+    }
+    xtra->m_clonesWithThisScope.clear();
   }
 }
 
@@ -486,21 +571,6 @@ Class::Avail Class::avail(Class*& parent,
 
 
 ///////////////////////////////////////////////////////////////////////////////
-// Pre- and post-allocations.
-
-LowPtr<Func>* Class::funcVec() const {
-  return reinterpret_cast<LowPtr<Func>*>(
-    reinterpret_cast<uintptr_t>(this) -
-    m_funcVecLen * sizeof(LowPtr<Func>)
-  );
-}
-
-void* Class::mallocPtr() const {
-  return funcVec();
-}
-
-
-///////////////////////////////////////////////////////////////////////////////
 // Ancestry.
 
 const Class* Class::commonAncestor(const Class* cls) const {
@@ -528,7 +598,7 @@ const Func* Class::getDeclaredCtor() const {
 }
 
 const Func* Class::getCachedInvoke() const {
-  assert(IMPLIES(m_invoke, !m_invoke->isStatic() || m_invoke->isClosureBody()));
+  assert(IMPLIES(m_invoke, !m_invoke->isStaticInProlog()));
   return m_invoke;
 }
 
@@ -1183,11 +1253,25 @@ const StaticString
   s_unset("__unset"),
   s_call("__call"),
   s_callStatic("__callStatic"),
+  s_debugInfo("__debugInfo"),
   s_clone("__clone");
 
+static Func* markNonStatic(Func* meth) {
+  // Do not use isStaticInProlog here, since that uses the
+  // AttrRequiresThis flag.
+  if (meth && (!meth->isStatic() || meth->isClosureBody())) {
+    meth->setAttrs(meth->attrs() | AttrRequiresThis);
+  }
+  return meth;
+}
+
+static Func* markNonStatic(const Class* thiz, const String& meth) {
+  return markNonStatic(thiz->lookupMethod(meth.get()));
+}
+
 void Class::setSpecial() {
-  m_toString = lookupMethod(s_toString.get());
-  m_dtor = lookupMethod(s_destruct.get());
+  m_toString = markNonStatic(this, s_toString);
+  m_dtor = markNonStatic(this, s_destruct);
 
   /*
    * The invoke method is only cached in the Class for a fast path JIT
@@ -1201,8 +1285,8 @@ void Class::setSpecial() {
    * here.  (The closure prologue uninstalls the $this and installs
    * the appropriate static context.)
    */
-  m_invoke = lookupMethod(s_invoke.get());
-  if (m_invoke && m_invoke->isStatic() && !m_invoke->isClosureBody()) {
+  m_invoke = markNonStatic(this, s_invoke);
+  if (m_invoke && m_invoke->isStaticInProlog()) {
     m_invoke = nullptr;
   }
 
@@ -1244,7 +1328,7 @@ void Class::setSpecial() {
       //      same name as the class as just normal methods, not a constructor)
       // then we give the deprecation warning.
       if (
-        RuntimeOption::PHP7_DeprecateOldStyleCtors && // In PHP 7 mode
+        RuntimeOption::PHP7_DeprecationWarnings && // In PHP 7 mode
         !this->instanceCtor() && // No explicit __construct
         this->name()->toCppString().find("\\") == std::string::npos // no NS
       ) {
@@ -1268,8 +1352,9 @@ void Class::setSpecial() {
   // Use 86ctor(), since no program-supplied constructor exists
   m_ctor = findSpecialMethod(this, s_86ctor.get());
   assert(m_ctor && "class had no user-defined constructor or 86ctor");
-  assert((m_ctor->attrs() & ~(AttrBuiltin|AttrAbstract|AttrHot|
-                              AttrInterceptable|AttrMayUseVV)) ==
+  assert((m_ctor->attrs() & ~(AttrBuiltin | AttrAbstract |
+                              AttrHot | AttrInterceptable |
+                              AttrMayUseVV | AttrRequiresThis)) ==
          (AttrPublic|AttrNoInjection|AttrPhpLeafFn));
 }
 
@@ -1310,7 +1395,7 @@ static bool checkTypeConstraint(const PreClass* implCls, const Class* iface,
 void checkDeclarationCompat(const PreClass* preClass,
                             const Func* func, const Func* imeth) {
   bool relaxedCheck = !RuntimeOption::EnableHipHopSyntax
-                        && func->isNative()
+                        && func->isCPPBuiltin()
                         && !imeth->unit()->isHHFile();
 
   const Func::ParamInfoVec& params = func->params();
@@ -1632,12 +1717,15 @@ void Class::setMethods() {
 void Class::setODAttributes() {
   m_ODAttrs = 0;
   if (lookupMethod(s_sleep.get()     )) { m_ODAttrs |= ObjectData::HasSleep; }
-  if (lookupMethod(s_get.get()       )) { m_ODAttrs |= ObjectData::UseGet;   }
-  if (lookupMethod(s_set.get()       )) { m_ODAttrs |= ObjectData::UseSet;   }
-  if (lookupMethod(s_isset.get()     )) { m_ODAttrs |= ObjectData::UseIsset; }
-  if (lookupMethod(s_unset.get()     )) { m_ODAttrs |= ObjectData::UseUnset; }
-  if (lookupMethod(s_call.get()      )) { m_ODAttrs |= ObjectData::HasCall;  }
-  if (lookupMethod(s_clone.get()     )) { m_ODAttrs |= ObjectData::HasClone; }
+  if (markNonStatic(this, s_get      )) { m_ODAttrs |= ObjectData::UseGet;   }
+  if (markNonStatic(this, s_set      )) { m_ODAttrs |= ObjectData::UseSet;   }
+  if (markNonStatic(this, s_isset    )) { m_ODAttrs |= ObjectData::UseIsset; }
+  if (markNonStatic(this, s_unset    )) { m_ODAttrs |= ObjectData::UseUnset; }
+  if (markNonStatic(this, s_call     )) { m_ODAttrs |= ObjectData::HasCall;  }
+  if (markNonStatic(this, s_clone    )) { m_ODAttrs |= ObjectData::HasClone; }
+
+  markNonStatic(this, s_debugInfo);
+  markNonStatic(m_ctor);
 
   if (m_dtor == nullptr) m_ODAttrs |= ObjectData::NoDestructor;
 
@@ -2114,6 +2202,12 @@ bool Class::compatibleTraitPropInit(TypedValue& tv1, TypedValue& tv2) {
       return same(tvAsVariant(&tv1), tvAsVariant(&tv2));
 
     case KindOfUninit:
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
     case KindOfPersistentArray:
     case KindOfArray:
     case KindOfObject:
@@ -2897,7 +2991,7 @@ Class::TMIOps::findTraitClass(const Class* cls,
 
 void Class::applyTraitRules(TMIData& tmid) {
   for (auto const& precRule : m_preClass->traitPrecRules()) {
-    tmid.applyPrecRule(precRule);
+    tmid.applyPrecRule(precRule, this);
   }
   for (auto const& aliasRule : m_preClass->traitAliasRules()) {
     tmid.applyAliasRule(aliasRule, this);

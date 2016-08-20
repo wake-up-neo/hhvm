@@ -19,6 +19,7 @@
 
 #include "hphp/runtime/vm/jit/irgen-call.h"
 #include "hphp/runtime/vm/jit/irgen-exit.h"
+#include "hphp/runtime/vm/jit/irgen-func-prologue.h"
 #include "hphp/runtime/vm/jit/irgen-sprop-global.h"
 
 #include "hphp/runtime/vm/hhbc-codec.h"
@@ -61,6 +62,16 @@ bool beginInlining(IRGS& env,
   );
 
   auto const& info = fpiStack.back();
+  if (info.func && info.func != target) {
+    // Its possible that we have an "FCallD T2 meth" guarded by eg an
+    // InstanceOfD T2, and that we know the object has type T1, and we
+    // also know that T1::meth exists. The FCallD is actually
+    // unreachable, but we might not have figured that out yet - so we
+    // could be trying to inline T1::meth while the fpiStack has
+    // T2::meth.
+    return false;
+  }
+
   always_assert(!isFPushCuf(info.fpushOpc) && !info.interp);
 
   // NB: the arguments were just popped from the VM stack above, so the VM
@@ -70,20 +81,33 @@ bool beginInlining(IRGS& env,
 
   auto ctx = [&] () -> SSATmp* {
     if (info.ctx) {
+      if (info.ctx->isA(TNullptr)) {
+        // We get a TNullptr either because its not a method,
+        // or because we looked up the method dynamically.
+        // In the former, we don't need to set the ctx, and
+        // in the latter, we must not set the ctx, since
+        // it is guaranteed to be incorrect.
+        return nullptr;
+      }
+      if (info.ctx->type() <= info.ctxType) {
+        return info.ctx;
+      }
       return gen(env, AssertType, info.ctxType, info.ctx);
     }
     if (isFPushFunc(info.fpushOpc)) {
       return nullptr;
     }
-    constexpr int32_t adjust = AROFF(m_this) / sizeof(Cell);
-    IRSPRelOffset ctxOff = calleeAROff + adjust;
-    auto const ret = gen(env, LdStk, TCtx, IRSPRelOffsetData{ctxOff}, sp(env));
-    return gen(env, AssertType, info.ctxType, ret);
+    if (info.ctxType <= TObj) {
+      constexpr int32_t adjust = AROFF(m_this) / sizeof(Cell);
+      IRSPRelOffset ctxOff = calleeAROff + adjust;
+      return gen(env, LdStk, info.ctxType, IRSPRelOffsetData{ctxOff}, sp(env));
+    }
+    return nullptr;
   }();
 
   // If the ctx was extracted from SpillFrame it may be a TCls, otherwise it
-  // will be a TCtx (= TObj | TCctx | TNullptr) read from the stack
-  assertx(!ctx || ctx->type() <= (TCtx | TCls));
+  // will be a TCtx (= TObj | TCctx) read from the stack
+  assertx(!ctx || (ctx->type() <= (TCtx | TCls) && target->implCls()));
 
   if (RuntimeOption::EvalHHIRGenerateAsserts) {
     auto arFunc = gen(env, LdARFuncPtr,
@@ -91,18 +115,12 @@ bool beginInlining(IRGS& env,
     gen(env, DbgAssertFunc, arFunc, cns(env, target));
   }
 
-  auto fpiFunc = fpiStack.back().func;
-  always_assert_flog(fpiFunc == nullptr || fpiFunc == target,
-                     "fpiFunc = {}  ;  target = {}",
-                     fpiFunc ? fpiFunc->fullName()->data() : "null",
-                     target  ? target->fullName()->data()  : "null");
-
   gen(env, BeginInlining, IRSPRelOffsetData{calleeAROff}, sp(env));
 
   DefInlineFPData data;
   data.target        = target;
   data.retBCOff      = returnBcOffset;
-  data.ctx           = ctx;
+  data.ctx           = target->isClosureBody() ? nullptr : ctx;
   data.retSPOff      = prevSPOff;
   data.spOffset      = calleeAROff;
   data.numNonDefault = numParams;
@@ -124,42 +142,36 @@ bool beginInlining(IRGS& env,
   for (unsigned i = 0; i < numParams; ++i) {
     stLocRaw(env, i, calleeFP, params[i]);
   }
-  const bool hasVariadicArg = target->hasVariadicCaptureParam();
-  for (unsigned i = numParams; i < target->numLocals() - hasVariadicArg; ++i) {
-    /*
-     * Here we need to be generating hopefully-dead stores to initialize
-     * non-parameter locals to KindOfUninit in case we have to leave the trace.
-     */
-    stLocRaw(env, i, calleeFP, cns(env, TUninit));
-  }
-  if (hasVariadicArg) {
-    auto argNum = target->numLocals() - 1;
-    always_assert(numParams <= argNum);
-    stLocRaw(env, argNum, calleeFP, cns(env, staticEmptyArray()));
-  }
+  emitPrologueLocals(env, numParams, target, ctx);
 
   return true;
 }
 
-void conjureBeginInlining(IRGS& env,
+bool conjureBeginInlining(IRGS& env,
                           const Func* func,
                           Type thisType,
                           const std::vector<Type>& args,
                           ReturnTarget returnTarget) {
+  auto conjure = [&](Type t) {
+    return (t.hasConstVal() ||
+            t.subtypeOfAny(TNullptr, TInitNull, TUninit)) ?
+      cns(env, t) : gen(env, Conjure, t);
+  };
+
   auto const numParams = args.size();
   fpushActRec(
     env,
     cns(env, func),
-    thisType != TBottom ? gen(env, Conjure, thisType) : nullptr,
+    thisType != TBottom ? conjure(thisType) : nullptr,
     numParams,
     nullptr /* invName */
   );
 
   for (auto const argType : args) {
-    push(env, gen(env, Conjure, argType));
+    push(env, conjure(argType));
   }
 
-  beginInlining(
+  return beginInlining(
     env,
     numParams,
     func,

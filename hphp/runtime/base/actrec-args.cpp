@@ -47,6 +47,12 @@ static const char *argTypeName(DataType dt) {
     case KindOfDouble:        return "double";
     case KindOfPersistentString:
     case KindOfString:        return "string";
+    case KindOfPersistentVec:
+    case KindOfVec:           return "vec";
+    case KindOfPersistentDict:
+    case KindOfDict:          return "dict";
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:        return "keyset";
     case KindOfPersistentArray:
     case KindOfArray:         return "array";
     case KindOfObject:        return "object";
@@ -139,6 +145,9 @@ bool parseArgs(ActRec *ar, const char *format, ...) {
       PARSE_ARG_VAL('d', KindOfDouble);
       PARSE_ARG_PTR('r', KindOfResource);
       PARSE_ARG_PTR('a', KindOfArray);
+      PARSE_ARG_PTR('i', KindOfDict);
+      PARSE_ARG_PTR('e', KindOfVec);
+      PARSE_ARG_PTR('k', KindOfKeyset);
       PARSE_ARG_PTR('o', KindOfObject);
 
       case 's': { // KindOfString

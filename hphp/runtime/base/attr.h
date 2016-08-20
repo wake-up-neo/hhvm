@@ -137,15 +137,12 @@ enum Attr {
   // <<__Memoize> caches).  Reuses the AttrBuiltin bit.
   AttrNoSerialize          = (1 << 20), //       |    X     |         //
                                         //       |          |         //
-  // Set on builtin functions that can be replaced by user implementations.
-  AttrAllowOverride        = (1 << 21), //       |          |    X    //
-                                        //       |          |         //
   // Indicates that the frame should be ignored when searching for context
   // (e.g., array_map evalutates its callback in the context of the caller).
   AttrSkipFrame            = (1 << 22), //       |          |    X    //
                                         //       |          |         //
-  // Is this an HNI builtin?            //       |          |         //
-  AttrNative               = (1 << 23), //       |          |    X    //
+  // Is this a (non-static) method that *must* have a non-null this?  //
+  AttrRequiresThis         = (1 << 25), //       |          |    X    //
                                         //       |          |         //
   // Indicates that this function can be constant-folded if it is called with
   // all constant arguments.            //       |          |         //

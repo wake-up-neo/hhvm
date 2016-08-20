@@ -168,6 +168,9 @@ inline bool isIncDecO(IncDecOp op) {
   ISTYPE_OP(Dbl)                               \
   ISTYPE_OP(Str)                               \
   ISTYPE_OP(Arr)                               \
+  ISTYPE_OP(Vec)                               \
+  ISTYPE_OP(Dict)                              \
+  ISTYPE_OP(Keyset)                            \
   ISTYPE_OP(Obj)                               \
   ISTYPE_OP(Scalar)
 
@@ -286,8 +289,7 @@ enum class SwitchKind : uint8_t {
   FLAG(None,             0)                        \
   FLAG(Warn,       (1 << 0))                       \
   FLAG(Define,     (1 << 1))                       \
-  FLAG(Unset,      (1 << 2))                       \
-  FLAG(DefineReffy,(Define | (1 << 3)))
+  FLAG(Unset,      (1 << 2))
 
 enum class MOpFlags : uint8_t {
 #define FLAG(name, val) name = val,
@@ -299,25 +301,11 @@ inline constexpr bool operator&(MOpFlags a, MOpFlags b) {
   return uint8_t(a) & uint8_t(b);
 }
 
-inline MOpFlags dropReffy(MOpFlags f) {
-  switch (f) {
-    case MOpFlags::None:
-    case MOpFlags::Warn:
-    case MOpFlags::Define:
-    case MOpFlags::Unset:
-      return f;
-    case MOpFlags::DefineReffy:
-      return MOpFlags::Define;
-  }
-  always_assert(false);
-}
-
 inline MOpFlags dropUnset(MOpFlags f) {
   switch (f) {
     case MOpFlags::None:
     case MOpFlags::Warn:
     case MOpFlags::Define:
-    case MOpFlags::DefineReffy:
       return f;
     case MOpFlags::Unset:
       return MOpFlags::None;
@@ -343,6 +331,7 @@ constexpr int32_t kMaxConcatN = 4;
 #define OPCODES \
   O(LowInvalid,      NA,               NOV,             NOV,        NF) \
   O(Nop,             NA,               NOV,             NOV,        NF) \
+  O(EntryNop,        NA,               NOV,             NOV,        NF) \
   O(BreakTraceHint,  NA,               NOV,             NOV,        NF) \
   O(PopA,            NA,               ONE(AV),         NOV,        NF) \
   O(PopC,            NA,               ONE(CV),         NOV,        NF) \
@@ -364,6 +353,9 @@ constexpr int32_t kMaxConcatN = 4;
   O(Double,          ONE(DA),          NOV,             ONE(CV),    NF) \
   O(String,          ONE(SA),          NOV,             ONE(CV),    NF) \
   O(Array,           ONE(AA),          NOV,             ONE(CV),    NF) \
+  O(Dict,            ONE(AA),          NOV,             ONE(CV),    NF) \
+  O(Keyset,          ONE(AA),          NOV,             ONE(CV),    NF) \
+  O(Vec,             ONE(AA),          NOV,             ONE(CV),    NF) \
   O(NewArray,        ONE(IVA),         NOV,             ONE(CV),    NF) \
   O(NewMixedArray,   ONE(IVA),         NOV,             ONE(CV),    NF) \
   O(NewDictArray,    ONE(IVA),         NOV,             ONE(CV),    NF) \
@@ -422,6 +414,9 @@ constexpr int32_t kMaxConcatN = 4;
   O(CastString,      NA,               ONE(CV),         ONE(CV),    NF) \
   O(CastArray,       NA,               ONE(CV),         ONE(CV),    NF) \
   O(CastObject,      NA,               ONE(CV),         ONE(CV),    NF) \
+  O(CastDict,        NA,               ONE(CV),         ONE(CV),    NF) \
+  O(CastKeyset,      NA,               ONE(CV),         ONE(CV),    NF) \
+  O(CastVec,         NA,               ONE(CV),         ONE(CV),    NF) \
   O(InstanceOf,      NA,               TWO(CV,CV),      ONE(CV),    NF) \
   O(InstanceOfD,     ONE(SA),          ONE(CV),         ONE(CV),    NF) \
   O(Print,           NA,               ONE(CV),         ONE(CV),    NF) \

@@ -32,7 +32,7 @@ let rec instantiate subst (r, ty: decl ty) =
   | Tgeneric (x, cstrl) ->
       (match SMap.get x subst with
       | Some x_ty ->
-          (Reason.Rinstantiate (fst x_ty, x, r), snd x_ty)
+        (Reason.Rinstantiate (fst x_ty, x, r), snd x_ty)
       | None ->
         (r, Tgeneric (x, List.map cstrl
              (fun (ck, ty) -> (ck, instantiate subst ty))))
@@ -96,8 +96,7 @@ and instantiate_ subst x =
       Tshape (fields_known, fdm)
 
 let instantiate_ce subst ({ ce_type = x; _ } as ce) =
-  let x = instantiate subst x in
-  { ce with ce_type = x }
+  { ce with ce_type = lazy (instantiate subst (Lazy.force x)) }
 
 let instantiate_cc subst ({ cc_type = x; _ } as cc) =
   let x = instantiate subst x in

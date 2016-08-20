@@ -22,18 +22,6 @@ type config = {
   log_level        : int;
 }
 
-let default_config =
-  let gig = 1024 * 1024 * 1024 in
-  {
-    global_size    = gig;
-    heap_size      = 20 * gig;
-    dep_table_pow  = 17; (* 1 << 17 *)
-    hash_table_pow = 18; (* 1 << 18 *)
-    shm_dirs       = [GlobalConfig.shm_dir; GlobalConfig.tmp_dir;];
-    shm_min_avail  = gig / 2; (* Half a gig by default *)
-    log_level      = 0;
-  }
-
 (* Allocated in C only. *)
 type handle = private {
   h_fd: Unix.file_descr;
@@ -134,9 +122,6 @@ let init config =
     then Hh_logger.log "Failed to use anonymous memfd init";
     shm_dir_init config config.shm_dirs
 
-let init_default () : handle =
-  init default_config
-
 external connect : handle -> is_master:bool -> unit = "hh_connect"
 
 external reset: unit -> unit = "hh_shared_reset"
@@ -173,7 +158,7 @@ external hh_log_level : unit -> int = "hh_log_level"
 (*****************************************************************************)
 (* The number of used slots in our hashtable *)
 (*****************************************************************************)
-external hash_used_slots : unit -> int = "hh_hash_used_slots"
+external hash_used_slots : unit -> int * int = "hh_hash_used_slots"
 
 (*****************************************************************************)
 (* The total number of slots in our hashtable *)
@@ -204,19 +189,26 @@ let init_done () =
   EventLogger.sharedmem_init_done (heap_size ())
 
 type table_stats = {
+  nonempty_slots : int;
   used_slots : int;
   slots : int;
 }
 
-let dep_stats () = {
-  used_slots = dep_used_slots ();
-  slots = dep_slots ();
-}
+let dep_stats () =
+  let used = dep_used_slots () in
+  {
+    nonempty_slots = used;
+    used_slots = used;
+    slots = dep_slots ();
+  }
 
-let hash_stats () = {
-  used_slots = hash_used_slots ();
-  slots = hash_slots ();
-}
+let hash_stats () =
+  let used_slots, nonempty_slots = hash_used_slots () in
+  {
+    nonempty_slots;
+    used_slots;
+    slots = hash_slots ();
+  }
 
 let collect (effort : [ `gentle | `aggressive ]) =
   let old_size = heap_size () in
@@ -233,6 +225,39 @@ let collect (effort : [ `gentle | `aggressive ]) =
   end
 
 let is_heap_overflow () = hh_check_heap_overflow ()
+
+(*****************************************************************************)
+(* Compute size of values in the garbage-collected heap *)
+(*****************************************************************************)
+module HeapSize = struct
+
+  let rec traverse ((visited:ISet.t), acc) r =
+    if Obj.is_block r then begin
+      let p:int = Obj.magic r in
+      if ISet.mem p visited
+      then (visited,acc)
+      else begin
+        let visited' = ISet.add p visited in
+        let n = Obj.size r in
+        let acc' = acc + 1 + n in
+        if Obj.tag r < Obj.no_scan_tag
+        then traverse_fields (visited', acc') r n
+        else (visited', acc')
+      end
+    end else (visited, acc)
+
+  and traverse_fields acc r i =
+    let i = i - 1 in
+    if i < 0 then acc
+    else traverse_fields (traverse acc (Obj.field r i)) r i
+
+  (* Return size in bytes that o occupies in GC heap *)
+  let size r =
+    let (_, w) = traverse (ISet.empty, 0) r in
+    w * (Sys.word_size / 8)
+end
+
+let value_size = HeapSize.size
 
 (*****************************************************************************)
 (* Module returning the MD5 of the key. It's because the code in C land
@@ -307,8 +332,11 @@ end
 module Serial: functor(Value:Value.Type) -> sig
   type t
 
+  (* Serialize a value and log stats *)
   val make : Value.t -> t
-  val get  : t -> Value.t
+
+  (* Log stats for the number of bytes given *)
+  val log_deserialize  : int -> Obj.t -> unit
 
 end = functor(Value:Value.Type) -> struct
   type t = string
@@ -317,34 +345,38 @@ end = functor(Value:Value.Type) -> struct
     let s = Marshal.to_string x [] in
     if hh_log_level() > 0
     then begin
-      let l = String.length s in
-      Measure.sample (Value.description ^ " (serialized bytes)") (float l);
-      Measure.sample ("ALL serialized bytes") (float l)
+      let sharedheap = float (String.length s) in
+      Measure.sample (Value.description ^
+          " (bytes serialized into shared heap)") sharedheap;
+      Measure.sample
+        ("ALL bytes serialized into shared heap") sharedheap
     end;
     s
 
-  let get x  =
-    let r = Marshal.from_string x 0 in
-    if hh_log_level() > 0
-    then begin
-      let l = String.length x in
-      Measure.sample (Value.description ^ " (deserialized bytes)") (float l);
-      Measure.sample ("ALL deserialized bytes") (float l)
-    end;
-    r
+  let log_deserialize l r =
+    let sharedheap = float l in
+    let localheap = float (value_size r) in
+    begin
+      Measure.sample (Value.description
+        ^ " (bytes deserialized from shared heap)") sharedheap;
+      Measure.sample ("ALL bytes deserialized from shared heap") sharedheap;
+      Measure.sample (Value.description
+        ^ " (bytes allocated for deserialized value)") localheap;
+      Measure.sample ("ALL bytes allocated for deserialized value") localheap
+    end
 end
-
 
 (*****************************************************************************)
 (* Raw interface to shared memory (cf hh_shared.c for the underlying
  * representation).
  *)
 (*****************************************************************************)
-module Raw (Key: Key) (Value: sig type t end) = struct
+module Raw (Key: Key) (SerializedValue: sig type t end) (Value:Value.Type) = struct
 
-  external hh_add         : Key.md5 -> Value.t -> unit = "hh_add"
+  external hh_add         : Key.md5 -> SerializedValue.t -> unit = "hh_add"
   external hh_mem         : Key.md5 -> bool            = "hh_mem"
-  external hh_get         : Key.md5 -> Value.t         = "hh_get"
+  external hh_get_size    : Key.md5 -> int             = "hh_get_size"
+  external hh_get_and_deserialize: Key.md5 -> Value.t = "hh_get_and_deserialize"
   external hh_remove      : Key.md5 -> unit            = "hh_remove"
   external hh_move        : Key.md5 -> Key.md5 -> unit = "hh_move"
 end
@@ -383,7 +415,7 @@ module New : functor (Key : Key) -> functor(Value: Value.Type) -> sig
 end = functor (Key : Key) -> functor (Value : Value.Type) -> struct
 
   module Data = Serial(Value)
-  module Raw = Raw (Key) (Data)
+  module Raw = Raw (Key) (Data) (Value)
 
   let add key value = Raw.hh_add (Key.md5 key) (Data.make value)
   let mem key = Raw.hh_mem (Key.md5 key)
@@ -391,7 +423,11 @@ end = functor (Key : Key) -> functor (Value : Value.Type) -> struct
   let get key =
     let key = Key.md5 key in
     if Raw.hh_mem key
-    then Some (Data.get (Raw.hh_get key))
+    then
+      let v = Raw.hh_get_and_deserialize key in
+      if hh_log_level() > 0
+      then (Data.log_deserialize (Raw.hh_get_size key) (Obj.repr v));
+      Some v
     else None
 
   let find_unsafe key =
@@ -431,12 +467,16 @@ module Old : functor (Key : Key) -> functor (Value : Value.Type) -> sig
 end = functor (Key : Key) -> functor (Value: Value.Type) -> struct
 
   module Data = Serial(Value)
-  module Raw = Raw (Key) (Data)
+  module Raw = Raw (Key) (Data) (Value)
 
   let get key =
     let key = Key.md5_old key in
     if Raw.hh_mem key
-    then Some (Data.get (Raw.hh_get key))
+    then
+      let v = Raw.hh_get_and_deserialize key in
+      if hh_log_level() > 0
+      then Data.log_deserialize (Raw.hh_get_size key) (Obj.repr v);
+      Some v
     else None
 
   let mem key = Raw.hh_mem (Key.md5_old key)
@@ -727,16 +767,10 @@ let invalidate_callback_list = ref []
 let invalidate_caches () =
   List.iter !invalidate_callback_list begin fun callback -> callback() end
 
-(*****************************************************************************)
-(* A functor returning an implementation of the S module with caching.
- * We need to avoid constantly deserializing types, because it costs us too
- * much time. The caches keep a deserialized version of the types.
- *)
-(*****************************************************************************)
-module WithCache (UserKeyType : UserKeyType) (Value:Value.Type) = struct
+module LocalCache (UserKeyType : UserKeyType) (Value : Value.Type) = struct
 
   type key = UserKeyType.t
-  type t = Value.t
+  type value = Value.t
 
   module ConfValue = struct
     type value = Value.t
@@ -750,6 +784,64 @@ module WithCache (UserKeyType : UserKeyType) (Value:Value.Type) = struct
   (* Frequent values cache *)
   module L2 = FreqCache (Key) (ConfValue)
 
+  let addWithKey x y =
+    L1.add x y;
+    L2.add x y
+
+  let getWithKey x =
+    match L1.get x with
+    | None ->
+      (match L2.get x with
+       | None -> None
+       | Some v as result ->
+         L1.add x v;
+         result
+      )
+    | Some v as result ->
+      L2.add x v;
+      result
+
+  let removeWithKey x =
+    L1.remove x;
+    L2.remove x
+
+  let add x y =
+    let x = Key.make Value.prefix x in
+    addWithKey x y
+
+  let get x =
+    let x = Key.make Value.prefix x in
+    getWithKey x
+
+  let remove x =
+    let x = Key.make Value.prefix x in
+    removeWithKey x
+
+  let clear () =
+    L1.clear();
+    L2.clear()
+
+  let () =
+    invalidate_callback_list := begin fun () ->
+      L1.clear();
+      L2.clear()
+    end :: !invalidate_callback_list
+
+end
+
+(*****************************************************************************)
+(* A functor returning an implementation of the S module with caching.
+ * We need to avoid constantly deserializing types, because it costs us too
+ * much time. The caches keep a deserialized version of the types.
+ *)
+(*****************************************************************************)
+module WithCache (UserKeyType : UserKeyType) (Value:Value.Type) = struct
+
+  type key = UserKeyType.t
+  type t = Value.t
+
+  module Cache = LocalCache (UserKeyType) (Value)
+  module Key = Cache.Key
   module New = New (Key) (Value)
   module Old = Old (Key) (Value)
   module KeySet = Set.Make (UserKeyType)
@@ -759,8 +851,7 @@ module WithCache (UserKeyType : UserKeyType) (Value:Value.Type) = struct
 
   let add x y =
     let x = Key.make Value.prefix x in
-    L1.add x y;
-    L2.add x y;
+    Cache.addWithKey x y;
     New.add x y
 
   let write_through x y =
@@ -771,25 +862,16 @@ module WithCache (UserKeyType : UserKeyType) (Value:Value.Type) = struct
 
   let get x =
     let x = Key.make Value.prefix x in
-    match L1.get x with
+    match Cache.getWithKey x with
     | None ->
-        (match L2.get x with
-        | None ->
-            (match New.get x with
-            | None ->
-                None
-            | Some v as result ->
-                L1.add x v;
-                L2.add x v;
-                result
-            )
-        | Some v as result ->
-            L1.add x v;
-            result
-        )
+      (match New.get x with
+       | None -> None
+       | Some v as result ->
+         Cache.addWithKey x v;
+         result
+      )
     | Some v as result ->
-        L2.add x v;
-        result
+      result
 
   (* We don't cache old objects, they are not accessed often enough. *)
   let get_old = Direct.get_old
@@ -807,8 +889,7 @@ module WithCache (UserKeyType : UserKeyType) (Value:Value.Type) = struct
 
   let remove x =
     let x = Key.make Value.prefix x in
-    L1.remove x;
-    L2.remove x;
+    Cache.removeWithKey x;
     New.remove x
 
   let get_batch keys =
@@ -820,24 +901,21 @@ module WithCache (UserKeyType : UserKeyType) (Value:Value.Type) = struct
     Direct.oldify_batch keys;
     KeySet.iter begin fun key ->
       let key = Key.make Value.prefix key in
-      L1.remove key;
-      L2.remove key;
+      Cache.removeWithKey key
     end keys
 
   let revive_batch keys =
     Direct.revive_batch keys;
     KeySet.iter begin fun x ->
       let x = Key.make Value.prefix x in
-      L1.remove x;
-      L2.remove x;
+      Cache.removeWithKey x
     end keys
 
   let remove_batch xs = KeySet.iter remove xs
 
   let () =
     invalidate_callback_list := begin fun () ->
-      L1.clear();
-      L2.clear();
+      Cache.clear()
     end :: !invalidate_callback_list
 
   let remove_old x = Old.remove (Key.make_old Value.prefix x)

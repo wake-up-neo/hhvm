@@ -53,18 +53,17 @@ struct ArrayData {
   // kNumKinds-1 since we use these values to index into a table.
   enum ArrayKind : uint8_t {
     kPackedKind = 0,  // PackedArray with keys in range [0..size)
-    kStructKind = 1,  // StructArray with static string keys
-    kMixedKind = 2,   // MixedArray arbitrary int or string keys, maybe holes
-    kEmptyKind = 3,   // The singleton static empty array
-    kApcKind = 4,     // APCLocalArray
-    kGlobalsKind = 5, // GlobalsArray
-    kProxyKind = 6,   // ProxyArray
-    kDictKind = 7,    // MixedArray without implicit conversion of integer-like
+    kMixedKind = 1,   // MixedArray arbitrary int or string keys, maybe holes
+    kEmptyKind = 2,   // The singleton static empty array
+    kApcKind = 3,     // APCLocalArray
+    kGlobalsKind = 4, // GlobalsArray
+    kProxyKind = 5,   // ProxyArray
+    kDictKind = 6,    // MixedArray without implicit conversion of integer-like
                       // string keys
-    kVecKind = 8,     // Vector array (more restrictive PackedArray)
-    kKeysetKind = 9,  // MixedArray storing its keys as values, no implicit
+    kVecKind = 7,     // Vector array (more restrictive PackedArray)
+    kKeysetKind = 8,  // MixedArray storing its keys as values, no implicit
                       // conversions from integer-like string keys
-    kNumKinds = 10    // insert new values before kNumKinds.
+    kNumKinds = 9     // insert new values before kNumKinds.
   };
 
 protected:
@@ -133,9 +132,7 @@ public:
    * Should int-like string keys be implicitly converted to integers before they
    * are inserted?
    */
-  bool useWeakKeys() const {
-    return !isDict() && !isVecArray() && !isKeyset();
-  }
+  bool useWeakKeys() const { return isPHPArray(); }
 
   bool convertKey(const StringData* key, int64_t& i) const;
 
@@ -179,7 +176,6 @@ public:
   bool noCopyOnWrite() const;
 
   bool isPacked() const { return kind() == kPackedKind; }
-  bool isStruct() const { return kind() == kStructKind; }
   bool isMixed() const { return kind() == kMixedKind; }
   bool isApcArray() const { return kind() == kApcKind; }
   bool isGlobalsArray() const { return kind() == kGlobalsKind; }
@@ -190,8 +186,27 @@ public:
   bool isKeyset() const { return kind() == kKeysetKind; }
 
   bool isPackedLayout() const { return isPacked() || isVecArray(); }
-
   bool isMixedLayout() const { return isMixed() || isDict() || isKeyset(); }
+
+  bool isPHPArray() const { return kind() < kDictKind; }
+  bool isHackArray() const { return kind() >= kDictKind; }
+
+  DataType toDataType() const {
+    auto const k = kind();
+    if (k < kDictKind) return KindOfArray;
+    if (k == kVecKind) return KindOfVec;
+    if (k == kDictKind) return KindOfDict;
+    assert(k == kKeysetKind);
+    return KindOfKeyset;
+  }
+  DataType toPersistentDataType() const {
+    auto const k = kind();
+    if (k < kDictKind) return KindOfPersistentArray;
+    if (k == kVecKind) return KindOfPersistentVec;
+    if (k == kDictKind) return KindOfPersistentDict;
+    assert(k == kKeysetKind);
+    return KindOfPersistentKeyset;
+  }
 
   /*
    * Returns whether or not this array contains "vector-like" data.
@@ -397,11 +412,12 @@ public:
   ArrayData* prepend(Cell v, bool copy);
 
   /**
-   * Convert array to hack array types.
+   * Convert array to Hack arrays and vice-versa.
    */
-  ArrayData* toDict();
-  ArrayData* toVec() const;
-  ArrayData* toKeyset();
+  ArrayData* toPHPArray(bool copy);
+  ArrayData* toDict(bool copy);
+  ArrayData* toVec(bool copy);
+  ArrayData* toKeyset(bool copy);
 
   /**
    * Only map classes need this. Re-index all numeric keys to start from 0.
@@ -415,6 +431,16 @@ public:
    */
   int compare(const ArrayData *v2) const;
   bool equal(const ArrayData *v2, bool strict) const;
+
+  static bool Equal(const ArrayData*, const ArrayData*);
+  static bool NotEqual(const ArrayData*, const ArrayData*);
+  static bool Same(const ArrayData*, const ArrayData*);
+  static bool NotSame(const ArrayData*, const ArrayData*);
+  static bool Lt(const ArrayData*, const ArrayData*);
+  static bool Lte(const ArrayData*, const ArrayData*);
+  static bool Gt(const ArrayData*, const ArrayData*);
+  static bool Gte(const ArrayData*, const ArrayData*);
+  static int64_t Compare(const ArrayData*, const ArrayData*);
 
   void setPosition(int32_t p) {
     assert(m_pos == p || !isStatic());
@@ -481,6 +507,9 @@ private:
     static_assert(offsetof(ArrayData, m_hdr) == HeaderOffset, "");
   }
 
+  static bool EqualHelper(const ArrayData*, const ArrayData*, bool);
+  static int64_t CompareHelper(const ArrayData*, const ArrayData*);
+
 protected:
   // error-handling helpers
   static const Variant& getNotFound(int64_t k);
@@ -498,7 +527,6 @@ protected:
   friend struct PackedArray;
   friend struct EmptyArray;
   friend struct MixedArray;
-  friend struct StructArray;
   friend struct BaseVector;
   friend struct c_Vector;
   friend struct c_ImmVector;
@@ -520,7 +548,6 @@ protected:
 };
 
 static_assert(ArrayData::kPackedKind == uint8_t(HeaderKind::Packed), "");
-static_assert(ArrayData::kStructKind == uint8_t(HeaderKind::Struct), "");
 static_assert(ArrayData::kMixedKind == uint8_t(HeaderKind::Mixed), "");
 static_assert(ArrayData::kEmptyKind == uint8_t(HeaderKind::Empty), "");
 static_assert(ArrayData::kApcKind == uint8_t(HeaderKind::Apc), "");
@@ -566,7 +593,7 @@ ALWAYS_INLINE ArrayData* staticEmptyVecArray() {
  */
 struct ArrayFunctions {
   // NK stands for number of array kinds.
-  static auto const NK = size_t{10};
+  static auto const NK = size_t{9};
   void (*release[NK])(ArrayData*);
   const TypedValue* (*nvGetInt[NK])(const ArrayData*, int64_t k);
   const TypedValue* (*nvTryGetInt[NK])(const ArrayData*, int64_t k);
@@ -628,9 +655,10 @@ struct ArrayFunctions {
   ArrayData* (*zSetInt[NK])(ArrayData*, int64_t k, RefData* v);
   ArrayData* (*zSetStr[NK])(ArrayData*, StringData* k, RefData* v);
   ArrayData* (*zAppend[NK])(ArrayData*, RefData* v, int64_t* key_ptr);
-  ArrayData* (*toDict[NK])(ArrayData*);
-  ArrayData* (*toVec[NK])(const ArrayData*);
-  ArrayData* (*toKeyset[NK])(ArrayData*);
+  ArrayData* (*toPHPArray[NK])(ArrayData*, bool);
+  ArrayData* (*toDict[NK])(ArrayData*, bool);
+  ArrayData* (*toVec[NK])(ArrayData*, bool);
+  ArrayData* (*toKeyset[NK])(ArrayData*, bool);
 };
 
 extern const ArrayFunctions g_array_funcs;
@@ -644,11 +672,17 @@ void decRefArr(ArrayData* arr) {
                                                 const ArrayData* ad);
 [[noreturn]] void throwInvalidArrayKeyException(const StringData* key,
                                                 const ArrayData* ad);
-[[noreturn]] void throwOOBArrayKeyException(TypedValue key);
-[[noreturn]] void throwOOBArrayKeyException(int64_t key);
-[[noreturn]] void throwOOBArrayKeyException(const StringData* key);
+[[noreturn]] void throwOOBArrayKeyException(TypedValue key,
+                                            const ArrayData* ad);
+[[noreturn]] void throwOOBArrayKeyException(int64_t key,
+                                            const ArrayData* ad);
+[[noreturn]] void throwOOBArrayKeyException(const StringData* key,
+                                            const ArrayData* ad);
 [[noreturn]] void throwRefInvalidArrayValueException(const ArrayData* ad);
 [[noreturn]] void throwRefInvalidArrayValueException(const Array& arr);
+[[noreturn]] void throwInvalidKeysetOperation();
+[[noreturn]] void throwInvalidAdditionException(const ArrayData* ad);
+[[noreturn]] void throwInvalidMergeException(const ArrayData* ad);
 
 ///////////////////////////////////////////////////////////////////////////////
 }

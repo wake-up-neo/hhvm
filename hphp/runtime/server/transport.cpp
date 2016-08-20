@@ -32,15 +32,16 @@
 #include "hphp/runtime/server/access-log.h"
 #include "hphp/runtime/server/http-protocol.h"
 #include "hphp/runtime/ext/openssl/ext_openssl.h"
-#include "hphp/util/compatibility.h"
+#include "hphp/runtime/ext/string/ext_string.h"
 #include "hphp/util/brotli.h"
+#include "hphp/util/compatibility.h"
 #include "hphp/util/compression.h"
 #include "hphp/util/hardware-counter.h"
 #include "hphp/util/logger.h"
 #include "hphp/util/service-data.h"
 #include "hphp/util/text-util.h"
 #include "hphp/util/timer.h"
-#include "hphp/runtime/ext/string/ext_string.h"
+
 #include <folly/String.h>
 #include <enc/encode.h>
 
@@ -1073,7 +1074,8 @@ void Transport::sendRawInternal(const void *data, int size,
 
   // HTTP header handling
   if (!m_headerSent) {
-    prepareHeaders(compressed, chunked, response, response);
+    prepareHeaders(compressed, chunked, response,
+                   StringHolder(static_cast<const char*>(data), size));
     m_headerSent = true;
   }
 

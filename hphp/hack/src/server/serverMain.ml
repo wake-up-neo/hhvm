@@ -10,7 +10,6 @@
 
 open Core
 open ServerEnv
-open ServerUtils
 open Reordered_argument_collections
 open String_utils
 
@@ -20,13 +19,17 @@ type recheck_loop_stats = {
   (* includes dependencies *)
   total_rechecked_count : int;
   reparsed_files : Relative_path.Set.t;
+  check_later : SSet.t;
 }
+
+type main_loop_stats = recheck_loop_stats ref * string ref
 
 let empty_recheck_loop_stats = {
   rechecked_batches = 0;
   rechecked_count = 0;
   total_rechecked_count = 0;
   reparsed_files = Relative_path.Set.empty;
+  check_later = SSet.empty;
 }
 
 (*****************************************************************************)
@@ -101,6 +104,14 @@ module Program =
         let new_env, total_rechecked = ServerTypeCheck.check genv check_env in
         ServerStamp.touch_stamp_errors (Errors.get_error_list old_env.errorl)
                                        (Errors.get_error_list new_env.errorl);
+        if not @@ Diagnostic_subscription.is_empty new_env.diag_subscribe
+        then begin
+          let id = Diagnostic_subscription.get_id new_env.diag_subscribe in
+          let errors_json = ServerError.get_errorl_json_array new_env.errorl in
+          let res = IdeJson.Diagnostic_response (id, errors_json) in
+          let fd = ServerCommand.get_persistent_fds new_env in
+          ServerCommand.send_response_to_client fd res;
+        end;
         new_env, total_rechecked
       end
 
@@ -110,36 +121,75 @@ module Program =
 (* The main loop *)
 (*****************************************************************************)
 
-let sleep_and_check in_fd =
-  let ready_fd_l, _, _ = Unix.select [in_fd] [] [] (1.0) in
-  ready_fd_l <> []
-
-let handle_connection_ genv env ic oc =
+let handle_connection_ genv env client =
+  let open ServerCommandTypes in
   try
-    ServerCommand.say_hello oc;
-    ServerCommand.handle genv env (ic, oc)
+    match ClientProvider.read_connection_type client with
+    | Persistent ->
+      (match env.persistent_client_fd with
+      | Some _ ->
+        ClientProvider.send_response_to_client client
+          Persistent_client_alredy_exists;
+        env
+      | None ->
+        ClientProvider.send_response_to_client client
+          Persistent_client_connected;
+        let ic, _ = ClientProvider.get_channels client in
+        { env with persistent_client_fd =
+          Some (Timeout.descr_of_in_channel ic)})
+    | Non_persistent ->
+      ServerCommand.handle genv env client
   with
-  | Sys_error("Broken pipe") | ServerCommand.Read_command_timeout ->
-    shutdown_client (ic, oc)
+  | Sys_error("Broken pipe") | Read_command_timeout ->
+    ClientProvider.shutdown_client client;
+    env
   | e ->
     let msg = Printexc.to_string e in
     EventLogger.master_exception msg;
     Printf.fprintf stderr "Error: %s\n%!" msg;
     Printexc.print_backtrace stderr;
-    shutdown_client (ic, oc)
+    ClientProvider.shutdown_client client;
+    env
 
-let handle_connection genv env ic oc =
+let handle_persistent_connection_ genv env client =
+   try
+     ServerCommand.handle genv env client
+   with
+   | Sys_error("Broken pipe") | ServerCommandTypes.Read_command_timeout ->
+     ClientProvider.shutdown_client client;
+     {env with
+     persistent_client_fd = None;
+     edited_files = SMap.empty;
+     diag_subscribe = Diagnostic_subscription.empty;
+     symbols_cache = SMap.empty}
+   | e ->
+     let msg = Printexc.to_string e in
+     EventLogger.master_exception msg;
+     Printf.fprintf stderr "Error: %s\n%!" msg;
+     Printexc.print_backtrace stderr;
+     ClientProvider.shutdown_client client;
+     {env with
+     persistent_client_fd = None;
+     edited_files = SMap.empty;
+     diag_subscribe = Diagnostic_subscription.empty;
+     symbols_cache = SMap.empty}
+
+let handle_connection genv env client is_persistent =
   ServerIdle.stamp_connection ();
-  try handle_connection_ genv env ic oc
+  try match is_persistent with
+    | true -> handle_persistent_connection_ genv env client
+    | false -> handle_connection_ genv env client
   with
   | Unix.Unix_error (e, _, _) ->
      Printf.fprintf stderr "Unix error: %s\n" (Unix.error_message e);
      Printexc.print_backtrace stderr;
-     flush stderr
+     flush stderr;
+     env
   | e ->
      Printf.fprintf stderr "Error: %s\n" (Printexc.to_string e);
      Printexc.print_backtrace stderr;
-     flush stderr
+     flush stderr;
+     env
 
 let recheck genv old_env updates =
   let to_recheck =
@@ -172,8 +222,15 @@ let recheck genv old_env updates =
 let rec recheck_loop acc genv env =
   let t = Unix.gettimeofday () in
   let raw_updates = genv.notifier () in
+  let check_later, raw_updates = match acc.rechecked_batches with
+  | 0 ->
+    let check_later, check_now = SSet.partition (fun s ->
+      File_content.being_edited @@ SMap.find_unsafe s env.edited_files)
+      env.files_to_check in
+    check_later, SSet.union raw_updates check_now
+  | _ -> acc.check_later, raw_updates in
   if SSet.is_empty raw_updates then
-    acc, env
+    acc, { env with files_to_check = check_later }
   else begin
     HackEventLogger.notifier_returned t (SSet.cardinal raw_updates);
     let updates = Program.process_updates genv env raw_updates in
@@ -184,67 +241,92 @@ let rec recheck_loop acc genv env =
         acc.rechecked_count + Relative_path.Set.cardinal rechecked;
       total_rechecked_count = acc.total_rechecked_count + total_rechecked;
       reparsed_files = Relative_path.Set.union updates acc.reparsed_files;
+      check_later;
     } in
     recheck_loop acc genv env
   end
 
 let recheck_loop = recheck_loop empty_recheck_loop_stats
 
-(** Retrieve channels to client from monitor process. *)
-let get_client_channels parent_in_fd =
-  let socket = Libancillary.ancil_recv_fd parent_in_fd in
-  (Timeout.in_channel_of_descr socket), (Unix.out_channel_of_descr socket)
-
-let serve genv env in_fd _ =
-  let env = ref env in
-  let last_stats = ref empty_recheck_loop_stats in
-  let recheck_id = ref (Random_id.short_string ()) in
-  while true do
-    ServerMonitorUtils.exit_if_parent_dead ();
-    let has_client = sleep_and_check in_fd in
-    let has_parsing_hook = !ServerTypeCheck.hook_after_parsing <> None in
-    if not has_client && not has_parsing_hook
-    then begin
-      (* Ugly hack: We want GC_SHAREDMEM_RAN to record the last rechecked
-       * count so that we can figure out if the largest reclamations
-       * correspond to massive rebases. However, the logging call is done in
-       * the SharedMem module, which doesn't know anything about Server stuff.
-       * So we wrap the call here. *)
-      HackEventLogger.with_rechecked_stats
-        !last_stats.rechecked_batches
-        !last_stats.rechecked_count
-        !last_stats.total_rechecked_count
-        ServerIdle.go;
-      recheck_id := Random_id.short_string ();
-    end;
-    let start_t = Unix.gettimeofday () in
-    HackEventLogger.with_id ~stage:`Recheck !recheck_id @@ fun () ->
-    let stats, new_env = recheck_loop genv !env in
-    if stats.rechecked_count > 0 then begin
-      HackEventLogger.recheck_end start_t has_parsing_hook
-        stats.rechecked_batches
-        stats.rechecked_count
-        stats.total_rechecked_count;
-      Hh_logger.log "Recheck id: %s" !recheck_id;
-    end;
-    env := new_env;
-    last_stats := stats;
-    if has_client then
+let serve_one_iteration genv env client_provider stats_refs =
+  let last_stats, recheck_id = stats_refs in
+  ServerMonitorUtils.exit_if_parent_dead ();
+  let per_fd = env.persistent_client_fd in
+  let has_client, has_persistent =
+    ClientProvider.sleep_and_check client_provider per_fd in
+  let has_parsing_hook = !ServerTypeCheck.hook_after_parsing <> None in
+  if not has_persistent && not has_client && not has_parsing_hook
+  then begin
+    (* Ugly hack: We want GC_SHAREDMEM_RAN to record the last rechecked
+     * count so that we can figure out if the largest reclamations
+     * correspond to massive rebases. However, the logging call is done in
+     * the SharedMem module, which doesn't know anything about Server stuff.
+     * So we wrap the call here. *)
+    HackEventLogger.with_rechecked_stats
+      !last_stats.rechecked_batches
+      !last_stats.rechecked_count
+      !last_stats.total_rechecked_count
+      ServerIdle.go;
+    recheck_id := Random_id.short_string ();
+  end;
+  let start_t = Unix.gettimeofday () in
+  HackEventLogger.with_id ~stage:`Recheck !recheck_id @@ fun () ->
+  let stats, env = recheck_loop genv env in
+  if stats.rechecked_count > 0 then begin
+    HackEventLogger.recheck_end start_t has_parsing_hook
+      stats.rechecked_batches
+      stats.rechecked_count
+      stats.total_rechecked_count;
+    Hh_logger.log "Recheck id: %s" !recheck_id;
+  end;
+  last_stats := stats;
+  let env = if has_client then
+    (try
+      let client = ClientProvider.accept_client client_provider in
+      HackEventLogger.got_client_channels start_t;
       (try
-        let ic, oc = get_client_channels in_fd in
-        HackEventLogger.got_client_channels start_t;
-        (try
-          handle_connection genv !env ic oc;
-          HackEventLogger.handled_connection start_t;
-        with
-        | e ->
-          HackEventLogger.handle_connection_exception e;
-          Hh_logger.log "Handling client failed. Ignoring.")
+        let env = handle_connection genv env client false in
+        HackEventLogger.handled_connection start_t;
+        env
       with
       | e ->
-        HackEventLogger.get_client_channels_exception e;
-        Hh_logger.log
-          "Getting Client FDs failed. Ignoring.");
+        HackEventLogger.handle_connection_exception e;
+        Hh_logger.log "Handling client failed. Ignoring.";
+        env)
+    with
+    | e ->
+      HackEventLogger.get_client_channels_exception e;
+      Hh_logger.log
+        "Getting Client FDs failed. Ignoring.";
+      env)
+  else env in
+  if has_persistent then
+    let fd = ServerCommand.get_persistent_fds env in
+    let ic, oc =
+      Timeout.in_channel_of_descr fd, Unix.out_channel_of_descr fd in
+    let client = ClientProvider.client_from_channel_pair (ic, oc) in
+    HackEventLogger.got_persistent_client_channels start_t;
+    (try
+      let env = handle_connection genv env client true in
+      HackEventLogger.handled_persistent_connection start_t;
+      env
+    with
+    | e ->
+      HackEventLogger.handle_persistent_connection_exception e;
+      Hh_logger.log "Handling persistent client failed. Ignoring.";
+      env)
+  else env
+
+let empty_stats () =
+  (ref empty_recheck_loop_stats,
+  ref (Random_id.short_string ()))
+
+let serve genv env in_fd _ =
+  let client_provider = ClientProvider.provider_from_file_descriptor in_fd in
+  let env = ref env in
+  let stats = empty_stats () in
+  while true do
+    env := serve_one_iteration genv !env client_provider stats;
   done
 
 let program_init genv =
@@ -338,9 +420,15 @@ let daemon_main (state, handle, options) (ic, oc) =
   SharedMem.connect handle ~is_master:true;
   ServerGlobalState.restore state;
   try daemon_main_exn (handle, options) (ic, oc)
-  with SharedMem.Out_of_shared_memory ->
+  with
+  | SharedMem.Out_of_shared_memory ->
+    ServerInit.print_hash_stats ();
     Printf.eprintf "Error: failed to allocate in the shared heap.\n%!";
     Exit_status.(exit Out_of_shared_memory)
+  | SharedMem.Hash_table_full ->
+    ServerInit.print_hash_stats ();
+    Printf.eprintf "Error: failed to allocate in the shared hashtable.\n%!";
+    Exit_status.(exit Hash_table_full)
 
 let entry =
   Daemon.register_entry_point "ServerMain.daemon_main" daemon_main

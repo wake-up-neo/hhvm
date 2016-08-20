@@ -17,6 +17,7 @@
 (*****************************************************************************)
 
 open Core
+open Decl_defs
 open Nast
 open Typing_defs
 
@@ -27,16 +28,18 @@ module Inst = Decl_instantiate
 (*****************************************************************************)
 
 type inherited = {
-  ih_cstr     : class_elt option * bool (* consistency required *);
+  ih_substs   : subst_context SMap.t;
+  ih_cstr     : element option * bool (* consistency required *);
   ih_consts   : class_const SMap.t ;
   ih_typeconsts : typeconst_type SMap.t ;
-  ih_props    : class_elt SMap.t ;
-  ih_sprops   : class_elt SMap.t ;
-  ih_methods  : class_elt SMap.t ;
-  ih_smethods : class_elt SMap.t ;
+  ih_props    : element SMap.t ;
+  ih_sprops   : element SMap.t ;
+  ih_methods  : element SMap.t ;
+  ih_smethods : element SMap.t ;
 }
 
 let empty = {
+  ih_substs   = SMap.empty;
   ih_cstr     = None, false;
   ih_consts   = SMap.empty;
   ih_typeconsts = SMap.empty;
@@ -52,50 +55,37 @@ let empty = {
  *)
 (*****************************************************************************)
 
-let is_abstract_method x =
-  match x.ce_type with
-  | _, Tfun x when x.ft_abstract -> true
-  | _ ->  false
-
 let should_keep_old_sig sig_ old_sig =
-  (not (is_abstract_method old_sig) && is_abstract_method sig_)
-  || (is_abstract_method old_sig = is_abstract_method sig_
-     && not (old_sig.ce_synthesized) && sig_.ce_synthesized)
+  (not (old_sig.elt_abstract) && sig_.elt_abstract)
+  || (old_sig.elt_abstract = sig_.elt_abstract
+     && not (old_sig.elt_synthesized) && sig_.elt_synthesized)
 
 let add_method name sig_ methods =
-  match (fst sig_.ce_type), sig_.ce_synthesized with
-    | Reason.Rdynamic_yield _, true ->
-      (* DynamicYield::__call-derived pseudo-methods need to be
-       * rederived at each level *)
-      methods
-    | _ ->
-      (
-        match SMap.get name methods with
-          | None ->
-            (* The method didn't exist so far, let's add it *)
-            SMap.add name sig_ methods
-          | Some old_sig ->
-            if should_keep_old_sig sig_ old_sig
-            (* The then-branch of this if is encountered when the method being
-             * added shouldn't *actually* be added. When's that?
-             * In isolation, we can say that
-             *   - We don't want to override a concrete method with
-             *     an abstract one.
-             *   - We don't want to override a method that's actually
-             *     implemented by the programmer with one that's "synthetic",
-             *     e.g. arising merely from a require-extends declaration in
-             *     a trait.
-             * When these two considerations conflict, we give precedence to
-             * abstractness for determining priority of the method.
-             *)
-            then methods
+  match SMap.get name methods with
+  | None ->
+    (* The method didn't exist so far, let's add it *)
+    SMap.add name sig_ methods
+  | Some old_sig ->
+    if should_keep_old_sig sig_ old_sig
+    (* The then-branch of this if is encountered when the method being
+     * added shouldn't *actually* be added. When's that?
+     * In isolation, we can say that
+     *   - We don't want to override a concrete method with
+     *     an abstract one.
+     *   - We don't want to override a method that's actually
+     *     implemented by the programmer with one that's "synthetic",
+     *     e.g. arising merely from a require-extends declaration in
+     *     a trait.
+     * When these two considerations conflict, we give precedence to
+     * abstractness for determining priority of the method.
+     *)
+    then methods
 
-            (* Otherwise, we *are* overwriting a method definition. This is
-             * OK when a naming conflict is parent class vs trait (trait
-             * wins!), but not really OK when the naming conflict is trait vs
-             * trait (we rely on HHVM to catch the error at runtime) *)
-            else SMap.add name {sig_ with ce_override = false} methods
-      )
+    (* Otherwise, we *are* overwriting a method definition. This is
+     * OK when a naming conflict is parent class vs trait (trait
+     * wins!), but not really OK when the naming conflict is trait vs
+     * trait (we rely on HHVM to catch the error at runtime) *)
+    else SMap.add name {sig_ with elt_override = false} methods
 
 let add_methods methods' acc =
   SMap.fold add_method methods' acc
@@ -175,6 +165,27 @@ let add_constructor (cstr, cstr_consist) (acc, acc_consist) =
   in ce, cstr_consist || acc_consist
 
 let add_inherited inherited acc = {
+  ih_substs = SMap.merge begin fun _ sub old_sub ->
+    match sub, old_sub with
+    | None, None -> None
+    | Some s, None | None, Some s -> Some s
+    (* If the old subst_contexts came via required extends then we want to use
+     * the substitutios from the actual extends instead. I.e.
+     *
+     * class Base<+T> {}
+     *
+     * trait MyTrait { require extends Base<mixed>; }
+     *
+     * class Child extends Base<int> { use MyTrait; }
+     *
+     * Here the subst_context (MyTrait/[T -> mixed]) should be overrode by
+     * (Child/[T -> int]), because it's the actual extension of class Base.
+     *)
+    | Some s, Some old_s
+      when old_s.sc_from_req_extends && (not s.sc_from_req_extends) ->
+      Some s
+    | Some _, Some old_s -> Some old_s
+  end acc.ih_substs inherited.ih_substs;
   ih_cstr     = add_constructor inherited.ih_cstr acc.ih_cstr;
   ih_consts   = SMap.fold add_const inherited.ih_consts acc.ih_consts;
   ih_typeconsts =
@@ -190,60 +201,57 @@ let add_inherited inherited acc = {
 (*****************************************************************************)
 
 let check_arity pos class_name class_type class_parameters =
-  let arity = List.length class_type.tc_tparams in
+  let arity = List.length class_type.dc_tparams in
   if List.length class_parameters <> arity
-  then Errors.class_arity pos class_type.tc_pos class_name arity;
+  then Errors.class_arity pos class_type.dc_pos class_name arity;
   ()
 
 let make_substitution pos class_name class_type class_parameters =
   check_arity pos class_name class_type class_parameters;
-  Inst.make_subst class_type.tc_tparams class_parameters
+  Inst.make_subst class_type.dc_tparams class_parameters
 
-let constructor subst (cstr, consistent) = match cstr with
-  | None -> None, consistent
-  | Some ce ->
-    let ty = Inst.instantiate subst ce.ce_type in
-    Some {ce with ce_type = ty}, consistent
-
-let map_inherited f inh =
-  {
-    ih_cstr     = (Option.map (fst inh.ih_cstr) f), (snd inh.ih_cstr);
-    ih_typeconsts = inh.ih_typeconsts;
-    ih_consts   = inh.ih_consts;
-    ih_props    = SMap.map f inh.ih_props;
-    ih_sprops   = SMap.map f inh.ih_sprops;
-    ih_methods  = SMap.map f inh.ih_methods;
-    ih_smethods = SMap.map f inh.ih_smethods;
+let mark_as_synthesized inh =
+  let mark_elt elt = { elt with elt_synthesized = true } in
+  { inh with
+    ih_substs = SMap.map begin fun sc ->
+      { sc with sc_from_req_extends = true }
+      end inh.ih_substs;
+    ih_cstr     = (Option.map (fst inh.ih_cstr) mark_elt), (snd inh.ih_cstr);
+    ih_props    = SMap.map mark_elt inh.ih_props;
+    ih_sprops   = SMap.map mark_elt inh.ih_sprops;
+    ih_methods  = SMap.map mark_elt inh.ih_methods;
+    ih_smethods = SMap.map mark_elt inh.ih_smethods;
   }
 
 (*****************************************************************************)
 (* Code filtering the private members (useful for inheritance) *)
 (*****************************************************************************)
 
-let filter_private x =
-  SMap.fold begin fun name class_elt acc ->
-    match class_elt.ce_visibility with
-    | Vprivate _ -> acc
-    | Vpublic | Vprotected _ -> SMap.add name class_elt acc
-  end x SMap.empty
+let filter_privates class_type =
+  let is_not_private _ elt = match elt.elt_visibility with
+    | Vprivate _ -> false
+    | Vpublic | Vprotected _ -> true
+  in
+  {
+    class_type with
+    dc_props = SMap.filter is_not_private class_type.dc_props;
+    dc_sprops = SMap.filter is_not_private class_type.dc_sprops;
+    dc_methods = SMap.filter is_not_private class_type.dc_methods;
+    dc_smethods = SMap.filter is_not_private class_type.dc_smethods;
+  }
 
-let chown_private owner =
-  SMap.map begin fun class_elt ->
-    match class_elt.ce_visibility with
-      | Vprivate _ -> {class_elt with ce_visibility = Vprivate owner}
-      | _ -> class_elt end
-
-let apply_fn_to_class_elts fn class_type = {
-  class_type with
-  tc_typeconsts = class_type.tc_typeconsts;
-  tc_props = fn class_type.tc_props;
-  tc_sprops = fn class_type.tc_sprops;
-  tc_methods = fn class_type.tc_methods;
-  tc_smethods = fn class_type.tc_smethods;
-}
-
-let filter_privates = apply_fn_to_class_elts filter_private
-let chown_privates owner = apply_fn_to_class_elts (chown_private owner)
+let chown_privates owner class_type =
+  let chown_private elt = match elt.elt_visibility with
+    | Vprivate _ -> {elt with elt_visibility = Vprivate owner}
+    | Vpublic | Vprotected _ -> elt
+  in
+  {
+    class_type with
+    dc_props = SMap.map chown_private class_type.dc_props;
+    dc_sprops = SMap.map chown_private class_type.dc_sprops;
+    dc_methods = SMap.map chown_private class_type.dc_methods;
+    dc_smethods = SMap.map chown_private class_type.dc_smethods;
+  }
 
 (*****************************************************************************)
 (* Builds the inherited type when the class lives in Hack *)
@@ -251,9 +259,8 @@ let chown_privates owner = apply_fn_to_class_elts (chown_private owner)
 
 let inherit_hack_class env c p class_name class_type argl =
   let subst = make_substitution p class_name class_type argl in
-  let instantiate = SMap.map (Inst.instantiate_ce subst) in
   let class_type =
-    match class_type.tc_kind with
+    match class_type.dc_kind with
     | Ast.Ctrait ->
         (* Change the private visibility to point to the inheriting class *)
         chown_privates (snd c.c_name) class_type
@@ -262,15 +269,21 @@ let inherit_hack_class env c p class_name class_type argl =
     | Ast.Cenum -> class_type
   in
   let typeconsts = SMap.map (Inst.instantiate_typeconst subst)
-    class_type.tc_typeconsts in
-  let consts = SMap.map (Inst.instantiate_cc subst) class_type.tc_consts in
-  let props    = instantiate class_type.tc_props in
-  let sprops   = instantiate class_type.tc_sprops in
-  let methods  = instantiate class_type.tc_methods in
-  let smethods = instantiate class_type.tc_smethods in
+    class_type.dc_typeconsts in
+  let consts = SMap.map (Inst.instantiate_cc subst) class_type.dc_consts in
+  let props    = class_type.dc_props in
+  let sprops   = class_type.dc_sprops in
+  let methods = class_type.dc_methods in
+  let smethods = class_type.dc_smethods in
   let cstr     = Decl_env.get_construct env class_type in
-  let cstr     = constructor subst cstr in
+  let subst_ctx = {
+    sc_subst = subst;
+    sc_class_context = snd c.c_name;
+    sc_from_req_extends = false;
+  } in
+  let substs = SMap.add class_name subst_ctx class_type.dc_substs in
   let result = {
+    ih_substs   = substs;
     ih_cstr     = cstr;
     ih_consts   = consts;
     ih_typeconsts = typeconsts;
@@ -285,9 +298,9 @@ let inherit_hack_class env c p class_name class_type argl =
 let inherit_hack_class_constants_only p class_name class_type argl =
   let subst = make_substitution p class_name class_type argl in
   let instantiate = SMap.map (Inst.instantiate_cc subst) in
-  let consts  = instantiate class_type.tc_consts in
+  let consts  = instantiate class_type.dc_consts in
   let typeconsts = SMap.map (Inst.instantiate_typeconst subst)
-    class_type.tc_typeconsts in
+    class_type.dc_typeconsts in
   let result = { empty with
     ih_consts   = consts;
     ih_typeconsts = typeconsts;
@@ -296,14 +309,12 @@ let inherit_hack_class_constants_only p class_name class_type argl =
 
 (* This logic deals with importing XHP attributes from an XHP class
    via the "attribute :foo;" syntax. *)
-let inherit_hack_xhp_attrs_only p class_name class_type argl =
-  let subst = make_substitution p class_name class_type argl in
+let inherit_hack_xhp_attrs_only class_type =
   (* Filter out properties that are not XHP attributes *)
   let props =
-    SMap.fold begin fun name class_elt acc ->
-      if class_elt.ce_is_xhp_attr then SMap.add name class_elt acc else acc
-    end class_type.tc_props SMap.empty in
-  let props = SMap.map (Inst.instantiate_ce subst) props in
+    SMap.fold begin fun name prop acc ->
+      if prop.elt_is_xhp_attr then SMap.add name prop acc else acc
+    end class_type.dc_props SMap.empty in
   let result = { empty with ih_props = props; } in
   result
 
@@ -335,8 +346,7 @@ let from_class_constants_only env hint =
     inherit_hack_class_constants_only pos class_name class_ class_params
 
 let from_class_xhp_attrs_only env hint =
-  let pos, class_name, class_params = Decl_utils.unwrap_class_hint hint in
-  let class_params = List.map class_params (Decl_hint.hint env) in
+  let _pos, class_name, _class_params = Decl_utils.unwrap_class_hint hint in
   let class_type = Decl_env.get_class_dep env class_name in
   match class_type with
   | None ->
@@ -344,7 +354,7 @@ let from_class_xhp_attrs_only env hint =
     empty
   | Some class_ ->
     (* The class lives in Hack *)
-    inherit_hack_xhp_attrs_only pos class_name class_ class_params
+    inherit_hack_xhp_attrs_only class_
 
 let from_parent env c =
   let extends =
@@ -362,9 +372,7 @@ let from_parent env c =
 
 let from_requirements env c acc reqs =
   let inherited = from_class env c reqs in
-  let inherited = map_inherited
-    (fun ce -> { ce with ce_synthesized = true })
-    inherited in
+  let inherited = mark_as_synthesized inherited in
   add_inherited inherited acc
 
 let from_trait env c acc uses =

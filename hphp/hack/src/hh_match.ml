@@ -78,7 +78,7 @@ type match_ret =
 let parse_file file : match_ret * string * Parser_hack.parser_return =
   let abs_fn = Path.to_string file in
   let content = Sys_utils.cat abs_fn in
-  let parsing_errors, parser_output =
+  let parsing_errors, parser_output, _ =
     Errors.do_
       (fun () ->
        let rp = path_to_relative file in
@@ -294,7 +294,7 @@ let match_job pat_info acc fnl =
 (*****************************************************************************)
 
 let () =
-  let handle = SharedMem.init_default () in
+  let handle = SharedMem.init GlobalConfig.default_sharedmem_config in
   PidLog.log_oc := Some (open_out Sys_utils.null_path);
   let files, pattern, target, format_patches, verbose, showpatch, expr_mode,
     stmt_mode = parse_args() in

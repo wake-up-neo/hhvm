@@ -347,6 +347,8 @@ Vreg emitLdObjClass(Vout& v, Vreg obj, Vreg d) {
 }
 
 Vreg emitLdClsCctx(Vout& v, Vreg src, Vreg dst) {
+  static_assert(ActRec::kHasClassBit == 1,
+                "Fix the decq if you change kHasClassBit");
   v << decq{src, dst, v.makeReg()};
   return dst;
 }
@@ -409,6 +411,8 @@ void emitEagerSyncPoint(Vout& v, PC pc, Vreg rds, Vreg vmfp, Vreg vmsp) {
 
 void emitTransCounterInc(Vout& v) {
   if (!mcg->tx().isTransDBEnabled()) return;
+  // Translator::getTransCounterAddr is not thread-safe.
+  assertx(!RuntimeOption::EvalJitConcurrently);
   auto t = v.cns(mcg->tx().getTransCounterAddr());
   v << incqmlock{*t, v.makeReg()};
 }

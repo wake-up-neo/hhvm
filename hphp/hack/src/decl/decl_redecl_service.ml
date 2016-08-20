@@ -62,7 +62,7 @@ let get_decl_failures decl_errors fn =
   end ~init:Relative_path.Set.empty
 
 let on_the_fly_decl_file tcopt (errors, failed) fn =
-  let decl_errors, () = Errors.do_ begin fun () ->
+  let decl_errors, (), _ = Errors.do_ begin fun () ->
     Decl.make_env tcopt fn
   end in
   let failed' = get_decl_failures (Errors.get_error_list decl_errors) fn in
@@ -145,17 +145,17 @@ let compute_deps fast filel =
   let { FileInfo.n_classes; n_funs; n_types; n_consts } = names in
   let acc = DepSet.empty, DepSet.empty in
   (* Fetching everything at once is faster *)
-  let old_funs = Typing_heap.Funs.get_old_batch n_funs in
+  let old_funs = Decl_heap.Funs.get_old_batch n_funs in
   let acc = compute_funs_deps old_funs acc n_funs in
 
-  let old_types = Typing_heap.Typedefs.get_old_batch n_types in
+  let old_types = Decl_heap.Typedefs.get_old_batch n_types in
   let acc = compute_types_deps old_types acc n_types in
 
-  let old_consts = Typing_heap.GConsts.get_old_batch n_consts in
+  let old_consts = Decl_heap.GConsts.get_old_batch n_consts in
   let acc = compute_gconsts_deps old_consts acc n_consts in
 
-  let old_classes = Typing_heap.Classes.get_old_batch n_classes in
-  let new_classes = Typing_heap.Classes.get_batch n_classes in
+  let old_classes = Decl_heap.Classes.get_old_batch n_classes in
+  let new_classes = Decl_heap.Classes.get_batch n_classes in
   let compare_classes = compute_classes_deps old_classes new_classes in
   let (to_redecl, to_recheck) = compare_classes acc n_classes in
 
@@ -196,7 +196,6 @@ let merge_compute_deps (to_redecl1, to_recheck1) (to_redecl2, to_recheck2) =
 (*****************************************************************************)
 (* The parallel worker *)
 (*****************************************************************************)
-
 let parallel_otf_decl workers bucket_size tcopt fast fnl =
   try
     OnTheFlyStore.store (tcopt, fast);
@@ -206,7 +205,7 @@ let parallel_otf_decl workers bucket_size tcopt fast fnl =
         ~job:load_and_otf_decl_files
         ~neutral:otf_neutral
         ~merge:merge_on_the_fly
-        ~next:(Bucket.make ~max_size:bucket_size fnl)
+        ~next:(MultiWorker.next ~max_size:bucket_size workers fnl)
     in
     let to_redecl, to_recheck =
       MultiWorker.call
@@ -214,7 +213,7 @@ let parallel_otf_decl workers bucket_size tcopt fast fnl =
         ~job:load_and_compute_deps
         ~neutral:compute_deps_neutral
         ~merge:merge_compute_deps
-        ~next:(Bucket.make ~max_size:bucket_size fnl)
+        ~next:(MultiWorker.next ~max_size:bucket_size workers fnl)
     in
     OnTheFlyStore.clear();
     errors, failed, to_redecl, to_recheck
@@ -227,20 +226,21 @@ let parallel_otf_decl workers bucket_size tcopt fast fnl =
 (*****************************************************************************)
 (* Code invalidating the heap *)
 (*****************************************************************************)
-
-let invalidate_heap { FileInfo.n_funs; n_classes; n_types; n_consts } =
-  Typing_heap.Funs.oldify_batch n_funs;
-  Typing_heap.Classes.oldify_batch n_classes;
-  Typing_heap.Typedefs.oldify_batch n_types;
-  Typing_heap.GConsts.oldify_batch n_consts;
+let invalidate_heap { FileInfo.n_funs; n_classes; n_types; n_consts } elems =
+  Decl_heap.Funs.oldify_batch n_funs;
+  Decl_class_elements.oldify_all elems;
+  Decl_heap.Classes.oldify_batch n_classes;
+  Decl_heap.Typedefs.oldify_batch n_types;
+  Decl_heap.GConsts.oldify_batch n_consts;
   SharedMem.collect `gentle;
   ()
 
-let remove_old_defs { FileInfo.n_funs; n_classes; n_types; n_consts } =
-  Typing_heap.Funs.remove_old_batch n_funs;
-  Typing_heap.Classes.remove_old_batch n_classes;
-  Typing_heap.Typedefs.remove_old_batch n_types;
-  Typing_heap.GConsts.remove_old_batch n_consts;
+let remove_old_defs { FileInfo.n_funs; n_classes; n_types; n_consts } elems =
+  Decl_heap.Funs.remove_old_batch n_funs;
+  Decl_class_elements.remove_old_all elems;
+  Decl_heap.Classes.remove_old_batch n_classes;
+  Decl_heap.Typedefs.remove_old_batch n_types;
+  Decl_heap.GConsts.remove_old_batch n_consts;
   SharedMem.collect `gentle;
   ()
 
@@ -256,7 +256,24 @@ let get_defs fast =
 let redo_type_decl workers ~bucket_size tcopt fast =
   let fnl = Relative_path.Map.keys fast in
   let defs = get_defs fast in
-  invalidate_heap defs;
+  let classes = SSet.elements defs.FileInfo.n_classes in
+  (* Getting the members of a class requires fetching the class from the heap.
+   * Doing this for too many classes will cause a large amount of allocations
+   * to be performed on the master process triggering the GC and slowing down
+   * redeclaration. Using the workers prevents this from occurring
+   *)
+  let elems = if List.length classes < 10
+    then
+      Decl_class_elements.get_for_classes classes
+    else
+      MultiWorker.call
+        workers
+        ~job:(fun _ c -> Decl_class_elements.get_for_classes c)
+        ~merge:SMap.union
+        ~neutral:SMap.empty
+        ~next:(MultiWorker.next ~max_size:bucket_size workers classes)
+  in
+  invalidate_heap defs elems;
   (* If there aren't enough files, let's do this ourselves ... it's faster! *)
   let result =
     if List.length fnl < 10
@@ -266,5 +283,5 @@ let redo_type_decl workers ~bucket_size tcopt fast =
       errors, failed, to_redecl, to_recheck
     else parallel_otf_decl workers bucket_size tcopt fast fnl
   in
-  remove_old_defs defs;
+  remove_old_defs defs elems;
   result

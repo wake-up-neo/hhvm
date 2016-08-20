@@ -47,11 +47,13 @@
 #include "hphp/runtime/vm/jit/stack-overflow.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/unique-stubs-arm.h"
+#include "hphp/runtime/vm/jit/unique-stubs-ppc64.h"
 #include "hphp/runtime/vm/jit/unique-stubs-x64.h"
 #include "hphp/runtime/vm/jit/unwind-itanium.h"
 #include "hphp/runtime/vm/jit/vasm-gen.h"
 #include "hphp/runtime/vm/jit/vasm-instr.h"
 #include "hphp/runtime/vm/jit/vasm-reg.h"
+#include "hphp/runtime/vm/jit/vtune-jit.h"
 
 #include "hphp/runtime/ext/asio/asio-blockable.h"
 #include "hphp/runtime/ext/asio/asio-context.h"
@@ -1104,8 +1106,8 @@ TCA emitDecRefGeneric(CodeBlock& cb, DataBlock& data) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-TCA emitEnterTCHelper(CodeBlock& cb, DataBlock& data, UniqueStubs& us) {
-  us.enterTCExit = vwrap(cb, data, [&] (Vout& v) {
+TCA emitEnterTCExit(CodeBlock& cb, DataBlock& data, UniqueStubs& us) {
+  return vwrap(cb, data, [&] (Vout& v) {
     // Eagerly save VM regs and realign the native stack.
     storeVMRegs(v);
 
@@ -1133,7 +1135,9 @@ TCA emitEnterTCHelper(CodeBlock& cb, DataBlock& data, UniqueStubs& us) {
     // Perform a native return.
     v << stubret{RegSet(), true};
   });
+}
 
+TCA emitEnterTCHelper(CodeBlock& cb, DataBlock& data, UniqueStubs& us) {
   alignJmpTarget(cb);
 
   auto const sp       = rarg(0);
@@ -1151,6 +1155,9 @@ TCA emitEnterTCHelper(CodeBlock& cb, DataBlock& data, UniqueStubs& us) {
   return vwrap2(cb, cb, data, [&] (Vout& v, Vout& vc) {
     // Native func prologue.
     v << stublogue{true};
+
+    // Architecture-specific setup for entering the TC.
+    v << inittc{};
 
 #if defined(__CYGWIN__) || defined(__MINGW__) || defined(_MSC_VER)
     // Windows hates argument registers.
@@ -1265,10 +1272,10 @@ TCA emitEndCatchHelper(CodeBlock& cb, DataBlock& data, UniqueStubs& us) {
   CGMeta meta;
 
   auto const resumeCPPUnwind = vwrap(cb, data, meta, [&] (Vout& v) {
-    static_assert(sizeof(tl_regState) == 1,
+    static_assert(sizeof(tl_regState) == 8,
                   "The following store must match the size of tl_regState.");
     auto const regstate = emitTLSAddr(v, tls_datum(tl_regState));
-    v << storebi{static_cast<int32_t>(VMRegState::CLEAN), regstate};
+    v << storeqi{static_cast<int32_t>(VMRegState::CLEAN), regstate};
 
     v << load{rvmtl()[unwinderExnOff()], rarg(0)};
     v << call{TCA(_Unwind_Resume), arg_regs(1), &us.endCatchHelperPast};
@@ -1334,9 +1341,14 @@ void UniqueStubs::emitAll(CodeCache& code, Debug::DebugInfo& dbg) {
     return hotBlock.available() > 512 ? hotBlock : main;
   };
 
-  enterTCHelper = decltype(enterTCHelper)(emitEnterTCHelper(main, data, *this));
-
 #define ADD(name, stub) name = add(#name, (stub), code, dbg)
+  ADD(enterTCExit,   emitEnterTCExit(main, data, *this));
+  enterTCHelper =
+    decltype(enterTCHelper)(add("enterTCHelper",
+                                emitEnterTCHelper(main, data, *this),
+                                code,
+                                dbg));
+
   // These guys are required by a number of other stubs.
   ADD(handleSRHelper, emitHandleSRHelper(cold, data));
   ADD(endCatchHelper, emitEndCatchHelper(frozen, data, *this));
@@ -1406,6 +1418,19 @@ TCA UniqueStubs::add(const char* name, TCA start,
   if (!RuntimeOption::EvalJitNoGdb) {
     dbg.recordStub(Debug::TCRange(start, end, &cb == &code.cold()),
                    folly::sformat("HHVM::{}", name));
+  }
+  if (RuntimeOption::EvalJitUseVtuneAPI) {
+    reportHelperToVtune(folly::sformat("HHVM::{}", name).c_str(),
+                        start,
+                        end);
+  }
+  if (RuntimeOption::EvalPerfPidMap) {
+    dbg.recordPerfMap(Debug::TCRange(start, end, &cb == &code.cold()),
+                      SrcKey{},
+                      nullptr,
+                      false,
+                      false,
+                      folly::sformat("HHVM::{}", name));
   }
 
   auto const newStub = StubRange{name, start, end};

@@ -155,6 +155,9 @@ let builtins =
   "function is_string(mixed $x): bool {}\n"^
   "function is_null(mixed $x): bool {}\n"^
   "function is_array(mixed $x): bool {}\n"^
+  "function is_vec(mixed $x): bool {}\n"^
+  "function is_dict(mixed $x): bool {}\n"^
+  "function is_keyset(mixed $x): bool {}\n"^
   "function is_resource(mixed $x): bool {}\n"^
   "interface IMemoizeParam {\n"^
   "  public function getInstanceKey(): string;\n"^
@@ -194,6 +197,7 @@ let builtins =
   "interface Indexish<+Tk, +Tv> extends KeyedContainer<Tk, Tv> {}\n"^
   "abstract final class dict<+Tk, +Tv> implements Indexish<Tk, Tv> {}\n"^
   "function dict<Tk, Tv>(KeyedTraversable<Tk, Tv> $arr): dict<Tk, Tv> {}\n"^
+  "abstract final class keyset<+T as arraykey> implements Indexish<T, T> {}\n"^
   "abstract final class vec<+Tv> implements Indexish<int, Tv> {}\n"^
   "function meth_caller(string $cls_name, string $meth_name);\n"
 
@@ -554,7 +558,7 @@ let decl_and_run_mode {filename; mode; no_builtins} =
   let files_contents = file_to_files filename in
   let tcopt = TypecheckerOptions.default in
 
-  let errors, files_info = Errors.do_ begin fun () ->
+  let errors, files_info, _ = Errors.do_ begin fun () ->
     let parsed_files =
       Relative_path.Map.mapi Parser_hack.program files_contents in
     let parsed_builtins = Parser_hack.program builtins_filename builtins in
@@ -589,7 +593,7 @@ let main_hack ({filename; mode; no_builtins;} as opts) =
   Sys_utils.signal Sys.sigusr1
     (Sys.Signal_handle Typing.debug_print_last_pos);
   EventLogger.init (Daemon.devnull ()) 0.0;
-  let _handle = SharedMem.init_default () in
+  let _handle = SharedMem.init GlobalConfig.default_sharedmem_config in
   let tmp_hhi = Path.concat (Path.make Sys_utils.temp_dir_name) "hhi" in
   Hhi.set_hhi_root_for_unit_test tmp_hhi;
   match mode with

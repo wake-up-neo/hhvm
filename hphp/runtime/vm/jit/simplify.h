@@ -62,7 +62,7 @@ struct SimplifyResult {
   jit::vector<IRInstruction*> instrs;
   SSATmp* dst;
 };
-SimplifyResult simplify(IRUnit&, const IRInstruction*, bool typesMightRelax);
+SimplifyResult simplify(IRUnit&, IRInstruction*, bool typesMightRelax);
 
 /*
  * Instruction stream modifying simplification routine.
@@ -111,6 +111,11 @@ bool canSimplifyAssertType(const IRInstruction* inst,
  */
 void copyProp(IRInstruction*);
 
+/*
+ * Replace inputs with known values with constants
+ */
+void constProp(IRUnit&, IRInstruction*, bool typesMightRelax);
+
 //////////////////////////////////////////////////////////////////////
 
 /*
@@ -131,7 +136,25 @@ PackedBounds packedArrayBoundsStaticCheck(Type, int64_t key);
  * contexts where the bounds are not statically known, TInitNull must be
  * unioned in for correctness.)
  */
-Type packedArrayElemType(SSATmp* arr, SSATmp* idx);
+Type packedArrayElemType(SSATmp* arr, SSATmp* idx, const Class* ctx);
+
+/*
+ * Get the type of `arr[idx]` for different Hack array types, considering
+ * constness, staticness, and RAT types.
+ *
+ * Note that these functions do not require the existence of `arr[idx]`. If we
+ * can statically determine that the access is out of bounds, TBottom is
+ * returned. Otherwise we return a type `t`, such that when the access is within
+ * bounds, `arr[idx].isA(t)` holds. (This, if this function is used in contexts
+ * where the bounds are not statically known, one must account for the opcode
+ * specific behavior of the failure case).
+ *
+ * `idx` is optional. If not provided, a more conservative type is returned
+ * which holds for all elements in the array.
+ */
+Type vecElemType(SSATmp* arr, SSATmp* idx);
+Type dictElemType(SSATmp* arr, SSATmp* idx);
+Type keysetElemType(SSATmp* arr, SSATmp* idx);
 
 //////////////////////////////////////////////////////////////////////
 

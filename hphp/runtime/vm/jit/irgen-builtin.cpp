@@ -60,6 +60,7 @@ const StaticString
   s_floor("floor"),
   s_abs("abs"),
   s_ord("ord"),
+  s_chr("chr"),
   s_func_num_args("__SystemLib\\func_num_arg_"),
   s_one("1"),
   s_empty("");
@@ -96,11 +97,11 @@ SSATmp* is_a_impl(IRGS& env, uint32_t numArgs, bool subclassOnly) {
 
   auto const objCls = gen(env, LdObjClass, obj);
 
-  SSATmp* testCls = nullptr;
-  if (auto const cls = Unit::lookupClassOrUniqueClass(classname->strVal())) {
-    if (classIsUniqueOrCtxParent(env, cls)) testCls = cns(env, cls);
-  }
-  if (testCls == nullptr) return nullptr;
+  auto const cls = Unit::lookupUniqueClassInContext(classname->strVal(),
+                                                    curClass(env));
+  if (!cls) return nullptr;
+
+  auto const testCls = cns(env, cls);
 
   // is_a() finishes here.
   if (!subclassOnly) return gen(env, InstanceOf, objCls, testCls);
@@ -187,6 +188,18 @@ SSATmp* opt_ord(IRGS& env, uint32_t numArgs) {
   if (arg->hasConstVal(TDbl)) {
     const auto conv = folly::to<std::string>(arg_type.dblVal());
     return cns(env, int64_t{conv[0]});
+  }
+
+  return nullptr;
+}
+
+SSATmp* opt_chr(IRGS& env, uint32_t numArgs) {
+  if (numArgs != 1) return nullptr;
+
+  auto const arg = topC(env, BCSPRelOffset{0});
+  auto const arg_type = arg->type();
+  if (arg_type <= TInt) {
+    return gen(env, ChrInt, arg);
   }
 
   return nullptr;
@@ -456,7 +469,7 @@ SSATmp* opt_abs(IRGS& env, uint32_t numArgs) {
   }
 
   if (value->type() <= TDbl) return gen(env, AbsDbl, value);
-  if (value->type() <= TArr) return cns(env, false);
+  if (value->type() <= TArrLike) return cns(env, false);
 
   return nullptr;
 }
@@ -502,6 +515,7 @@ bool optimizedFCallBuiltin(IRGS& env,
     X(floor)
     X(abs)
     X(ord)
+    X(chr)
     X(func_num_args)
     X(max2)
     X(min2)
@@ -1240,8 +1254,7 @@ void nativeImplInlined(IRGS& env) {
   auto const numArgs = callee->numParams();
   auto const paramThis = [&] () -> SSATmp* {
     if (!callee->isMethod()) return nullptr;
-    if (callee->isStatic() && !callee->isNative()) return nullptr;
-    auto ctx = gen(env, LdCtx, fp(env));
+    auto ctx = ldCtx(env);
     if (callee->isStatic()) return gen(env, LdClsCtx, ctx);
     return gen(env, CastCtxThis, ctx);
   }();
@@ -1366,8 +1379,7 @@ void emitNativeImpl(IRGS& env) {
     return;
   }
 
-  auto thiz = callee->isMethod() && (!callee->isStatic() || callee->isNative())
-    ? gen(env, LdCtx, fp(env)) : nullptr;
+  auto thiz = callee->isMethod() ? ldCtx(env) : nullptr;
   auto const numParams = gen(env, LdARNumParams, fp(env));
 
   ifThenElse(
@@ -1530,6 +1542,77 @@ void implMapIdx(IRGS& env) {
   finish(pelem);
 }
 
+void implVecIdx(IRGS& env) {
+  auto const def = popC(env);
+  auto const key = popC(env);
+  auto const vec = popC(env);
+
+  assertx(vec->isA(TVec));
+
+  auto const finish = [&](SSATmp* elem) {
+    pushIncRef(env, elem);
+    decRef(env, def);
+    decRef(env, key);
+    decRef(env, vec);
+  };
+
+  if (key->isA(TNull | TStr)) return finish(def);
+
+  if (!key->isA(TInt)) {
+    gen(env, ThrowInvalidArrayKey, vec, key);
+    return;
+  }
+
+  auto const elem = cond(
+    env,
+    [&] (Block* taken) {
+      auto const length = gen(env, CountVec, vec);
+      auto const cmp = gen(env, CheckRange, key, length);
+      gen(env, JmpZero, taken, cmp);
+    },
+    [&] { return gen(env, LdVecElem, vec, key); },
+    [&] { return def; }
+  );
+
+  auto const pelem = profiledType(env, elem, [&] { finish(elem); } );
+  finish(pelem);
+}
+
+void implDictKeysetIdx(IRGS& env, bool is_dict) {
+  auto const def = popC(env);
+  auto const key = popC(env);
+  auto const base = popC(env);
+
+  assertx(base->isA(is_dict ? TDict : TKeyset));
+
+  auto const finish = [&](SSATmp* elem) {
+    pushIncRef(env, elem);
+    decRef(env, def);
+    decRef(env, key);
+    decRef(env, base);
+  };
+
+  if (key->isA(TNull)) return finish(def);
+
+  if (!key->isA(TInt) && !key->isA(TStr)) {
+    gen(env, ThrowInvalidArrayKey, base, key);
+    return;
+  }
+
+  auto const elem = profiledArrayAccess(env, base, key,
+    [&] (SSATmp* base, SSATmp* key, uint32_t pos) {
+      return gen(env, is_dict ? DictGetK : KeysetGetK, IndexData { pos },
+                 base, key);
+    },
+    [&] (SSATmp* key) {
+      return gen(env, is_dict ? DictIdx : KeysetIdx, base, key, def);
+    }
+  );
+
+  auto const pelem = profiledType(env, elem, [&] { finish(elem); });
+  finish(pelem);
+}
+
 const StaticString s_idx("hh\\idx");
 
 void implGenericIdx(IRGS& env) {
@@ -1593,6 +1676,10 @@ TypeConstraint idxBaseConstraint(Type baseType, Type keyType,
 
 void emitArrayIdx(IRGS& env) {
   auto const arrType = topC(env, BCSPRelOffset{2}, DataTypeGeneric)->type();
+  if (arrType <= TVec) return implVecIdx(env);
+  if (arrType <= TDict) return implDictKeysetIdx(env, true);
+  if (arrType <= TKeyset) return implDictKeysetIdx(env, false);
+
   if (!(arrType <= TArr)) {
     // raise fatal
     interpOne(env, TCell, 3);
@@ -1607,6 +1694,10 @@ void emitIdx(IRGS& env) {
   auto const base     = topC(env, BCSPRelOffset{2}, DataTypeGeneric);
   auto const keyType  = key->type();
   auto const baseType = base->type();
+
+  if (baseType <= TVec) return implVecIdx(env);
+  if (baseType <= TDict) return implDictKeysetIdx(env, true);
+  if (baseType <= TKeyset) return implDictKeysetIdx(env, false);
 
   if (keyType <= TNull || !baseType.maybe(TArr | TObj | TStr)) {
     auto const def = popC(env, DataTypeGeneric);
@@ -1652,6 +1743,46 @@ void emitIdx(IRGS& env) {
 void emitAKExists(IRGS& env) {
   auto const arr = popC(env);
   auto key = popC(env);
+
+  if (arr->isA(TVec)) {
+    if (key->isA(TNull | TStr)) {
+      push(env, cns(env, false));
+      decRef(env, arr);
+      decRef(env, key);
+      return;
+    }
+    if (!key->isA(TInt)) {
+      gen(env, ThrowInvalidArrayKey, arr, key);
+      return;
+    }
+    auto const length = gen(env, CountVec, arr);
+    push(env, gen(env, CheckRange, key, length));
+    decRef(env, arr);
+    return;
+  }
+
+  if (arr->isA(TDict) || arr->isA(TKeyset)) {
+    if (key->isA(TNull)) {
+      push(env, cns(env, false));
+      decRef(env, arr);
+      decRef(env, key);
+      return;
+    }
+    if (!key->isA(TInt) && !key->isA(TStr)) {
+      gen(env, ThrowInvalidArrayKey, arr, key);
+      return;
+    }
+    auto const val = gen(
+      env,
+      arr->isA(TDict) ? AKExistsDict : AKExistsKeyset,
+      arr,
+      key
+    );
+    push(env, val);
+    decRef(env, arr);
+    decRef(env, key);
+    return;
+  }
 
   if (!arr->isA(TArr) && !arr->isA(TObj)) PUNT(AKExists_badArray);
 

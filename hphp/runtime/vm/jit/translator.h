@@ -196,10 +196,9 @@ struct Translator {
   void addTranslation(const TransRec& transRec);
 
   /*
-   * Get the TransID of the current (or next, if there is no current)
-   * translation.
+   * Get the number of translations added (0 if the TransDB is not enabled).
    */
-  TransID getCurrentTransID() const;
+  size_t getNumTranslations() const;
 
   /*
    * Get the translation counter for `transId'.
@@ -209,7 +208,7 @@ struct Translator {
   uint64_t getTransCounter(TransID transId) const;
 
   /*
-   * Get a pointer to the translation counter for getCurrentTransID().
+   * Get a pointer to the translation counter for the current translation.
    *
    * Return nullptr if the TransDB is not enabled.
    */
@@ -392,6 +391,12 @@ enum OutTypeConstraints {
   OutInt64,
   OutArray,
   OutArrayImm,
+  OutVec,
+  OutVecImm,
+  OutDict,
+  OutDictImm,
+  OutKeyset,
+  OutKeysetImm,
   OutObject,
   OutResource,
   OutThisObject,        // Object from current environment
@@ -402,7 +407,9 @@ enum OutTypeConstraints {
   OutCns,               // Constant; may be known at compile-time
   OutVUnknown,          // type is V(unknown)
 
-  OutSameAsInput,       // type is the same as the first stack input
+  OutSameAsInput1,      // type is the same as the first stack input
+  OutSameAsInput2,      // type is the same as the second stack input
+  OutSameAsInput3,      // type is the same as the third stack input
   OutCInput,            // type is C(input)
   OutVInput,            // type is V(input)
   OutCInputL,           // type is C(type) of local input
@@ -523,26 +530,30 @@ bool builtinFuncDestroysLocals(const Func* callee);
  * This routine attempts to find the Func* that will be called for a given
  * target Class and function name, when called from ctxFunc.  This function
  * determines if a given Func* will be called in a request-insensitive way
- * (i.e. suitable for burning into the TC as a pointer).  The class we are
- * targeting is assumed to be a subclass of `cls', not exactly `cls', unless
- * exactClass is true.
+ * (i.e. suitable for burning into the TC as a pointer).
  *
- * This function should not be used in a context where the call may involve late
- * static binding (i.e. FPushClsMethod), since it assumes static functions will
- * be resolved as targeting on cls regardless of whether they are overridden.
+ * If exactClass is true, the class we are targeting is assumed to be
+ * exactly `cls', and the returned Func* is definitely the one called.
  *
- * Returns nullptr if we can't be sure this would always call this function.
+ * If exactClass is false, the class we are targeting may be a subclass of
+ * cls, and the returned Func* may be overridden in a subclass.
+ *
+ * Its the caller's responsibility to ensure that the Class* is usable -
+ * is AttrUnique, an instance of the ctx or guarded in some way.
+ *
+ * Returns nullptr if we can't determine the Func*.
  */
 const Func* lookupImmutableMethod(const Class* cls, const StringData* name,
                                   bool& magicCall, bool staticLookup,
                                   const Func* ctxFunc, bool exactClass);
 
 /*
- * If possible find the constructor for cls that would be run from the context
- * ctx if a new instance of cls were created there. If the class fails to be
- * unique, or in non-repo-authoritative mode this function will always return
- * nullptr. Additionally if the constructor is inaccessible from the given
- * context this function will return nullptr.
+ * If possible find the constructor for cls that would be run from the
+ * context ctx if a new instance of cls were created there.  If the
+ * constructor is inaccessible from the given context this function
+ * will return nullptr. It is the caller's responsibility to ensure
+ * that cls is the right Class* (ie its AttrUnique or bound to the
+ * ctx, or otherwise guaranteed by guards).
  */
 const Func* lookupImmutableCtor(const Class* cls, const Class* ctx);
 

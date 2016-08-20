@@ -133,7 +133,12 @@ public:
     return const_cast<ArrayData*>(ad);
   }
 
+  static ArrayData* ToPHPArray(ArrayData* ad, bool) {
+    return ad;
+  }
   static constexpr auto ToVec = &ArrayCommon::ToVec;
+  static constexpr auto ToDict = &ArrayCommon::ToDict;
+  static constexpr auto ToKeyset = &ArrayCommon::ToKeyset;
 
 private:
   static GlobalsArray* asGlobals(ArrayData* ad);
@@ -149,6 +154,11 @@ private:
 };
 
 //////////////////////////////////////////////////////////////////////
+
+/*
+ * Gets our request-local global variables array.
+ */
+GlobalsArray* get_global_variables();
 
 }
 

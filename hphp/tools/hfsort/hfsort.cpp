@@ -29,20 +29,15 @@
 
 namespace HPHP { namespace hfsort {
 
+constexpr uint32_t BUFLEN = 1000;
+constexpr uint32_t kPageSize = 2 << 20;
+
 void error(const char* msg) {
   printf("ERROR: %s\n", msg);
   exit(1);
 }
 
-void trace(const char* fmt, ...) {
-  va_list args;
-
-  va_start(args, fmt);
-  vfprintf(stderr, fmt, args);
-  va_end(args);
-}
-
-void readSymbols(FILE *file) {
+void readSymbols(CallGraph& cg, FILE* file) {
   char     line[BUFLEN];
   char     name[BUFLEN];
   uint64_t addr;
@@ -62,7 +57,7 @@ void readSymbols(FILE *file) {
           }
         }
       }
-      cg.addFunc(Func(cg.funcs.size(), name, addr, size, 0));
+      cg.addFunc(name, addr, size, 0);
     }
   }
 }
@@ -74,12 +69,12 @@ uint64_t getAddr(char* perfLine) {
   return addr;
 }
 
-FuncId getFuncId(uint64_t addr) {
+TargetId getTargetId(const CallGraph& cg, uint64_t addr) {
   if (addr == InvalidAddr) return InvalidId;
-  return cg.addrToFuncId(addr);
+  return cg.addrToTargetId(addr);
 }
 
-void readPerfData(gzFile file, bool computeArcWeight) {
+void readPerfData(CallGraph& cg, gzFile file, bool computeArcWeight) {
   char line[BUFLEN];
 
   while (gzgets(file, line, BUFLEN) != Z_NULL) {
@@ -90,19 +85,18 @@ void readPerfData(gzFile file, bool computeArcWeight) {
     // process one sample
     if (gzgets(file, line, BUFLEN) == Z_NULL) error("reading perf data");
     auto addrTop = getAddr(line);
-    FuncId idTop = getFuncId(addrTop);
+    TargetId idTop = getTargetId(cg, addrTop);
     if (idTop == InvalidId) continue;
-    cg.funcs[idTop].samples++;
+    cg.targets[idTop].samples++;
     HFTRACE(2, "readPerfData: idTop: %u %s\n", idTop,
             cg.funcs[idTop].mangledNames[0].c_str());
     if (gzgets(file, line, BUFLEN) == Z_NULL) error("reading perf data");
     auto addrCaller = getAddr(line);
-    FuncId idCaller = getFuncId(addrCaller);
+    TargetId idCaller = getTargetId(cg, addrCaller);
     if (idCaller != InvalidId) {
-      auto arc = cg.getArc(idCaller, idTop);
+      auto& arc = cg.incArcWeight(idCaller, idTop, computeArcWeight ? 1 : 0);
       if (computeArcWeight) {
-        arc->weight++;
-        arc->avgCallOffset += addrCaller - cg.funcs[idCaller].addr;
+        arc.avgCallOffset += addrCaller - cg.funcs[idCaller].addr;
       }
       HFTRACE(2, "readPerfData: idCaller: %u %s\n", idCaller,
               cg.funcs[idCaller].mangledNames[0].c_str());
@@ -112,30 +106,34 @@ void readPerfData(gzFile file, bool computeArcWeight) {
   if (!computeArcWeight) return;
 
   // Normalize incoming arc weights and compute avgCallOffset for each node.
-  for (auto& func : cg.funcs) {
-    for (auto arc : func.inArcs) {
-      arc->normalizedWeight = arc->weight / func.samples;
-      arc->avgCallOffset = arc->avgCallOffset / arc->weight;
+  for (TargetId f = 0; f < cg.targets.size(); f++) {
+    auto& func = cg.targets[f];
+    for (auto src : func.preds) {
+      auto& arc = *cg.arcs.find(Arc(src, f));
+      arc.normalizedWeight = arc.weight / func.samples;
+      arc.avgCallOffset = arc.avgCallOffset / arc.weight;
     }
   }
 }
 
-void readEdgcntData(FILE* file) {
+void readEdgcntData(CallGraph& cg, FILE* file) {
   char     line[BUFLEN];
-  uint64_t src;
-  uint64_t dst;
+  uint64_t srcAddr;
+  uint64_t dstAddr;
   char     kind;
   uint32_t count;
 
   HFTRACE(1, "=== use edgcnt profile to build callgraph\n\n");
 
   while (fgets(line, BUFLEN, file)) {
-    if (sscanf(line, "%lx %lx %c %u %*x", &src, &dst, &kind, &count) == 4) {
+    auto const res =
+    sscanf(line, "%lx %lx %c %u %*x", &srcAddr, &dstAddr, &kind, &count);
+    if (res == 4) {
       if (kind != 'C') continue;
 
       // process one sample
-      FuncId caller = cg.addrToFuncId(src);
-      FuncId callee = cg.addrToFuncId(dst);
+      TargetId caller = cg.addrToTargetId(srcAddr);
+      TargetId callee = cg.addrToTargetId(dstAddr);
       if (caller != InvalidId && callee != InvalidId) {
         cg.incArcWeight(caller, callee, count);
       }
@@ -143,12 +141,11 @@ void readEdgcntData(FILE* file) {
   }
 
   // Normalize incoming arc weights for each node.
-  for (size_t f = 0; f < cg.funcs.size(); f++) {
-    Func& func = cg.funcs[f];
-    auto& inArcs = func.inArcs;
-    for (size_t a = 0; a < inArcs.size(); a++) {
-      Arc* arc = inArcs[a];
-      arc->normalizedWeight = arc->weight / func.samples;
+  for (TargetId f = 0; f < cg.targets.size(); f++) {
+    auto& func = cg.targets[f];
+    for (auto src : func.preds) {
+      auto& arc = *cg.arcs.find(Arc(src, f));
+      arc.normalizedWeight = arc.weight / func.samples;
     }
   }
 }
@@ -164,9 +161,12 @@ std::string getNameWithoutSuffix(std::string str) {
   }
 }
 
-void print(const std::vector<Cluster*>& clusters, bool useWildcards) {
-  FILE* outfile = fopen("hotfuncs.txt", "wt");
-  if (!outfile) error("opening output file hotfuncs.txt");
+void print(CallGraph& cg, const char* filename,
+           const std::vector<Cluster>& clusters, bool useWildcards) {
+  FILE* outfile = fopen(filename, "wt");
+  if (!outfile) {
+    error(folly::sformat("opening output file {}", filename).c_str());
+  }
   uint32_t totalSize   = 0;
   uint32_t curPage     = 0;
   uint32_t hotfuncs    = 0;
@@ -175,24 +175,24 @@ void print(const std::vector<Cluster*>& clusters, bool useWildcards) {
   double totalCalls64B = 0;
   double totalCalls4KB = 0;
   double totalCalls2MB = 0;
-  std::unordered_map<FuncId,uint64_t> newAddr;
-  for (auto cluster : clusters) {
-    for (FuncId fid : cluster->funcs) {
-      if (cg.funcs[fid].samples > 0) {
+  std::unordered_map<TargetId,uint64_t> newAddr;
+  for (auto& cluster : clusters) {
+    for (auto fid : cluster.targets) {
+      if (cg.targets[fid].samples > 0) {
         newAddr[fid] = totalSize;
-        totalSize += cg.funcs[fid].size;
+        totalSize += cg.targets[fid].size;
       }
     }
   }
   totalSize = 0;
   HFTRACE(1, "============== page 0 ==============\n");
-  for (auto cluster : clusters) {
+  for (auto& cluster : clusters) {
     HFTRACE(1,
             "-------- density = %.3lf (%u / %u) arcWeight = %.1lf --------\n",
-            (double) cluster->samples / cluster->size,
-            cluster->samples, cluster->size, cluster->arcWeight);
-    for (FuncId fid : cluster->funcs) {
-      if (cg.funcs[fid].samples > 0) {
+            (double) cluster.samples / cluster.size,
+            cluster.samples, cluster.size, cluster.arcWeight);
+    for (auto fid : cluster.targets) {
+      if (cg.targets[fid].samples > 0) {
         hotfuncs++;
         int space = 0;
         for (const auto& mangledName : cg.funcs[fid].mangledNames) {
@@ -208,28 +208,30 @@ void print(const std::vector<Cluster*>& clusters, bool useWildcards) {
         }
         uint64_t dist = 0;
         uint64_t calls = 0;
-        for (auto arc : cg.funcs[fid].outArcs) {
-          auto d = std::abs(newAddr[arc->dst] -
-                            (newAddr[fid] + arc->avgCallOffset));
-          auto w = arc->weight;
+        for (auto dst : cg.targets[fid].succs) {
+          auto& arc = *cg.arcs.find(Arc(fid, dst));
+          auto d = std::abs(newAddr[arc.dst] -
+                            (newAddr[fid] + arc.avgCallOffset));
+          auto w = arc.weight;
           calls += w;
           if (d < 64)      totalCalls64B += w;
           if (d < 4096)    totalCalls4KB += w;
           if (d < 2 << 20) totalCalls2MB += w;
           HFTRACE(
             2,
-            "arc: %u [@%u+%.1lf] -> %u [@%u]: weight = %.0lf, callDist = %u\n",
-            arc->src, newAddr[arc->src], arc->avgCallOffset,
-            arc->dst, newAddr[arc->dst], arc->weight, d);
-          dist += arc->weight * d;
+            "arc: %u [@%lu+%.1lf] -> %u [@%lu]: weight = %.0lf, "
+            "callDist = %f\n",
+            arc.src, newAddr[arc.src], arc.avgCallOffset,
+            arc.dst, newAddr[arc.dst], arc.weight, d);
+          dist += arc.weight * d;
         }
         totalCalls += calls;
         totalDistance += dist;
-        HFTRACE(1, "start = %6u : avgCallDist = %u : %s\n",
+        HFTRACE(1, "start = %6u : avgCallDist = %lu : %s\n",
                 totalSize,
                 calls ? dist / calls : 0,
-                cg.funcs[fid].toString().c_str());
-        totalSize += cg.funcs[fid].size;
+                cg.toString(fid).c_str());
+        totalSize += cg.targets[fid].size;
         uint32_t newPage = totalSize / kPageSize;
         if (newPage != curPage) {
           curPage = newPage;
@@ -265,11 +267,12 @@ Algorithm checkAlgorithm(const char* algorithm) {
   return Algorithm::Invalid;
 }
 
-} }
+}}
 
 int main(int argc, char* argv[]) {
   using namespace HPHP::hfsort;
 
+  CallGraph cg;
   char* symbFileName = nullptr;
   char* perfFileName = nullptr;
   char* edgcntFileName = nullptr;
@@ -324,27 +327,30 @@ int main(int argc, char* argv[]) {
     error("Error opening edge count file\n");
   }
 
-  readSymbols(symbFile);
-  readPerfData(perfFile, (edgcntFileName == nullptr));
+  readSymbols(cg, symbFile);
+  readPerfData(cg, perfFile, (edgcntFileName == nullptr));
   if (edgcntFileName != nullptr) {
-    readEdgcntData(edgcntFile);
+    readEdgcntData(cg, edgcntFile);
     fclose(edgcntFile);
   }
   cg.printDot("cg.dot");
 
-  std::vector<Cluster*> clusters;
+  std::vector<Cluster> clusters;
 
+  const char* filename;
   if (algorithm == Algorithm::Hfsort) {
     HFTRACE(1, "=== algorithm : hfsort\n\n");
-    clusters = clusterize();
+    clusters = clusterize(cg);
+    filename = "hotfuncs.txt";
   } else {
     HFTRACE(1, "=== algorithm : pettis-hansen\n\n");
     assert(algorithm == Algorithm::PettisHansen);
-    clusters = pettisAndHansen();
+    clusters = pettisAndHansen(cg);
+    filename = "hotfuncs-pettis.txt";
   }
 
   sort(clusters.begin(), clusters.end(), compareClustersDensity);
-  print(clusters, useWildcards);
+  print(cg, filename, clusters, useWildcards);
 
   fclose(symbFile);
   gzclose(perfFile);

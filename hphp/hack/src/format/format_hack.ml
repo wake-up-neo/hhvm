@@ -1201,7 +1201,7 @@ type 'a return =
 let rec entry ~keep_source_metadata ~no_trailing_commas ~modes
     (file : Path.t) from to_ content k =
   try
-    let errorl, () = Errors.do_ begin fun () ->
+    let errorl, (), _ = Errors.do_ begin fun () ->
       let rp = Relative_path.(create Dummy (file :> string)) in
       let {Parser_hack.file_mode; _} =
         Parser_hack.program rp content in
@@ -2747,6 +2747,11 @@ and expr_atomic_word env last_tok = function
       expect (token_to_string Tlb) env;
       (** Dict body looks exactly like an array body. *)
       right env array_body;
+      expect (token_to_string Trb) env;
+  | "keyset" ->
+      out "keyset" env;
+      expect (token_to_string Tlb) env;
+      right env (list_comma_nl ~trailing:true expr);
       expect (token_to_string Trb) env;
   | "empty" | "unset" | "isset" as v ->
       out v env;

@@ -90,6 +90,8 @@ namespace jit {
 //////////////////////////////////////////////////////////////////////
 
 ArrayData* addNewElemHelper(ArrayData* a, TypedValue value) {
+  assertx(a->isPHPArray());
+
   auto r = a->append(*tvAssertCell(&value), a->hasMultipleRefs());
   if (UNLIKELY(r != a)) {
     decRefArr(a);
@@ -101,6 +103,8 @@ ArrayData* addNewElemHelper(ArrayData* a, TypedValue value) {
 ArrayData* addElemIntKeyHelper(ArrayData* ad,
                                int64_t key,
                                TypedValue value) {
+  assertx(ad->isPHPArray());
+  assertx(cellIsPlausible(value));
   // this does not re-enter
   // set will decRef any old value that may have been overwritten
   // if appropriate
@@ -110,12 +114,14 @@ ArrayData* addElemIntKeyHelper(ArrayData* ad,
   // methods that didn't bump up the refcount so that we didn't
   // have to decrement it here
   tvRefcountedDecRef(&value);
-  return arrayRefShuffle<false>(ad, retval, nullptr);
+  return arrayRefShuffle<false, KindOfArray>(ad, retval, nullptr);
 }
 
 ArrayData* addElemStringKeyHelper(ArrayData* ad,
                                   StringData* key,
                                   TypedValue value) {
+  assertx(ad->isPHPArray());
+  assertx(cellIsPlausible(value));
   // this does not re-enter
   bool copy = ad->cowCheck();
   // set will decRef any old value that may have been overwritten
@@ -129,10 +135,44 @@ ArrayData* addElemStringKeyHelper(ArrayData* ad,
   // have to decrement it here
   decRefStr(key);
   tvRefcountedDecRef(&value);
-  return arrayRefShuffle<false>(ad, retval, nullptr);
+  return arrayRefShuffle<false, KindOfArray>(ad, retval, nullptr);
+}
+
+ArrayData* dictAddElemIntKeyHelper(ArrayData* ad,
+                                   int64_t key,
+                                   TypedValue value) {
+  assertx(ad->isDict());
+  // set will decRef any old value that may have been overwritten
+  // if appropriate
+  ArrayData* retval =
+    MixedArray::SetIntDict(ad, key, *tvAssertCell(&value), ad->cowCheck());
+  // TODO Task #1970153: It would be great if there were set()
+  // methods that didn't bump up the refcount so that we didn't
+  // have to decrement it here
+  tvRefcountedDecRef(&value);
+  return arrayRefShuffle<false, KindOfDict>(ad, retval, nullptr);
+}
+
+ArrayData* dictAddElemStringKeyHelper(ArrayData* ad,
+                                      StringData* key,
+                                      TypedValue value) {
+  assertx(ad->isDict());
+  // set will decRef any old value that may have been overwritten
+  // if appropriate
+  ArrayData* retval =
+    MixedArray::SetStrDict(ad, key, *tvAssertCell(&value), ad->cowCheck());
+  // TODO Task #1970153: It would be great if there were set()
+  // methods that didn't bump up the refcount so that we didn't
+  // have to decrement it here
+  decRefStr(key);
+  tvRefcountedDecRef(&value);
+  return arrayRefShuffle<false, KindOfDict>(ad, retval, nullptr);
 }
 
 ArrayData* arrayAdd(ArrayData* a1, ArrayData* a2) {
+  assertx(a1->isPHPArray());
+  assertx(a2->isPHPArray());
+
   if (!a2->empty()) {
     if (a1->empty()) {
       // We consume refs on a2 and also produce references, so there's
@@ -159,6 +199,10 @@ void setNewElem(TypedValue* base, Cell val) {
 
 void setNewElemArray(TypedValue* base, Cell val) {
   HPHP::SetNewElemArray(base, &val);
+}
+
+void setNewElemVec(TypedValue* base, Cell val) {
+  HPHP::SetNewElemVec(base, &val);
 }
 
 RefData* boxValue(TypedValue tv) {
@@ -196,6 +240,124 @@ ArrayData* convCellToArrHelper(TypedValue tv) {
   // you know why.
   tvCastToArrayInPlace(&tv); // consumes a ref on counted values
   return tv.m_data.parr;
+}
+
+ArrayData* convVecToArrHelper(ArrayData* adIn) {
+  assertx(adIn->isVecArray());
+  auto a = PackedArray::ToPHPArrayVec(adIn, adIn->cowCheck());
+  if (a != adIn) decRefArr(adIn);
+  return a;
+}
+
+ArrayData* convDictToArrHelper(ArrayData* adIn) {
+  assertx(adIn->isDict());
+  auto a = MixedArray::ToPHPArrayDict(adIn, adIn->cowCheck());
+  if (a != adIn) decRefArr(adIn);
+  return a;
+}
+
+ArrayData* convKeysetToArrHelper(ArrayData* adIn) {
+  assertx(adIn->isKeyset());
+  auto a = MixedArray::ToPHPArrayKeyset(adIn, adIn->cowCheck());
+  if (a != adIn) decRefArr(adIn);
+  return a;
+}
+
+ArrayData* convArrToVecHelper(ArrayData* adIn) {
+  assert(adIn->isPHPArray());
+  auto a = adIn->toVec(adIn->cowCheck());
+  if (a != adIn) decRefArr(adIn);
+  return a;
+}
+
+ArrayData* convDictToVecHelper(ArrayData* adIn) {
+  assert(adIn->isDict());
+  auto a = MixedArray::ToVecDict(adIn, adIn->cowCheck());
+  assert(a != adIn);
+  decRefArr(adIn);
+  return a;
+}
+
+ArrayData* convKeysetToVecHelper(ArrayData* adIn) {
+  assert(adIn->isKeyset());
+  auto a = MixedArray::ToVecKeyset(adIn, adIn->cowCheck());
+  assert(a != adIn);
+  decRefArr(adIn);
+  return a;
+}
+
+ArrayData* convObjToVecHelper(ObjectData* obj) {
+  if (!obj->isCollection()) {
+    raise_warning("Non-collection object conversion to vec");
+    return staticEmptyVecArray();
+  }
+  auto a = collections::toArray(obj).toVec();
+  decRefObj(obj);
+  return a.detach();
+}
+
+ArrayData* convArrToDictHelper(ArrayData* adIn) {
+  assert(adIn->isPHPArray());
+  auto a = adIn->toDict(adIn->cowCheck());
+  if (a != adIn) decRefArr(adIn);
+  return a;
+}
+
+ArrayData* convVecToDictHelper(ArrayData* adIn) {
+  assertx(adIn->isVecArray());
+  auto a = PackedArray::ToDictVec(adIn, adIn->cowCheck());
+  assert(a != adIn);
+  decRefArr(adIn);
+  return a;
+}
+
+ArrayData* convKeysetToDictHelper(ArrayData* adIn) {
+  assertx(adIn->isKeyset());
+  auto a = MixedArray::ToDictKeyset(adIn, adIn->cowCheck());
+  if (a != adIn) decRefArr(adIn);
+  return a;
+}
+
+ArrayData* convObjToDictHelper(ObjectData* obj) {
+  if (!obj->isCollection()) {
+    raise_warning("Non-collection object conversion to dict");
+    return staticEmptyDictArray();
+  }
+  auto a = collections::toArray(obj).toDict();
+  decRefObj(obj);
+  return a.detach();
+}
+
+ArrayData* convArrToKeysetHelper(ArrayData* adIn) {
+  assert(adIn->isPHPArray());
+  auto a = adIn->toKeyset(adIn->cowCheck());
+  if (a != adIn) decRefArr(adIn);
+  return a;
+}
+
+ArrayData* convVecToKeysetHelper(ArrayData* adIn) {
+  assertx(adIn->isVecArray());
+  auto a = PackedArray::ToKeysetVec(adIn, adIn->cowCheck());
+  assert(a != adIn);
+  decRefArr(adIn);
+  return a;
+}
+
+ArrayData* convDictToKeysetHelper(ArrayData* adIn) {
+  assert(adIn->isDict());
+  auto a = MixedArray::ToKeysetDict(adIn, adIn->cowCheck());
+  if (a != adIn) decRefArr(adIn);
+  return a;
+}
+
+ArrayData* convObjToKeysetHelper(ObjectData* obj) {
+  if (!obj->isCollection()) {
+    raise_warning("Non-collection object conversion to keyset");
+    return staticEmptyKeysetArray();
+  }
+  auto a = collections::toArray(obj).toKeyset();
+  decRefObj(obj);
+  return a.detach();
 }
 
 int64_t convObjToDblHelper(const ObjectData* o) {
@@ -276,7 +438,7 @@ bool coerceCellToBoolHelper(TypedValue tv, int64_t argNum, const Func* func) {
   tvCoerceIfStrict(tv, argNum, func);
 
   DataType type = tv.m_type;
-  if (isArrayType(type) || type == KindOfObject || type == KindOfResource) {
+  if (isArrayLikeType(type) || type == KindOfObject || type == KindOfResource) {
     coerceCellFail(KindOfBoolean, type, argNum, func);
     not_reached();
   }
@@ -318,6 +480,12 @@ int64_t coerceCellToDblHelper(Cell tv, int64_t argNum, const Func* func) {
       return coerceStrToDblHelper(tv.m_data.pstr, argNum, func);
 
     case KindOfUninit:
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
     case KindOfPersistentArray:
     case KindOfArray:
     case KindOfObject:
@@ -366,6 +534,12 @@ int64_t coerceCellToIntHelper(TypedValue tv, int64_t argNum, const Func* func) {
       return coerceStrToIntHelper(tv.m_data.pstr, argNum, func);
 
     case KindOfUninit:
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
     case KindOfPersistentArray:
     case KindOfArray:
     case KindOfObject:
@@ -395,6 +569,15 @@ StringData* convCellToStrHelper(TypedValue tv) {
                               /* fallthrough */
     case KindOfPersistentString:
                               return tv.m_data.pstr;
+    case KindOfPersistentVec:
+    case KindOfVec:           raise_notice("Vec to string conversion");
+                              return vec_string.get();
+    case KindOfPersistentDict:
+    case KindOfDict:          raise_notice("Dict to string conversion");
+                              return dict_string.get();
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:        raise_notice("Keyset to string conversion");
+                              return keyset_string.get();
     case KindOfPersistentArray:
     case KindOfArray:         raise_notice("Array to string conversion");
                               return array_string.get();
@@ -547,10 +730,12 @@ TypedValue getDefaultIfNullCell(const TypedValue* tv, TypedValue& def) {
 }
 
 TypedValue arrayIdxS(ArrayData* a, StringData* key, TypedValue def) {
+  assertx(a->isPHPArray());
   return getDefaultIfNullCell(a->nvGet(key), def);
 }
 
 TypedValue arrayIdxSi(ArrayData* a, StringData* key, TypedValue def) {
+  assertx(a->isPHPArray());
   int64_t i;
   return UNLIKELY(a->convertKey(key, i)) ?
          getDefaultIfNullCell(a->nvGet(i), def) :
@@ -558,11 +743,33 @@ TypedValue arrayIdxSi(ArrayData* a, StringData* key, TypedValue def) {
 }
 
 TypedValue arrayIdxI(ArrayData* a, int64_t key, TypedValue def) {
+  assertx(a->isPHPArray());
   return getDefaultIfNullCell(a->nvGet(key), def);
 }
 
 TypedValue arrayIdxIc(ArrayData* a, int64_t key, TypedValue def) {
+  assertx(a->isPHPArray());
   return arrayIdxI(a, key, def);
+}
+
+TypedValue dictIdxI(ArrayData* a, int64_t key, TypedValue def) {
+  assertx(a->isDict());
+  return getDefaultIfNullCell(MixedArray::NvGetIntDict(a, key), def);
+}
+
+TypedValue dictIdxS(ArrayData* a, StringData* key, TypedValue def) {
+  assertx(a->isDict());
+  return getDefaultIfNullCell(MixedArray::NvGetStrDict(a, key), def);
+}
+
+TypedValue keysetIdxI(ArrayData* a, int64_t key, TypedValue def) {
+  assertx(a->isKeyset());
+  return getDefaultIfNullCell(MixedArray::NvGetIntKeyset(a, key), def);
+}
+
+TypedValue keysetIdxS(ArrayData* a, StringData* key, TypedValue def) {
+  assertx(a->isKeyset());
+  return getDefaultIfNullCell(MixedArray::NvGetStrKeyset(a, key), def);
 }
 
 TypedValue mapIdx(ObjectData* mapOD, StringData* key, TypedValue def) {
@@ -642,6 +849,12 @@ int64_t switchStringHelper(StringData* s, int64_t base, int64_t nTargets) {
       case KindOfBoolean:
       case KindOfPersistentString:
       case KindOfString:
+      case KindOfPersistentVec:
+      case KindOfVec:
+      case KindOfPersistentDict:
+      case KindOfDict:
+      case KindOfPersistentKeyset:
+      case KindOfKeyset:
       case KindOfPersistentArray:
       case KindOfArray:
       case KindOfObject:
@@ -661,17 +874,6 @@ int64_t switchObjHelper(ObjectData* o, int64_t base, int64_t nTargets) {
   auto const ival = o->toInt64();
   decRefObj(o);
   return switchBoundsCheck(ival, base, nTargets);
-}
-
-void profileClassMethodHelper(MethProfile* profile,
-                              const ActRec* ar,
-                              const Class* cls) {
-  profile->reportMeth(ar, cls);
-}
-
-void profileTypeHelper(TypeProfile* profile, TypedValue newTV) {
-  auto newType = typeFromTV(&newTV);
-  profile->report(newType);
 }
 
 void profileArrayKindHelper(ArrayKindProfile* profile, ArrayData* arr) {
@@ -734,7 +936,7 @@ void loadFuncContextImpl(FooNR callableNR, ActRec* preLiveAR, ActRec* fp) {
     inst,
     cls,
     invName,
-    FailBehavior == OnFail::Warn
+    FailBehavior == OnFail::Warn ? DecodeFlags::Warn : DecodeFlags::NoWarn
   );
   if (UNLIKELY(func == nullptr)) {
     if (FailBehavior == OnFail::Fatal) {
@@ -1074,7 +1276,7 @@ int64_t decodeCufIterHelper(Iter* it, TypedValue func) {
   auto const f = vm_decode_function(tvAsVariant(&func),
                                     ar, false,
                                     obj, cls, invName,
-                                    false);
+                                    DecodeFlags::NoWarn);
   if (UNLIKELY(!f)) return false;
 
   auto& cit = it->cuf();
@@ -1087,6 +1289,20 @@ int64_t decodeCufIterHelper(Iter* it, TypedValue func) {
   }
   cit.setName(invName);
   return true;
+}
+
+void throwOOBException(TypedValue base, TypedValue key) {
+  if (isArrayLikeType(base.m_type)) {
+    throwOOBArrayKeyException(key, base.m_data.parr);
+  } else if (base.m_type == KindOfObject) {
+    assertx(isIntType(key.m_type));
+    collections::throwOOB(key.m_data.num);
+  }
+  not_reached();
+}
+
+void invalidArrayKeyHelper(const ArrayData* ad, TypedValue key) {
+  throwInvalidArrayKeyException(&key, ad);
 }
 
 namespace MInstrHelpers {
@@ -1120,7 +1336,7 @@ uint64_t vectorIsset(c_Vector* vec, int64_t index) {
 
 void bindElemC(TypedValue* base, TypedValue key, RefData* val) {
   TypedValue localTvRef;
-  auto elem = HPHP::ElemD<MOpFlags::DefineReffy>(localTvRef, base, key);
+  auto elem = HPHP::ElemD<MOpFlags::Define, true>(localTvRef, base, key);
 
   if (UNLIKELY(elem == &localTvRef)) {
     // Skip binding a TypedValue that's about to be destroyed and just destroy
@@ -1136,8 +1352,8 @@ void setWithRefElem(TypedValue* base, TypedValue keyTV, TypedValue val) {
   TypedValue localTvRef;
   auto const keyC = tvToCell(&keyTV);
   auto elem = UNLIKELY(val.m_type == KindOfRef)
-    ? HPHP::ElemD<MOpFlags::DefineReffy>(localTvRef, base, *keyC)
-    : HPHP::ElemD<MOpFlags::Define>(localTvRef, base, *keyC);
+    ? HPHP::ElemD<MOpFlags::Define, true>(localTvRef, base, *keyC)
+    : HPHP::ElemD<MOpFlags::Define, false>(localTvRef, base, *keyC);
   // Intentionally leak the old value pointed to by elem, including from magic
   // methods.
   tvDup(val, *elem);
@@ -1151,6 +1367,10 @@ TypedValue incDecElem(TypedValue* base, TypedValue key, IncDecOp op) {
 }
 
 void bindNewElem(TypedValue* base, RefData* val) {
+  if (UNLIKELY(isHackArrayType(base->m_type))) {
+    throwRefInvalidArrayValueException(base->m_data.parr);
+  }
+
   TypedValue localTvRef;
   auto elem = HPHP::NewElem<true>(localTvRef, base);
 
@@ -1162,6 +1382,18 @@ void bindNewElem(TypedValue* base, RefData* val) {
   }
 
   tvBindRef(val, elem);
+}
+
+TypedValue* elemVecID(TypedValue* base, int64_t key) {
+  auto cbase = tvToCell(base);
+  assertx(isVecType(cbase->m_type));
+  return ElemDVec<false, KeyType::Int>(cbase, key);
+}
+
+TypedValue* elemVecIU(TypedValue* base, int64_t key) {
+  auto cbase = tvToCell(base);
+  assertx(isVecType(cbase->m_type));
+  return ElemUVec<KeyType::Int>(cbase, key);
 }
 
 }

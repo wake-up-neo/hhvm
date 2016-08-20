@@ -31,7 +31,7 @@
 #include <signal.h>
 #include <time.h>
 
-#include <iostream>
+#include <folly/Random.h>
 
 namespace HPHP {
 
@@ -60,7 +60,7 @@ void *s_waitThread(void *arg) {
 
 // Data that is kept per request and is only valid per request.
 // This structure gathers a php and async stack trace when log is called.
-// These logged stacks can be then gathered via php a call, xenon_get_data.
+// These logged stacks can be then gathered via a php call, xenon_get_data.
 // It needs to allocate and free its Array per request, because Array lifetime
 // is per-request.  So the flow for these objects are:
 // allocated when a web request begins (if Xenon is enabled)
@@ -181,12 +181,11 @@ void Xenon::start(uint64_t msec) {
     TRACE(1, "Xenon::start periodic %ld seconds, %ld nanoseconds\n", sec, nsec);
 
     // for the initial timer, we want to stagger time for large installations
-    unsigned int seed = time(nullptr);
-    uint64_t msecInit = msec * (1.0 + rand_r(&seed) / (double)RAND_MAX);
-    time_t fSec = msecInit / 1000;
-    long fNsec = (msecInit % 1000) * 1000000;
-    TRACE(1, "Xenon::start initial %ld seconds, %ld nanoseconds\n",
-       fSec, fNsec);
+    auto const msecInit = folly::Random::rand32(static_cast<uint32_t>(msec));
+    auto const fSec = msecInit / 1000;
+    auto const fNsec = (msecInit % 1000) * 1000000;
+    TRACE(1, "Xenon::start initial %d seconds, %d nanoseconds\n",
+          fSec, fNsec);
 
     sigevent sev={};
     sev.sigev_notify = SIGEV_SIGNAL;

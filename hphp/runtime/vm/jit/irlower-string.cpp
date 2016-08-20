@@ -91,6 +91,38 @@ void cgOrdStrIdx(IRLS& env, const IRInstruction* inst) {
   );
 }
 
+void cgChrInt(IRLS& env, const IRInstruction* inst) {
+  auto const ppcs = reinterpret_cast<uintptr_t>(precomputed_chars);
+
+  auto& v = vmain(env);
+
+  auto const idx = [&] () -> Vreg {
+    auto const srcReg = srcLoc(env, inst, 0).reg();
+    if (inst->src(0)->inst()->is(OrdStr, OrdStrIdx)) {
+      return srcReg;
+    }
+    auto const r = v.makeReg();
+    v << andqi{255, srcReg, r, v.makeReg()};
+    return r;
+  }();
+
+  if (ppcs <= std::numeric_limits<int>::max()) {
+    v << load{baseless(idx * 8 + ppcs), dstLoc(env, inst, 0).reg()};
+  } else {
+    auto const pcs = [&] () -> Vreg {
+      auto const ipcs = reinterpret_cast<uintptr_t>(&precomputed_chars);
+      if (ipcs <= std::numeric_limits<int>::max()) {
+        auto const r = v.makeReg();
+        v << load{baseless(ipcs), r};
+        return r;
+      } else {
+        return v.cns(ppcs);
+      }
+    }();
+    v << load{pcs[idx * 8], dstLoc(env, inst, 0).reg()};
+  }
+}
+
 void cgStringIsset(IRLS& env, const IRInstruction* inst) {
   auto const dst = dstLoc(env, inst, 0).reg();
   auto const sd = srcLoc(env, inst, 0).reg();
@@ -103,6 +135,12 @@ void cgStringIsset(IRLS& env, const IRInstruction* inst) {
   v << cmpq{idx, length, sf};
   v << setcc{CC_NBE, sf, dst};
 }
+
+IMPL_OPCODE_CALL(ConcatStrStr);
+IMPL_OPCODE_CALL(ConcatStrInt);
+IMPL_OPCODE_CALL(ConcatIntStr);
+IMPL_OPCODE_CALL(ConcatStr3);
+IMPL_OPCODE_CALL(ConcatStr4);
 
 ///////////////////////////////////////////////////////////////////////////////
 

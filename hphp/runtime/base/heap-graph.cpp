@@ -86,6 +86,9 @@ struct PtrFilter: F {
       case KindOfString: // never null, sometimes counted
         if (tv.m_data.pstr->isRefCounted()) F::counted(tv.m_data.pstr);
         break;
+      case KindOfVec:
+      case KindOfDict:
+      case KindOfKeyset:
       case KindOfArray: // never null, sometimes counted
         if (tv.m_data.parr->isRefCounted()) F::counted(tv.m_data.parr);
         break;
@@ -100,6 +103,9 @@ struct PtrFilter: F {
       case KindOfInt64:
       case KindOfDouble:
       case KindOfPersistentString:
+      case KindOfPersistentVec:
+      case KindOfPersistentDict:
+      case KindOfPersistentKeyset:
       case KindOfPersistentArray:
       case KindOfClass: // only in eval stack
         return;
@@ -167,6 +173,11 @@ struct PtrFilter: F {
     auto s = (char**)((uintptr_t(start) + M) & ~M); // round up
     auto e = (char**)((uintptr_t(start) + len) & ~M); // round down
     for (; s < e; s++) F::ambig(*s);
+  }
+
+  void operator()(const void* start, const void* end) {
+    assert(uintptr_t(end) >= uintptr_t(start));
+    return (*this)(start, uintptr_t(end) - uintptr_t(start));
   }
 
  private:

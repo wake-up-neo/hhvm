@@ -23,7 +23,7 @@
 #include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/empty-array.h"
 #include "hphp/runtime/base/packed-array.h"
-#include "hphp/runtime/base/struct-array.h"
+#include "hphp/runtime/base/packed-array-defs.h"
 #include "hphp/runtime/base/array-common.h"
 #include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/base/type-conversions.h"
@@ -51,9 +51,11 @@ using ArrayDataMap = tbb::concurrent_hash_map<ArrayData::ScalarArrayKey,
                                               ArrayData::ScalarHash>;
 static ArrayDataMap s_arrayDataMap;
 
+const StaticString s_InvalidKeysetOperationMsg("Invalid operation on keyset");
+
 ArrayData::ScalarArrayKey ArrayData::GetScalarArrayKey(const char* str,
                                                        size_t sz) {
-  return MD5(string_md5(str, sz).c_str());
+  return MD5(string_md5(folly::StringPiece{str, sz}));
 }
 
 ArrayData::ScalarArrayKey ArrayData::GetScalarArrayKey(ArrayData* arr) {
@@ -113,25 +115,6 @@ static ArrayData* ZAppendThrow(ArrayData* ad, RefData* v, int64_t* key_ptr) {
   raise_fatal_error("Unimplemented ArrayData::ZAppend");
 }
 
-const StaticString
-  s_failConvertToDict("Unsupported conversion to Dict array"),
-  s_failConvertToKeyset("Unsupported conversion to Keyset array");
-
-static ArrayData* ToDictThrow(ArrayData*) {
-  SystemLib::throwExceptionObject(s_failConvertToDict);
-}
-
-static ArrayData* ToKeysetThrow(ArrayData*) {
-  SystemLib::throwExceptionObject(s_failConvertToKeyset);
-}
-
-static ArrayData* ToDictNoop(ArrayData* ad) {
-  ad->incRefCount();
-  return ad;
-}
-
-static constexpr auto ToKeysetNoop = &ToDictNoop;
-
 //////////////////////////////////////////////////////////////////////
 
 static_assert(ArrayFunctions::NK == ArrayData::ArrayKind::kNumKinds,
@@ -139,7 +122,6 @@ static_assert(ArrayFunctions::NK == ArrayData::ArrayKind::kNumKinds,
 
 #define DISPATCH(entry)                         \
   { PackedArray::entry,                         \
-    StructArray::entry,                         \
     MixedArray::entry,                          \
     EmptyArray::entry,                          \
     APCLocalArray::entry,                       \
@@ -654,7 +636,6 @@ const ArrayFunctions g_array_funcs = {
    */
   {
     &PackedArray::ZSetInt,
-    &StructArray::ZSetInt,
     &MixedArray::ZSetInt,
     &ZSetIntThrow,
     &ZSetIntThrow,
@@ -667,7 +648,6 @@ const ArrayFunctions g_array_funcs = {
 
   {
     &PackedArray::ZSetStr,
-    &StructArray::ZSetStr,
     &MixedArray::ZSetStr,
     &ZSetStrThrow,
     &ZSetStrThrow,
@@ -680,7 +660,6 @@ const ArrayFunctions g_array_funcs = {
 
   {
     &PackedArray::ZAppend,
-    &StructArray::ZAppend,
     &MixedArray::ZAppend,
     &ZAppendThrow,
     &ZAppendThrow,
@@ -691,40 +670,44 @@ const ArrayFunctions g_array_funcs = {
     &ZAppendThrow,
   },
 
-  {
-    PackedArray::ToDict,
-    StructArray::ToDict,
-    MixedArray::ToDict,
-    EmptyArray::ToDict,
-    ToDictThrow,
-    ToDictThrow,
-    ProxyArray::ToDict,
-    ToDictNoop,
-    PackedArray::ToDictVec,
-    MixedArray::ToDictKeyset,
-  },
+   /*
+   * ArrayData* ToPHPArray(ArrayData*, bool)
+   *
+   *   Convert to a PHP array. If already a PHP array, it will be returned
+   *   unchange (without copying). If copy is false, it may be converted in
+   *   place.
+   */
+  DISPATCH(ToPHPArray)
+
+   /*
+   * ArrayData* ToDict(ArrayData*, bool)
+   *
+   *   Convert to a dict. If already a dict, it will be returned unchange
+   *   (without copying). If copy is false, it may be converted in place. If the
+   *   input array contains references, an exception will be thrown.
+   */
+  DISPATCH(ToDict)
 
   /*
-   * ArrayData* ToVec(ArrayData*)
+   * ArrayData* ToVec(ArrayData*, bool)
    *
-   *   Convert array to a new vector array. Keys will be discarded and the
-   *   vector array will contain the values in iteration order. If the array is
-   *   already a vector array, it will be returned unchanged (without copying).
+   *   Convert to a vec. Keys will be discarded and the vec will contain the
+   *   values in iteration order. If already a vec, it will be returned
+   *   unchanged (without copying). If copy is false, it may be converted in
+   *   place. If the input array contains references, an exception will be
+   *   thrown.
    */
   DISPATCH(ToVec)
 
-  {
-    PackedArray::ToKeyset,
-    StructArray::ToKeyset,
-    MixedArray::ToKeyset,
-    EmptyArray::ToKeyset,
-    ToKeysetThrow,
-    ToKeysetThrow,
-    ProxyArray::ToKeyset,
-    MixedArray::ToKeysetDict,
-    PackedArray::ToKeysetVec,
-    ToKeysetNoop,
-  }
+   /*
+   * ArrayData* ToKeyset(ArrayData*, bool)
+   *
+   *   Convert to a keyset. Values will be discarded and the keyset will contain
+   *   just the keys. If already a keyset, it will be returned unchange (without
+   *   copying). If copy is false, it may be converted in place. If the input
+   *   array contains references, an exception will be thrown.
+   */
+  DISPATCH(ToKeyset)
 };
 
 #undef DISPATCH
@@ -797,60 +780,162 @@ ArrayData *ArrayData::CreateRef(const Variant& name, Variant& value) {
 ///////////////////////////////////////////////////////////////////////////////
 // reads
 
-int ArrayData::compare(const ArrayData *v2) const {
-  assert(v2);
+ALWAYS_INLINE
+bool ArrayData::EqualHelper(const ArrayData* ad1, const ArrayData* ad2,
+                            bool strict) {
+  assert(ad1->isPHPArray());
+  assert(ad2->isPHPArray());
 
-  auto const count1 = size();
-  auto const count2 = v2->size();
-  if (count1 < count2) return -1;
-  if (count1 > count2) return 1;
-  if (count1 == 0) return 0;
-
-  // Prevent circular referenced objects/arrays or deep ones.
-  check_recursion_error();
-
-  for (ArrayIter iter(this); iter; ++iter) {
-    auto key = iter.first();
-    if (!v2->exists(key)) return 1;
-    auto value1 = iter.second();
-    auto value2 = v2->get(key);
-    auto cmp = HPHP::compare(value1, value2);
-    if (cmp != 0) return cmp;
-  }
-
-  return 0;
-}
-
-bool ArrayData::equal(const ArrayData *v2, bool strict) const {
-  assert(v2);
-
-  if (this == v2) return true;
-  auto const count1 = size();
-  auto const count2 = v2->size();
-  if (count1 != count2) return false;
-  if (count1 == 0) return true;
+  if (ad1 == ad2) return true;
+  if (ad1->size() != ad2->size()) return false;
 
   // Prevent circular referenced objects/arrays or deep ones.
   check_recursion_error();
 
   if (strict) {
-    for (ArrayIter iter1(this), iter2(v2); iter1; ++iter1, ++iter2) {
+    for (ArrayIter iter1{ad1}, iter2{ad2}; iter1; ++iter1, ++iter2) {
       assert(iter2);
       if (!same(iter1.first(), iter2.first())
           || !same(iter1.second(), iter2.secondRef())) return false;
     }
+    return true;
   } else {
-    for (ArrayIter iter(this); iter; ++iter) {
-      Variant key(iter.first());
-      if (!v2->exists(key)) return false;
-      if (!tvEqual(*iter.second().asTypedValue(),
-                   *v2->get(key).asTypedValue())) {
+    bool equal = true;
+    IterateKV(
+      ad1,
+      [&](const TypedValue* k, const TypedValue* v) {
+        if (!ad2->exists(tvAsCVarRef(k)) ||
+            !tvEqual(*v, *ad2->get(tvAsCVarRef(k)).asTypedValue())) {
+          equal = false;
+          return true;
+        }
         return false;
       }
+    );
+    return equal;
+  }
+}
+
+ALWAYS_INLINE
+int64_t ArrayData::CompareHelper(const ArrayData* ad1, const ArrayData* ad2) {
+  assert(ad1->isPHPArray());
+  assert(ad2->isPHPArray());
+
+  auto const size1 = ad1->size();
+  auto const size2 = ad2->size();
+  if (size1 < size2) return -1;
+  if (size1 > size2) return 1;
+
+  // Prevent circular referenced objects/arrays or deep ones.
+  check_recursion_error();
+
+  int result = 0;
+  IterateKV(
+    ad1,
+    [&](const TypedValue* k, const TypedValue* v) {
+      if (!ad2->exists(tvAsCVarRef(k))) {
+        result = 1;
+        return true;
+      }
+      auto const cmp = tvCompare(*v, *ad2->get(tvAsCVarRef(k)).asTypedValue());
+      if (cmp != 0) {
+        result = cmp;
+        return true;
+      }
+      return false;
     }
+  );
+
+  return result;
+}
+
+bool ArrayData::Equal(const ArrayData* ad1, const ArrayData* ad2) {
+  return EqualHelper(ad1, ad2, false);
+}
+
+bool ArrayData::NotEqual(const ArrayData* ad1, const ArrayData* ad2) {
+  return !EqualHelper(ad1, ad2, false);
+}
+
+bool ArrayData::Same(const ArrayData* ad1, const ArrayData* ad2) {
+  return EqualHelper(ad1, ad2, true);
+}
+
+bool ArrayData::NotSame(const ArrayData* ad1, const ArrayData* ad2) {
+  return !EqualHelper(ad1, ad2, true);
+}
+
+bool ArrayData::Lt(const ArrayData* ad1, const ArrayData* ad2) {
+  return CompareHelper(ad1, ad2) < 0;
+}
+
+bool ArrayData::Lte(const ArrayData* ad1, const ArrayData* ad2) {
+  return CompareHelper(ad1, ad2) <= 0;
+}
+
+bool ArrayData::Gt(const ArrayData* ad1, const ArrayData* ad2) {
+  return 0 > CompareHelper(ad2, ad1); // Not symmetric; Order matters here.
+}
+
+bool ArrayData::Gte(const ArrayData* ad1, const ArrayData* ad2) {
+  return 0 >= CompareHelper(ad2, ad1); // Not symmetric; Order matters here.
+}
+
+int64_t ArrayData::Compare(const ArrayData* ad1, const ArrayData* ad2) {
+  return CompareHelper(ad1, ad2);
+}
+
+int ArrayData::compare(const ArrayData* v2) const {
+  assert(v2);
+
+  if (isPHPArray()) {
+    if (UNLIKELY(!v2->isPHPArray())) {
+      if (v2->isVecArray()) throw_vec_compare_exception();
+      if (v2->isDict()) throw_dict_compare_exception();
+      if (v2->isKeyset()) throw_keyset_compare_exception();
+      not_reached();
+    }
+    return Compare(this, v2);
   }
 
-  return true;
+  if (isVecArray()) {
+    if (UNLIKELY(!v2->isVecArray())) throw_vec_compare_exception();
+    return PackedArray::VecCmp(this, v2);
+  }
+
+  if (isDict()) throw_dict_compare_exception();
+  if (isKeyset()) throw_keyset_compare_exception();
+
+  not_reached();
+}
+
+bool ArrayData::equal(const ArrayData* v2, bool strict) const {
+  assert(v2);
+
+  if (isPHPArray()) {
+    if (UNLIKELY(!v2->isPHPArray())) return false;
+    return strict ? Same(this, v2) : Equal(this, v2);
+  }
+
+  if (isVecArray()) {
+    if (UNLIKELY(!v2->isVecArray())) return false;
+    return strict
+      ? PackedArray::VecSame(this, v2) : PackedArray::VecEqual(this, v2);
+  }
+
+  if (isDict()) {
+    if (UNLIKELY(!v2->isDict())) return false;
+    return strict
+      ? MixedArray::DictSame(this, v2) : MixedArray::DictEqual(this, v2);
+  }
+
+  if (isKeyset()) {
+    if (UNLIKELY(!v2->isKeyset())) return false;
+    return strict
+      ? MixedArray::KeysetSame(this, v2) : MixedArray::KeysetEqual(this, v2);
+  }
+
+  not_reached();
 }
 
 Variant ArrayData::reset() {
@@ -936,17 +1021,11 @@ const Variant& ArrayData::getNotFound(const StringData* k) {
 }
 
 const Variant& ArrayData::getNotFound(int64_t k, bool error) const {
-  if (error && !useWeakKeys()) {
-    throwOOBArrayKeyException(k);
-  }
   return error && kind() != kGlobalsKind ? getNotFound(k) :
          null_variant;
 }
 
 const Variant& ArrayData::getNotFound(const StringData* k, bool error) const {
-  if (error && !useWeakKeys()) {
-    throwOOBArrayKeyException(k);
-  }
   return error && kind() != kGlobalsKind ? getNotFound(k) :
          null_variant;
 }
@@ -962,9 +1041,8 @@ const Variant& ArrayData::getNotFound(const Variant& k) {
 }
 
 const char* ArrayData::kindToString(ArrayKind kind) {
-  std::array<const char*,10> names = {{
+  std::array<const char*,9> names = {{
     "PackedKind",
-    "StructKind",
     "MixedKind",
     "EmptyKind",
     "ApcKind",
@@ -991,13 +1069,14 @@ const char* describeKeyType(const TypedValue* tv) {
   case KindOfDouble:           return "double";
   case KindOfPersistentString:
   case KindOfString:           return "string";
+  case KindOfPersistentVec:
+  case KindOfVec:              return "vec";
+  case KindOfPersistentDict:
+  case KindOfDict:             return "dict";
+  case KindOfPersistentKeyset:
+  case KindOfKeyset:           return "keyset";
   case KindOfPersistentArray:
-  case KindOfArray: {
-    if (tv->m_data.parr->isVecArray()) return "vec";
-    if (tv->m_data.parr->isDict()) return "dict";
-    if (tv->m_data.parr->isKeyset()) return "keyset";
-    return "array";
-  }
+  case KindOfArray:            return "array";
   case KindOfResource:
     return tv->m_data.pres->data()->o_getClassName().c_str();
 
@@ -1026,6 +1105,12 @@ std::string describeKeyValue(TypedValue tv) {
   case KindOfNull:
   case KindOfBoolean:
   case KindOfDouble:
+  case KindOfPersistentVec:
+  case KindOfVec:
+  case KindOfPersistentDict:
+  case KindOfDict:
+  case KindOfPersistentKeyset:
+  case KindOfKeyset:
   case KindOfPersistentArray:
   case KindOfArray:
   case KindOfResource:
@@ -1045,6 +1130,7 @@ void throwInvalidArrayKeyException(const TypedValue* key, const ArrayData* ad) {
     if (ad->isVecArray()) return std::make_pair("vec", "int");
     if (ad->isDict()) return std::make_pair("dict", "int or string");
     if (ad->isKeyset()) return std::make_pair("keyset", "int or string");
+    assertx(ad->isPHPArray());
     return std::make_pair("array", "int or string");
   }();
   SystemLib::throwInvalidArgumentExceptionObject(
@@ -1056,49 +1142,83 @@ void throwInvalidArrayKeyException(const TypedValue* key, const ArrayData* ad) {
 }
 
 void throwInvalidArrayKeyException(const StringData* key, const ArrayData* ad) {
-  auto const tv = key->isRefCounted() ?
-    make_tv<KindOfString>(const_cast<StringData*>(key)) :
-    make_tv<KindOfPersistentString>(key);
+  auto const tv = make_tv<KindOfString>(const_cast<StringData*>(key));
   throwInvalidArrayKeyException(&tv, ad);
 }
 
-void throwOOBArrayKeyException(TypedValue key) {
+void throwOOBArrayKeyException(TypedValue key, const ArrayData* ad) {
+  const char* type = [&]{
+    if (ad->isVecArray()) return "vec";
+    if (ad->isDict()) return "dict";
+    if (ad->isKeyset()) return "keyset";
+    assertx(ad->isPHPArray());
+    return "array";
+  }();
   SystemLib::throwOutOfBoundsExceptionObject(
     folly::sformat(
-      "Out of bounds array access: invalid index {}",
-      describeKeyValue(key)
+      "Out of bounds {} access: invalid index {}",
+      type, describeKeyValue(key)
     )
   );
 }
 
-void throwOOBArrayKeyException(int64_t key) {
-  SystemLib::throwOutOfBoundsExceptionObject(
-    folly::sformat(
-      "Out of bounds array access: invalid index {}",
-      folly::to<std::string>(key)
-    )
-  );
+void throwOOBArrayKeyException(int64_t key, const ArrayData* ad) {
+  throwOOBArrayKeyException(make_tv<KindOfInt64>(key), ad);
 }
 
-void throwOOBArrayKeyException(const StringData* key) {
-  SystemLib::throwOutOfBoundsExceptionObject(
-    folly::sformat(
-      "Out of bounds array access: invalid index \"{}\"",
-      key->data()
-    )
+void throwOOBArrayKeyException(const StringData* key, const ArrayData* ad) {
+  throwOOBArrayKeyException(
+    make_tv<KindOfString>(const_cast<StringData*>(key)),
+    ad
   );
 }
 
 void throwRefInvalidArrayValueException(const ArrayData* ad) {
+  assertx(ad->isHackArray());
+  const char* type = [&]{
+    if (ad->isVecArray()) return "Vecs";
+    if (ad->isDict()) return "Dicts";
+    if (ad->isKeyset()) return "Keysets";
+    not_reached();
+  }();
   SystemLib::throwInvalidArgumentExceptionObject(
-    folly::sformat("{} cannot contain references",
-      ad->isVecArray() ? "Vecs" : ad->isDict() ? "Dicts" : "Keysets"
-    )
+    folly::sformat("{} cannot contain references", type)
   );
 }
 
 void throwRefInvalidArrayValueException(const Array& arr) {
   throwRefInvalidArrayValueException(arr.get());
+}
+
+void throwInvalidKeysetOperation() {
+  SystemLib::throwInvalidOperationExceptionObject(s_InvalidKeysetOperationMsg);
+}
+
+void throwInvalidAdditionException(const ArrayData* ad) {
+  assertx(ad->isHackArray());
+  const char* type = [&]{
+    if (ad->isVecArray()) return "Vecs";
+    if (ad->isDict()) return "Dicts";
+    if (ad->isKeyset()) return "Keysets";
+    not_reached();
+  }();
+  SystemLib::throwInvalidOperationExceptionObject(
+    folly::sformat("{} do not support the + operator", type)
+  );
+}
+
+void throwInvalidMergeException(const ArrayData* ad) {
+  assertx(ad->isHackArray());
+  std::pair<const char*, const char*> type_str = [&]{
+    if (ad->isVecArray()) return std::make_pair("Vecs", "vecs");
+    if (ad->isDict()) return std::make_pair("Dicts", "dicts");
+    if (ad->isKeyset()) return std::make_pair("Keysets", "keysets");
+    not_reached();
+  }();
+  SystemLib::throwInvalidOperationExceptionObject(
+    folly::sformat("{} can only be merged with other {}",
+                   type_str.first, type_str.second)
+  );
 }
 
 ///////////////////////////////////////////////////////////////////////////////

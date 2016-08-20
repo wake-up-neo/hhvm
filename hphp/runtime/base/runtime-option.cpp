@@ -27,6 +27,7 @@
 #include <folly/String.h>
 #include <folly/portability/SysResource.h>
 #include <folly/portability/SysTime.h>
+#include <folly/portability/Unistd.h>
 
 #include "hphp/util/build-info.h"
 #include "hphp/util/hdf.h"
@@ -150,7 +151,6 @@ int RuntimeOption::ServerBacklog = 128;
 int RuntimeOption::ServerConnectionLimit = 0;
 int RuntimeOption::ServerThreadCount = 50;
 int RuntimeOption::QueuedJobsReleaseRate = 3;
-bool RuntimeOption::ServerThreadRoundRobin = false;
 int RuntimeOption::ServerWarmupThrottleRequestCount = 0;
 int RuntimeOption::ServerThreadDropCacheTimeoutSeconds = 0;
 int RuntimeOption::ServerThreadJobLIFOSwitchThreshold = INT_MAX;
@@ -167,7 +167,6 @@ boost::container::flat_set<std::string>
 RuntimeOption::ServerHighPriorityEndPoints;
 bool RuntimeOption::ServerExitOnBindFail;
 int RuntimeOption::PageletServerThreadCount = 0;
-bool RuntimeOption::PageletServerThreadRoundRobin = false;
 int RuntimeOption::PageletServerThreadDropCacheTimeoutSeconds = 0;
 int RuntimeOption::PageletServerQueueLimit = 0;
 bool RuntimeOption::PageletServerThreadDropStack = false;
@@ -188,6 +187,7 @@ int RuntimeOption::ServerPreShutdownWait = 0;
 int RuntimeOption::ServerShutdownListenWait = 0;
 int RuntimeOption::ServerShutdownEOMWait = 0;
 int RuntimeOption::ServerPrepareToStopTimeout = 0;
+int RuntimeOption::ServerPartialPostStatusCode = -1;
 bool RuntimeOption::StopOldServer = false;
 int RuntimeOption::OldServerWait = 30;
 int RuntimeOption::CacheFreeFactor = 50;
@@ -279,7 +279,6 @@ bool RuntimeOption::EnableStaticContentMMap = true;
 
 bool RuntimeOption::Utf8izeReplace = true;
 
-std::string RuntimeOption::StartupDocument;
 std::string RuntimeOption::RequestInitFunction;
 std::string RuntimeOption::RequestInitDocument;
 std::string RuntimeOption::AutoPrependFile;
@@ -291,7 +290,6 @@ std::set<std::string> RuntimeOption::AllowedFiles;
 hphp_string_imap<std::string> RuntimeOption::StaticFileExtensions;
 hphp_string_imap<std::string> RuntimeOption::PhpFileExtensions;
 std::set<std::string> RuntimeOption::ForbiddenFileExtensions;
-std::set<std::string> RuntimeOption::StaticFileGenerators;
 std::vector<std::shared_ptr<FilesMatch>> RuntimeOption::FilesMatches;
 
 bool RuntimeOption::WhitelistExec = false;
@@ -401,7 +399,7 @@ bool RuntimeOption::AutoTypecheck = true;
 // granular options instead. (It can't be a local since Config::Bind will take
 // and store a pointer to it.)
 static bool s_PHP7_master = false;
-bool RuntimeOption::PHP7_DeprecateOldStyleCtors = false;
+bool RuntimeOption::PHP7_DeprecationWarnings = false;
 bool RuntimeOption::PHP7_EngineExceptions = false;
 bool RuntimeOption::PHP7_IntSemantics = false;
 bool RuntimeOption::PHP7_LTR_assign = false;
@@ -409,6 +407,7 @@ bool RuntimeOption::PHP7_NoHexNumerics = false;
 bool RuntimeOption::PHP7_ReportVersion = false;
 bool RuntimeOption::PHP7_ScalarTypes = false;
 bool RuntimeOption::PHP7_Substr = false;
+bool RuntimeOption::PHP7_InfNanFloatParse = false;
 bool RuntimeOption::PHP7_UVS = false;
 
 std::map<std::string, std::string> RuntimeOption::AliasedNamespaces;
@@ -449,8 +448,7 @@ static inline uint64_t pgoThresholdDefault() {
 }
 
 static inline bool evalJitDefault() {
-// Disable JIT for PPC64 - Port under development
-#if defined(__CYGWIN__) || defined(_MSC_VER) || defined(__powerpc64__)
+#if defined(__CYGWIN__) || defined(_MSC_VER)
   return false;
 #else
   return true;
@@ -470,13 +468,17 @@ static inline int nsjrDefault() {
 }
 
 static inline uint32_t profileRequestsDefault() {
-  return debug ? 1 << 31
-       : RuntimeOption::EvalJitConcurrently ? 100
-       : 2000;
+  return debug ? std::numeric_limits<uint32_t>::max() : 2500;
+}
+
+static inline uint32_t profileBCSizeDefault() {
+  return debug ? std::numeric_limits<uint32_t>::max()
+    : RuntimeOption::EvalJitConcurrently ? 3750000
+    : 4300000;
 }
 
 static inline uint32_t resetProfCountersDefault() {
-  return RuntimeOption::EvalJitConcurrently ? 500 : 1000;
+  return RuntimeOption::EvalJitConcurrently ? 250 : 1000;
 }
 
 uint64_t ahotDefault() {
@@ -553,6 +555,7 @@ int RuntimeOption::DebuggerDefaultRpcTimeout = 30;
 std::string RuntimeOption::DebuggerDefaultSandboxPath;
 std::string RuntimeOption::DebuggerStartupDocument;
 int RuntimeOption::DebuggerSignalTimeout = 1;
+std::string RuntimeOption::DebuggerAuthTokenScript;
 
 std::string RuntimeOption::SendmailPath = "sendmail -t -i";
 std::string RuntimeOption::MailForceExtraParameters;
@@ -1094,6 +1097,11 @@ void RuntimeOption::Load(
       throw std::runtime_error("Code coverage is not supported with "
         "Eval.Jit=true");
     }
+    if (EvalJitConcurrently && EvalJitTransCounters) {
+      // TODO(12493872): Make thread-safe or remove counters.
+      throw std::runtime_error("Translation counters are not supported with "
+        "Eval.JitConcurrently != 0");
+    }
     Config::Bind(DisableSmallAllocator, ini, config,
                  "Eval.DisableSmallAllocator", DisableSmallAllocator);
     SetArenaSlabAllocBypass(DisableSmallAllocator);
@@ -1137,6 +1145,8 @@ void RuntimeOption::Load(
                    "Eval.Debugger.RPC.HostDomain");
       Config::Bind(DebuggerDefaultRpcTimeout, ini, config,
                    "Eval.Debugger.RPC.DefaultTimeout", 30);
+      Config::Bind(DebuggerAuthTokenScript, ini, config,
+                   "Eval.Debugger.Auth.TokenScript");
     }
   }
   {
@@ -1229,8 +1239,8 @@ void RuntimeOption::Load(
     // get-go, but threading that through turns out to be kind of annoying and
     // of questionable value, so just doing this for now.
     Config::Bind(s_PHP7_master, ini, config, "PHP7.all", false);
-    Config::Bind(PHP7_DeprecateOldStyleCtors, ini, config,
-                 "PHP7.DeprecateOldStyleCtors", s_PHP7_master);
+    Config::Bind(PHP7_DeprecationWarnings, ini, config,
+                 "PHP7.DeprecationWarnings", s_PHP7_master);
     Config::Bind(PHP7_EngineExceptions, ini, config, "PHP7.EngineExceptions",
                  s_PHP7_master);
     Config::Bind(PHP7_IntSemantics, ini, config, "PHP7.IntSemantics",
@@ -1244,6 +1254,8 @@ void RuntimeOption::Load(
     Config::Bind(PHP7_ScalarTypes, ini, config, "PHP7.ScalarTypes",
                  s_PHP7_master);
     Config::Bind(PHP7_Substr, ini, config, "PHP7.Substr",
+                 s_PHP7_master);
+    Config::Bind(PHP7_InfNanFloatParse, ini, config, "PHP7.InfNanFloatParse",
                  s_PHP7_master);
     Config::Bind(PHP7_UVS, ini, config, "PHP7.UVS", s_PHP7_master);
   }
@@ -1270,8 +1282,6 @@ void RuntimeOption::Load(
                  "Server.ConnectionLimit", 0);
     Config::Bind(ServerThreadCount, ini, config, "Server.ThreadCount",
                  Process::GetCPUCount() * 2);
-    Config::Bind(ServerThreadRoundRobin, ini, config,
-                 "Server.ThreadRoundRobin");
     Config::Bind(ServerWarmupThrottleRequestCount, ini, config,
                  "Server.WarmupThrottleRequestCount",
                  ServerWarmupThrottleRequestCount);
@@ -1327,6 +1337,8 @@ void RuntimeOption::Load(
                  "Server.ShutdownEOMWait", 0);
     Config::Bind(ServerPrepareToStopTimeout, ini, config,
                  "Server.PrepareToStopTimeout", 240);
+    Config::Bind(ServerPartialPostStatusCode, ini, config,
+                 "Server.PartialPostStatusCode", -1);
     Config::Bind(StopOldServer, ini, config, "Server.StopOld", false);
     Config::Bind(OldServerWait, ini, config, "Server.StopOldWait", 30);
     Config::Bind(ServerRSSNeededMb, ini, config, "Server.RSSNeededMb", 4096);
@@ -1431,8 +1443,6 @@ void RuntimeOption::Load(
     }
     Config::Bind(Utf8izeReplace, ini, config, "Server.Utf8izeReplace", true);
 
-    Config::Bind(StartupDocument, ini, config, "Server.StartupDocument");
-    normalizePath(StartupDocument);
     Config::Bind(RequestInitFunction, ini, config,
                  "Server.RequestInitFunction");
     Config::Bind(RequestInitDocument, ini, config,
@@ -1565,8 +1575,6 @@ void RuntimeOption::Load(
     // Pagelet Server
     Config::Bind(PageletServerThreadCount, ini, config,
                  "PageletServer.ThreadCount", 0);
-    Config::Bind(PageletServerThreadRoundRobin, ini, config,
-                 "PageletServer.ThreadRoundRobin");
     Config::Bind(PageletServerThreadDropStack, ini, config,
                  "PageletServer.ThreadDropStack");
     Config::Bind(PageletServerThreadDropCacheTimeoutSeconds, ini, config,
@@ -1592,7 +1600,6 @@ void RuntimeOption::Load(
 
     Config::Bind(StaticFileExtensions, ini, config, "StaticFile.Extensions",
                  staticFileDefault);
-    Config::Bind(StaticFileGenerators, ini, config, "StaticFile.Generators");
 
     auto matches_callback = [] (const IniSettingMap &ini_m, const Hdf &hdf_m,
                                 const std::string &ini_m_key) {
@@ -1650,7 +1657,7 @@ void RuntimeOption::Load(
                  "Debug.CoreDumpReportDirectory", CoreDumpReportDirectory);
     std::ostringstream stack_trace_stream;
     stack_trace_stream << CoreDumpReportDirectory << "/stacktrace."
-                       << Process::GetProcessId() << ".log";
+                       << (int64_t)getpid() << ".log";
     StackTraceFilename = stack_trace_stream.str();
 
     Config::Bind(StackTraceTimeout, ini, config, "Debug.StackTraceTimeout", 0);

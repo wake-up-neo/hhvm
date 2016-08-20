@@ -13,6 +13,7 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
+
 #ifndef incl_HPHP_UTIL_STRUCT_LOG_H_
 #define incl_HPHP_UTIL_STRUCT_LOG_H_
 
@@ -21,6 +22,8 @@
 #include <folly/Range.h>
 
 namespace HPHP {
+
+///////////////////////////////////////////////////////////////////////////////
 
 struct StructuredLogEntry {
   StructuredLogEntry();
@@ -31,19 +34,26 @@ struct StructuredLogEntry {
   folly::dynamic ints, strs;
 };
 
+std::string show(const StructuredLogEntry&);
+
 using StructuredLogImpl = void (*)(const std::string&,
                                    const StructuredLogEntry&);
 
-// Interface for recording structured data for relatively infrequent events.
+/*
+ * Interface for recording structured data for relatively infrequent events.
+ */
 struct StructuredLog {
   static void enable(StructuredLogImpl impl);
   static bool enabled();
   static void log(const std::string& tableName, const StructuredLogEntry&);
+  static bool coinflip(uint32_t rate);
 
  private:
   static StructuredLogImpl s_impl;
 };
 
-} // HPHP
+///////////////////////////////////////////////////////////////////////////////
+
+}
 
 #endif

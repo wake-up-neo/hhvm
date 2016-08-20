@@ -57,27 +57,30 @@ size_t PackedArray::heapSize(const ArrayData* ad) {
 
 template<class Marker>
 void PackedArray::scan(const ArrayData* a, Marker& mark) {
+  assert(checkInvariants(a));
   auto data = packedData(a);
   for (unsigned i = 0, n = a->getSize(); i < n; ++i) {
     mark(data[i]);
   }
 }
 
-template <class F>
-void PackedArray::IterateV(ArrayData* arr, F fn) {
+template <class F, bool inc>
+void PackedArray::IterateV(const ArrayData* arr, F fn) {
+  assert(checkInvariants(arr));
   auto elm = packedData(arr);
-  arr->incRefCount();
-  SCOPE_EXIT { decRefArr(arr); };
+  if (inc) arr->incRefCount();
+  SCOPE_EXIT { if (inc) decRefArr(const_cast<ArrayData*>(arr)); };
   for (auto i = arr->m_size; i--; elm++) {
     if (ArrayData::call_helper(fn, elm)) break;
   }
 }
 
-template <class F>
-void PackedArray::IterateKV(ArrayData* arr, F fn) {
+template <class F, bool inc>
+void PackedArray::IterateKV(const ArrayData* arr, F fn) {
+  assert(checkInvariants(arr));
   auto elm = packedData(arr);
-  arr->incRefCount();
-  SCOPE_EXIT { decRefArr(arr); };
+  if (inc) arr->incRefCount();
+  SCOPE_EXIT { if (inc) decRefArr(const_cast<ArrayData*>(arr)); };
   TypedValue key;
   key.m_data.num = 0;
   key.m_type = KindOfInt64;

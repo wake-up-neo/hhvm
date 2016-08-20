@@ -114,7 +114,7 @@ struct FPIEnt {
  *              +--------------------------------+ high address
  *
  */
-struct Func {
+struct Func final {
   friend struct FuncEmitter;
 
   /////////////////////////////////////////////////////////////////////////////
@@ -183,6 +183,11 @@ struct Func {
    * Destruct and free a Func*.
    */
   static void destroy(Func* func);
+
+  /*
+   * Address of the end of the Func's variable-length memory allocation.
+   */
+  const void* mallocEnd() const;
 
   /*
    * Duplicate this function.
@@ -611,6 +616,7 @@ struct Func {
    */
   bool isPublic() const;
   bool isStatic() const;
+  bool isStaticInProlog() const;
   bool isAbstract() const;
 
   /*
@@ -647,17 +653,6 @@ struct Func {
    * @implies: isBuiltin()
    */
   bool isCPPBuiltin() const;
-
-  /*
-   * Is this an HNI function?
-   *
-   * Note that "Native" here refers to a different concept than nativeFuncPtr.
-   * In fact, the only functions that may not have nativeFuncPtr's are Native
-   * (i.e., HNI) functions declared with NeedsActRec.
-   *
-   * FIXME(#4497824): This naming is pretty bad.
-   */
-  bool isNative() const;
 
   /*
    * The builtinFuncPtr takes an ActRec*, unpacks it, and usually dispatches to
@@ -848,11 +843,6 @@ struct Func {
   bool isNoInjection() const;
 
   /*
-   * Whether this builtin may be replaced by user-defined functions.
-   */
-  bool isAllowOverride() const;
-
-  /*
    * Whether this function's frame should be skipped when searching for context
    * (e.g., array_map evaluates its callback in the context of its caller).
    */
@@ -889,6 +879,7 @@ struct Func {
   const FPIEnt* findFPI(Offset o) const;
   const FPIEnt* findPrecedingFPI(Offset o) const;
 
+  bool shouldSampleJit() const { return m_shouldSampleJit; }
 
   /////////////////////////////////////////////////////////////////////////////
   // JIT data.
@@ -931,8 +922,6 @@ struct Func {
    * Reset a specific prologue, or all prologues.
    */
   void resetPrologue(int numParams);
-  void resetPrologues();
-
 
   /////////////////////////////////////////////////////////////////////////////
   // Pretty printer.                                                    [const]
@@ -1119,8 +1108,6 @@ private:
     int m_line2;    // Only read if SharedData::m_line2 is kSmallDeltaLimit
   };
 
-  typedef AtomicSharedPtr<SharedData> SharedDataPtr;
-
   /*
    * SharedData accessors for internal use.
    */
@@ -1236,10 +1223,11 @@ private:
   mutable ClonedFlag m_cloned;
   bool m_isPreFunc : 1;
   bool m_hasPrivateAncestor : 1;
+  bool m_shouldSampleJit : 1;
   int m_maxStackCells{0};
   uint64_t m_refBitVal{0};
-  Unit* m_unit;
-  SharedDataPtr m_shared;
+  Unit* const m_unit;
+  AtomicSharedPtr<SharedData> m_shared;
   // Initialized by Func::finishedEmittingParams.  The least significant bit is
   // 1 if the last param is not variadic; the 31 most significant bits are the
   // total number of params (including the variadic param).

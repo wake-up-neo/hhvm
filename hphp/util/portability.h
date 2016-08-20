@@ -137,13 +137,9 @@
 
 #if defined(__x86_64__)
 
-# if defined(__clang__)
-#  define DECLARE_FRAME_POINTER(fp)               \
-    ActRec* fp;                                   \
-    asm volatile("mov %%rbp, %0" : "=r" (fp) ::)
-# else
-#  define DECLARE_FRAME_POINTER(fp) register ActRec* fp asm("rbp");
-# endif
+# define DECLARE_FRAME_POINTER(fp) \
+  auto const fp = (ActRec*) __builtin_frame_address(0)
+# define FRAME_POINTER_IS_ACCURATE
 
 #elif defined(_M_X64)
 
@@ -158,14 +154,16 @@
 # if defined(__clang__)
 #  error Clang implementation not done for ARM
 # endif
-# define DECLARE_FRAME_POINTER(fp) register ActRec* fp asm("x29");
+# define DECLARE_FRAME_POINTER(fp) register ActRec* fp asm("x29")
 
 #elif defined(__powerpc64__)
 
 # if defined(__clang__)
 #  error Clang implementation not done for PPC64
 # endif
-# define DECLARE_FRAME_POINTER(fp) register ActRec* fp = (ActRec*) __builtin_frame_address(0);
+# define DECLARE_FRAME_POINTER(fp) \
+  auto const fp = (ActRec*) __builtin_frame_address(0)
+# define FRAME_POINTER_IS_ACCURATE
 
 #else
 
@@ -209,10 +207,10 @@
 //////////////////////////////////////////////////////////////////////
 
 #if FACEBOOK
-// Linking in libbfd is a gigantic PITA. If you want this yourself in a non-FB
-// build, feel free to define HAVE_LIBBFD and specify the right options to link
-// in libbfd.a in the extra C++ options.
-#define HAVE_LIBBFD 1
+#define USE_FOLLY_SYMBOLIZER 1
+// Linking in libbfd is a gigantic PITA, but if folly symbolizer doesn't
+// work on your platform, you'll need to figure it out.
+#undef HAVE_LIBBFD
 #endif
 
 #ifndef PACKAGE

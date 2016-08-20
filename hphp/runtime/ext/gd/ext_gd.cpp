@@ -3922,9 +3922,8 @@ Variant HHVM_FUNCTION(imagecolorsforindex, const Resource& image,
                                            int64_t index) {
   gdImagePtr im = get_valid_image_resource(image);
   if (!im) return false;
-  if ((index >= 0 && gdImageTrueColor(im)) ||
-      (!gdImageTrueColor(im) && index >= 0 &&
-       index < gdImageColorsTotal(im))) {
+  if (index >= 0 &&
+      (gdImageTrueColor(im) || index < gdImageColorsTotal(im))) {
     return make_map_array(
       s_red,  gdImageRed(im,index),
       s_green, gdImageGreen(im,index),
@@ -4317,11 +4316,6 @@ bool HHVM_FUNCTION(imageflip, const Resource& image, int64_t mode /* = -1 */) {
 /* Filters function added on 2003/12
  * by Pierre-Alain Joye (pajoye@pearfr.org)
  **/
-/* Begin filters function */
-#ifndef HAVE_GET_TRUE_COLOR
-#define GET_PIXEL_FUNCTION(src) \
-  (src->trueColor?gdImageGetTrueColorPixel:gdImageGetPixel)
-#endif
 
 static int hphp_gdImageConvolution(gdImagePtr src, float filter[3][3],
                                    float filter_div, float offset) {
@@ -4329,8 +4323,6 @@ static int hphp_gdImageConvolution(gdImagePtr src, float filter[3][3],
   float new_r, new_g, new_b;
   int new_pxl, pxl=0;
   gdImagePtr srcback;
-  typedef int (*FuncPtr)(gdImagePtr, int, int);
-  FuncPtr f;
 
   if (src==nullptr) {
     return 0;
@@ -4344,8 +4336,6 @@ static int hphp_gdImageConvolution(gdImagePtr src, float filter[3][3],
     return 0;
   }
 
-  f = GET_PIXEL_FUNCTION(src);
-
   for ( y=0; y<src->sy; y++) {
     for(x=0; x<src->sx; x++) {
       new_r = new_g = new_b = 0;
@@ -4354,7 +4344,8 @@ static int hphp_gdImageConvolution(gdImagePtr src, float filter[3][3],
       for (j=0; j<3; j++) {
         int yv = std::min(std::max(y - 1 + j, 0), src->sy - 1);
         for (i=0; i<3; i++) {
-          pxl = f(srcback, std::min(std::max(x - 1 + i, 0), src->sx - 1), yv);
+          pxl = gdImageGetPixel(srcback, std::min(std::max(x - 1 + i, 0),
+                                                  src->sx - 1), yv);
           new_r += (float)gdImageRed(srcback, pxl) * filter[j][i];
           new_g += (float)gdImageGreen(srcback, pxl) * filter[j][i];
           new_b += (float)gdImageBlue(srcback, pxl) * filter[j][i];
@@ -6585,12 +6576,12 @@ static int exif_process_IFD_TAG(image_info_type *ImageInfo, char *dir_entry,
       }
 
       fpos = ImageInfo->infile->tell();
-      ImageInfo->infile->seek(offset_val, SEEK_SET);
+      ImageInfo->infile->seek(displacement+offset_val, SEEK_SET);
       fgot = ImageInfo->infile->tell();
-      if (fgot!=offset_val) {
+      if (fgot!=displacement+offset_val) {
         if (outside) IM_FREE(outside);
         raise_warning("Wrong file pointer: 0x%08lX != 0x%08lX",
-                        fgot, offset_val);
+                        fgot, displacement+offset_val);
         return 0;
       }
       String str = ImageInfo->infile->read(byte_count);

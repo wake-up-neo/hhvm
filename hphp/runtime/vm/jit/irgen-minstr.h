@@ -39,8 +39,8 @@ namespace HPHP { namespace jit { namespace irgen {
  *
  * For profiling translations, this generates the profiling instructions, then
  * falls back to `generic'.  If we can perform the optimization, this branches
- * on a CheckMixedArrayOffset to either `direct' or `generic'; otherwise, we
- * fall back to `generic'.
+ * on a CheckMixedArrayOffset/CheckDictOffset/CheckKeysetOffset to either
+ * `direct' or `generic'; otherwise, we fall back to `generic'.
  *
  * The callback function signatures should be:
  *
@@ -51,15 +51,34 @@ template<class DirectFn, class GenericFn>
 SSATmp* profiledArrayAccess(IRGS& env, SSATmp* arr, SSATmp* key,
                             DirectFn direct, GenericFn generic,
                             bool cow_check = false) {
+  const bool is_dict = arr->isA(TDict);
+  const bool is_keyset = arr->isA(TKeyset);
+  assertx(is_dict || is_keyset || arr->isA(TArr));
+
+  // If the access is statically known, don't bother profiling as we'll probably
+  // optimize it away completely.
+  if (arr->hasConstVal() && key->hasConstVal()) return generic(key);
+
   auto const profile = TargetProfile<MixedArrayOffsetProfile> {
     env.context,
     env.irb->curMarker(),
-    makeStaticString("MixedArrayOffset")
+    makeStaticString(
+      is_dict ? "DictOffset" :
+      is_keyset ? "KeysetOffset" :
+      "MixedArrayOffset"
+    )
   };
 
   if (profile.profiling()) {
-    gen(env, ProfileMixedArrayOffset,
-        RDSHandleData { profile.handle() }, arr, key);
+    gen(
+      env,
+      is_dict ? ProfileDictOffset :
+        is_keyset ? ProfileKeysetOffset :
+        ProfileMixedArrayOffset,
+      RDSHandleData { profile.handle() },
+      arr,
+      key
+    );
     return generic(key);
   }
 
@@ -70,15 +89,29 @@ SSATmp* profiledArrayAccess(IRGS& env, SSATmp* arr, SSATmp* key,
       return cond(
         env,
         [&] (Block* taken) {
-          env.irb->constrainValue(
-            arr,
-            TypeConstraint(DataTypeSpecialized).setWantArrayKind()
-          );
-          auto const TMixedArr = Type::Array(ArrayData::kMixedKind);
-          auto const marr = gen(env, CheckType, TMixedArr, taken, arr);
+          SSATmp* marr;
+          if (!is_dict && !is_keyset) {
+            env.irb->constrainValue(
+              arr,
+              TypeConstraint(DataTypeSpecialized).setWantArrayKind()
+            );
+            auto const TMixedArr = Type::Array(ArrayData::kMixedKind);
+            marr = gen(env, CheckType, TMixedArr, taken, arr);
+          } else {
+            marr = arr;
+          }
 
           auto const extra = IndexData { *pos };
-          gen(env, CheckMixedArrayOffset, extra, taken, marr, key);
+          gen(
+            env,
+            is_dict ? CheckDictOffset :
+              is_keyset ? CheckKeysetOffset :
+              CheckMixedArrayOffset,
+            extra,
+            taken,
+            marr,
+            key
+          );
 
           if (cow_check) {
             gen(env, CheckArrayCOW, taken, marr);
@@ -107,6 +140,10 @@ SSATmp* profiledArrayAccess(IRGS& env, SSATmp* arr, SSATmp* key,
  */
 template<class Finish>
 SSATmp* profiledType(IRGS& env, SSATmp* tmp, Finish finish) {
+  if (tmp->type() <= TStkElem && tmp->type().isKnownDataType()) {
+    return tmp;
+  }
+
   TargetProfile<TypeProfile> prof(env.context, env.irb->curMarker(),
                                   makeStaticString("TypeProfile"));
 
@@ -116,7 +153,14 @@ SSATmp* profiledType(IRGS& env, SSATmp* tmp, Finish finish) {
 
   if (!prof.optimizing()) return tmp;
 
-  Type typeToCheck = relaxToGuardable(prof.data(TypeProfile::reduce).type);
+  auto const reducedType = prof.data(TypeProfile::reduce).type;
+
+  if (reducedType == TBottom) {
+    // We got no samples
+    return tmp;
+  }
+
+  Type typeToCheck = relaxToGuardable(reducedType);
 
   if (typeToCheck == TGen) return tmp;
 

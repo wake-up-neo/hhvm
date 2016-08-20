@@ -155,7 +155,10 @@ void objOffsetSet(
 void objOffsetAppend(ObjectData* base, TypedValue* val, bool validate = true);
 void objOffsetUnset(ObjectData* base, TypedValue offset);
 
-[[noreturn]] void throw_cannot_use_newelem_for_lval_read();
+[[noreturn]] void throw_cannot_use_newelem_for_lval_read_col();
+[[noreturn]] void throw_cannot_use_newelem_for_lval_read_vec();
+[[noreturn]] void throw_cannot_use_newelem_for_lval_read_dict();
+[[noreturn]] void throw_cannot_use_newelem_for_lval_read_keyset();
 
 [[noreturn]] void unknownBaseType(const TypedValue*);
 
@@ -190,6 +193,8 @@ inline const TypedValue* ElemArrayPre(ArrayData* base, TypedValue key) {
  */
 template <MOpFlags flags, KeyType keyType>
 inline const TypedValue* ElemArray(ArrayData* base, key_type<keyType> key) {
+  assert(base->isPHPArray());
+
   auto result = ElemArrayPre<flags>(base, key);
 
   if (UNLIKELY(result == nullptr)) {
@@ -202,6 +207,113 @@ inline const TypedValue* ElemArray(ArrayData* base, key_type<keyType> key) {
   }
 
   assertx(result->m_type != KindOfUninit);
+  return result;
+}
+
+/**
+ * Elem when base is a Vec
+ */
+template <MOpFlags flags>
+inline const TypedValue* ElemVecPre(ArrayData* base, int64_t key) {
+  return (flags & MOpFlags::Warn)
+    ? PackedArray::NvTryGetIntVec(base, key)
+    : PackedArray::NvGetIntVec(base, key);
+}
+
+template <MOpFlags flags>
+inline const TypedValue* ElemVecPre(ArrayData* base, StringData* key) {
+  if (flags & MOpFlags::Warn) throwInvalidArrayKeyException(key, base);
+  return nullptr;
+}
+
+template <MOpFlags flags>
+inline const TypedValue* ElemVecPre(ArrayData* base, TypedValue key) {
+  auto const dt = key.m_type;
+  if (LIKELY(isIntType(dt))) return ElemVecPre<flags>(base, key.m_data.num);
+  if (isStringType(dt))      return ElemVecPre<flags>(base, key.m_data.pstr);
+  throwInvalidArrayKeyException(&key, base);
+}
+
+template <MOpFlags flags, KeyType keyType>
+inline const TypedValue* ElemVec(ArrayData* base, key_type<keyType> key) {
+  assertx(base->isVecArray());
+  auto result = ElemVecPre<flags>(base, key);
+  if (!(flags & MOpFlags::Warn)) {
+    if (UNLIKELY(!result)) return init_null_variant.asTypedValue();
+  }
+  assertx(result->m_type != KindOfUninit);
+  return result;
+}
+
+/**
+ * Elem when base is a Dict
+ */
+template <MOpFlags flags>
+inline const TypedValue* ElemDictPre(ArrayData* base, int64_t key) {
+  return (flags & MOpFlags::Warn)
+    ? MixedArray::NvTryGetIntDict(base, key)
+    : MixedArray::NvGetIntDict(base, key);
+}
+
+template <MOpFlags flags>
+inline const TypedValue* ElemDictPre(ArrayData* base, StringData* key) {
+  return (flags & MOpFlags::Warn)
+    ? MixedArray::NvTryGetStrDict(base, key)
+    : MixedArray::NvGetStrDict(base, key);
+}
+
+template <MOpFlags flags>
+inline const TypedValue* ElemDictPre(ArrayData* base, TypedValue key) {
+  auto const dt = key.m_type;
+  if (isIntType(dt))    return ElemDictPre<flags>(base, key.m_data.num);
+  if (isStringType(dt)) return ElemDictPre<flags>(base, key.m_data.pstr);
+  throwInvalidArrayKeyException(&key, base);
+}
+
+template <MOpFlags flags, KeyType keyType>
+inline const TypedValue* ElemDict(ArrayData* base, key_type<keyType> key) {
+  assertx(base->isDict());
+  auto result = ElemDictPre<flags>(base, key);
+  if (!(flags & MOpFlags::Warn)) {
+    if (UNLIKELY(!result)) return init_null_variant.asTypedValue();
+  }
+  assertx(result->m_type != KindOfUninit);
+  return result;
+}
+
+/**
+ * Elem when base is a Keyset
+ */
+template <MOpFlags flags>
+inline const TypedValue* ElemKeysetPre(ArrayData* base, int64_t key) {
+  return (flags & MOpFlags::Warn)
+    ? MixedArray::NvTryGetIntKeyset(base, key)
+    : MixedArray::NvGetIntKeyset(base, key);
+}
+
+template <MOpFlags flags>
+inline const TypedValue* ElemKeysetPre(ArrayData* base, StringData* key) {
+  return (flags & MOpFlags::Warn)
+    ? MixedArray::NvTryGetStrKeyset(base, key)
+    : MixedArray::NvGetStrKeyset(base, key);
+}
+
+template <MOpFlags flags>
+inline const TypedValue* ElemKeysetPre(ArrayData* base, TypedValue key) {
+  auto const dt = key.m_type;
+  if (isIntType(dt))    return ElemKeysetPre<flags>(base, key.m_data.num);
+  if (isStringType(dt)) return ElemKeysetPre<flags>(base, key.m_data.pstr);
+  throwInvalidArrayKeyException(&key, base);
+}
+
+template <MOpFlags flags, KeyType keyType>
+inline const TypedValue* ElemKeyset(ArrayData* base, key_type<keyType> key) {
+  assertx(base->isKeyset());
+  auto result = ElemKeysetPre<flags>(base, key);
+  if (!(flags & MOpFlags::Warn)) {
+    if (UNLIKELY(!result)) return init_null_variant.asTypedValue();
+  }
+  assertx(isIntType(result->m_type) || isStringType(result->m_type));
   return result;
 }
 
@@ -305,6 +417,8 @@ NEVER_INLINE const TypedValue* ElemSlow(TypedValue& tvRef,
                                         TypedValue* base,
                                         key_type<keyType> key) {
   base = tvToCell(base);
+  assertx(cellIsPlausible(*base));
+
   switch (base->m_type) {
     case KindOfUninit:
     case KindOfNull:
@@ -318,6 +432,15 @@ NEVER_INLINE const TypedValue* ElemSlow(TypedValue& tvRef,
     case KindOfPersistentString:
     case KindOfString:
       return ElemString<flags, keyType>(tvRef, base, key);
+    case KindOfPersistentVec:
+    case KindOfVec:
+      return ElemVec<flags, keyType>(base->m_data.parr, key);
+    case KindOfPersistentDict:
+    case KindOfDict:
+      return ElemDict<flags, keyType>(base->m_data.parr, key);
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+      return ElemKeyset<flags, keyType>(base->m_data.parr, key);
     case KindOfPersistentArray:
     case KindOfArray:
       return ElemArray<flags, keyType>(base->m_data.parr, key);
@@ -339,10 +462,21 @@ inline const TypedValue* Elem(TypedValue& tvRef,
                               TypedValue* base,
                               key_type<keyType> key) {
   assertx(!(flags & MOpFlags::Define) && !(flags & MOpFlags::Unset));
+  assertx(tvIsPlausible(*base));
 
-  if (LIKELY(isArrayType(base->m_type))) {
+  if (LIKELY(tvIsArray(base))) {
     return ElemArray<flags, keyType>(base->m_data.parr, key);
   }
+  if (LIKELY(tvIsVecArray(base))) {
+    return ElemVec<flags, keyType>(base->m_data.parr, key);
+  }
+  if (LIKELY(tvIsDict(base))) {
+    return ElemDict<flags, keyType>(base->m_data.parr, key);
+  }
+  if (LIKELY(tvIsKeyset(base))) {
+    return ElemKeyset<flags, keyType>(base->m_data.parr, key);
+  }
+
   return ElemSlow<flags, keyType>(tvRef, base, key);
 }
 
@@ -378,11 +512,11 @@ ElemDArrayPre<false, KeyType::Any>(Array& base, TypedValue key) {
 /**
  * ElemD when base is an Array
  */
-template <MOpFlags flags, KeyType keyType>
+template <MOpFlags flags, bool reffy, KeyType keyType>
 inline TypedValue* ElemDArray(TypedValue* base, key_type<keyType> key) {
   auto& baseArr = tvAsVariant(base).asArrRef();
+  assertx(baseArr.isPHPArray());
   auto constexpr warn = flags & MOpFlags::Warn;
-  auto constexpr reffy = flags == MOpFlags::DefineReffy;
   auto const defined = !warn || baseArr.exists(keyAsValue(key));
 
   auto* result = ElemDArrayPre<reffy, keyType>(baseArr, key);
@@ -393,6 +527,155 @@ inline TypedValue* ElemDArray(TypedValue* base, key_type<keyType> key) {
   }
 
   return result;
+}
+
+/**
+ * ElemD when base is a Vec
+ */
+template <bool reffy>
+inline TypedValue* ElemDVecPre(TypedValue* base, int64_t key) {
+  Variant* ret = nullptr;
+  ArrayData* oldArr = base->m_data.parr;
+
+  if (reffy) throwRefInvalidArrayValueException(oldArr);
+
+  ArrayData* newArr =
+    PackedArray::LvalIntVec(oldArr, key, ret, oldArr->cowCheck());
+  if (newArr != oldArr) {
+    base->m_type = KindOfVec;
+    base->m_data.parr = newArr;
+    assertx(cellIsPlausible(*base));
+    decRefArr(oldArr);
+  }
+  return ret->asTypedValue();
+}
+
+template <bool reffy>
+inline TypedValue* ElemDVecPre(TypedValue* base, StringData* key) {
+  throwInvalidArrayKeyException(key, base->m_data.parr);
+}
+
+template <bool reffy>
+inline TypedValue* ElemDVecPre(TypedValue* base, TypedValue key) {
+  auto const dt = key.m_type;
+  if (LIKELY(isIntType(dt))) return ElemDVecPre<reffy>(base, key.m_data.num);
+  if (isStringType(dt))      return ElemDVecPre<reffy>(base, key.m_data.pstr);
+  throwInvalidArrayKeyException(&key, base->m_data.parr);
+}
+
+template <bool reffy, KeyType keyType>
+inline TypedValue* ElemDVec(TypedValue* base, key_type<keyType> key) {
+  assertx(tvIsVecArray(base));
+  assertx(tvIsPlausible(*base));
+  auto* result = ElemDVecPre<reffy>(base, key);
+  assertx(tvIsVecArray(base));
+  assertx(tvIsPlausible(*base));
+  assertx(result->m_type != KindOfUninit);
+  return result;
+}
+
+/**
+ * ElemD when base is a Dict
+ */
+template <bool reffy>
+inline TypedValue* ElemDDictPre(TypedValue* base, int64_t key) {
+  Variant* ret = nullptr;
+  ArrayData* oldArr = base->m_data.parr;
+
+  if (reffy) throwRefInvalidArrayValueException(oldArr);
+
+  ArrayData* newArr =
+    MixedArray::LvalSilentIntDict(oldArr, key, ret, oldArr->cowCheck());
+  if (UNLIKELY(!ret)) {
+    assertx(oldArr == newArr);
+    throwOOBArrayKeyException(key, oldArr);
+  }
+
+  if (newArr != oldArr) {
+    base->m_type = KindOfDict;
+    base->m_data.parr = newArr;
+    assertx(cellIsPlausible(*base));
+    decRefArr(oldArr);
+  }
+
+  return ret->asTypedValue();
+}
+
+template <bool reffy>
+inline TypedValue* ElemDDictPre(TypedValue* base, StringData* key) {
+  Variant* ret = nullptr;
+  ArrayData* oldArr = base->m_data.parr;
+
+  if (reffy) throwRefInvalidArrayValueException(oldArr);
+
+  ArrayData* newArr =
+    MixedArray::LvalSilentStrDict(oldArr, key, ret, oldArr->cowCheck());
+  if (UNLIKELY(!ret)) {
+    assertx(oldArr == newArr);
+    throwOOBArrayKeyException(key, oldArr);
+  }
+
+  if (newArr != oldArr) {
+    base->m_type = KindOfDict;
+    base->m_data.parr = newArr;
+    assertx(cellIsPlausible(*base));
+    decRefArr(oldArr);
+  }
+
+  return ret->asTypedValue();
+}
+
+template <bool reffy>
+inline TypedValue* ElemDDictPre(TypedValue* base, TypedValue key) {
+  auto const dt = key.m_type;
+  if (isIntType(dt))    return ElemDDictPre<reffy>(base, key.m_data.num);
+  if (isStringType(dt)) return ElemDDictPre<reffy>(base, key.m_data.pstr);
+  throwInvalidArrayKeyException(&key, base->m_data.parr);
+}
+
+template <bool reffy, KeyType keyType>
+inline TypedValue* ElemDDict(TypedValue* base, key_type<keyType> key) {
+  assertx(tvIsDict(base));
+  assertx(tvIsPlausible(*base));
+  auto* result = ElemDDictPre<reffy>(base, key);
+  assertx(tvIsDict(base));
+  assertx(tvIsPlausible(*base));
+  assertx(result->m_type != KindOfUninit);
+  return result;
+}
+
+/**
+ * ElemD when base is a Keyset
+ */
+template <bool reffy>
+[[noreturn]]
+inline TypedValue* ElemDKeysetPre(TypedValue* base, int64_t key) {
+  if (reffy) throwRefInvalidArrayValueException(base->m_data.parr);
+  throwInvalidKeysetOperation();
+}
+
+template <bool reffy>
+[[noreturn]]
+inline TypedValue* ElemDKeysetPre(TypedValue* base, StringData* key) {
+  if (reffy) throwRefInvalidArrayValueException(base->m_data.parr);
+  throwInvalidKeysetOperation();
+}
+
+template <bool reffy>
+[[noreturn]]
+inline TypedValue* ElemDKeysetPre(TypedValue* base, TypedValue key) {
+  auto const dt = key.m_type;
+  if (isIntType(dt))    ElemDKeysetPre<reffy>(base, key.m_data.num);
+  if (isStringType(dt)) ElemDKeysetPre<reffy>(base, key.m_data.pstr);
+  throwInvalidArrayKeyException(&key, base->m_data.parr);
+}
+
+template <bool reffy, KeyType keyType>
+[[noreturn]]
+inline TypedValue* ElemDKeyset(TypedValue* base, key_type<keyType> key) {
+  assertx(tvIsKeyset(base));
+  assertx(tvIsPlausible(*base));
+  ElemDKeysetPre<reffy>(base, key);
 }
 
 /**
@@ -450,14 +733,14 @@ inline TypedValue* ElemDString(TypedValue* base, key_type<keyType> key) {
 /**
  * ElemD when base is an Object
  */
-template <MOpFlags flags, KeyType keyType>
+template <MOpFlags flags, bool reffy, KeyType keyType>
 inline TypedValue* ElemDObject(TypedValue& tvRef, TypedValue* base,
                                key_type<keyType> key) {
   auto scratchKey = initScratchKey(key);
   auto obj = base->m_data.pobj;
 
   if (LIKELY(obj->isCollection())) {
-    if (flags == MOpFlags::DefineReffy) {
+    if (reffy) {
       raise_error("Collection elements cannot be taken by reference");
       return nullptr;
     }
@@ -467,7 +750,7 @@ inline TypedValue* ElemDObject(TypedValue& tvRef, TypedValue* base,
                                    SystemLib::s_ArrayObjectClass->nameStr());
     // ArrayObject should have the 'storage' property...
     assert(storage != nullptr);
-    return ElemDArray<flags, keyType>(storage->asTypedValue(), key);
+    return ElemDArray<flags, reffy, keyType>(storage->asTypedValue(), key);
   }
 
 
@@ -480,11 +763,13 @@ inline TypedValue* ElemDObject(TypedValue& tvRef, TypedValue* base,
  *
  * Returned pointer is not yet unboxed.  (I.e. it cannot point into a RefData.)
  */
-template <MOpFlags flags, KeyType keyType = KeyType::Any>
+template <MOpFlags flags, bool reffy, KeyType keyType = KeyType::Any>
 TypedValue* ElemD(TypedValue& tvRef, TypedValue* base, key_type<keyType> key) {
   assertx(flags & MOpFlags::Define && !(flags & MOpFlags::Unset));
 
   base = tvToCell(base);
+  assertx(cellIsPlausible(*base));
+
   switch (base->m_type) {
     case KindOfUninit:
     case KindOfNull:
@@ -498,11 +783,20 @@ TypedValue* ElemD(TypedValue& tvRef, TypedValue* base, key_type<keyType> key) {
     case KindOfPersistentString:
     case KindOfString:
       return ElemDString<flags, keyType>(base, key);
+    case KindOfPersistentVec:
+    case KindOfVec:
+      return ElemDVec<reffy, keyType>(base, key);
+    case KindOfPersistentDict:
+    case KindOfDict:
+      return ElemDDict<reffy, keyType>(base, key);
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+      return ElemDKeyset<reffy, keyType>(base, key);
     case KindOfPersistentArray:
     case KindOfArray:
-      return ElemDArray<flags, keyType>(base, key);
+      return ElemDArray<flags, reffy, keyType>(base, key);
     case KindOfObject:
-      return ElemDObject<flags, keyType>(tvRef, base, key);
+      return ElemDObject<flags, reffy, keyType>(tvRef, base, key);
     case KindOfRef:
     case KindOfClass:
       break;
@@ -529,6 +823,7 @@ inline TypedValue* ElemUArrayImpl<KeyType::Any>(Array& base, TypedValue key) {
 template <KeyType keyType>
 inline TypedValue* ElemUArray(TypedValue* base, key_type<keyType> key) {
   auto& baseArr = tvAsVariant(base).asArrRef();
+  assertx(baseArr.isPHPArray());
   if (baseArr.exists(keyAsValue(key))) {
     return ElemUArrayImpl<keyType>(baseArr, key);
   }
@@ -536,6 +831,132 @@ inline TypedValue* ElemUArray(TypedValue* base, key_type<keyType> key) {
   // Unset{Elem,Prop} do nothing when the base is InitNull, so this sketchy but
   // should be okay.
   return const_cast<TypedValue*>(init_null_variant.asTypedValue());
+}
+
+/**
+ * ElemU when base is a Vec
+ */
+inline TypedValue* ElemUVecPre(TypedValue* base, int64_t key) {
+  Variant* ret = nullptr;
+  ArrayData* oldArr = base->m_data.parr;
+  ArrayData* newArr =
+    PackedArray::LvalSilentIntVec(oldArr, key, ret, oldArr->cowCheck());
+  if (UNLIKELY(!ret)) {
+    return const_cast<TypedValue*>(init_null_variant.asTypedValue());
+  }
+  if (newArr != oldArr) {
+    base->m_type = KindOfVec;
+    base->m_data.parr = newArr;
+    assertx(cellIsPlausible(*base));
+    decRefArr(oldArr);
+  }
+  return ret->asTypedValue();
+}
+
+inline TypedValue* ElemUVecPre(TypedValue* base, StringData* key) {
+  return const_cast<TypedValue*>(init_null_variant.asTypedValue());
+}
+
+inline TypedValue* ElemUVecPre(TypedValue* base, TypedValue key) {
+  auto const dt = key.m_type;
+  if (LIKELY(isIntType(dt))) return ElemUVecPre(base, key.m_data.num);
+  if (isStringType(dt))      return ElemUVecPre(base, key.m_data.pstr);
+  throwInvalidArrayKeyException(&key, base->m_data.parr);
+}
+
+template <KeyType keyType>
+inline TypedValue* ElemUVec(TypedValue* base, key_type<keyType> key) {
+  assertx(tvIsVecArray(base));
+  assertx(tvIsPlausible(*base));
+  auto* result = ElemUVecPre(base, key);
+  assertx(tvIsVecArray(base));
+  assertx(tvIsPlausible(*base));
+  assertx(result->m_type != KindOfUninit);
+  return result;
+}
+
+/**
+ * ElemU when base is a Dict
+ */
+inline TypedValue* ElemUDictPre(TypedValue* base, int64_t key) {
+  Variant* ret = nullptr;
+  ArrayData* oldArr = base->m_data.parr;
+  ArrayData* newArr =
+    MixedArray::LvalSilentIntDict(oldArr, key, ret, oldArr->cowCheck());
+  if (UNLIKELY(!ret)) {
+    return const_cast<TypedValue*>(init_null_variant.asTypedValue());
+  }
+  if (newArr != oldArr) {
+    base->m_type = KindOfDict;
+    base->m_data.parr = newArr;
+    assertx(cellIsPlausible(*base));
+    decRefArr(oldArr);
+  }
+  return ret->asTypedValue();
+}
+
+inline TypedValue* ElemUDictPre(TypedValue* base, StringData* key) {
+  Variant* ret = nullptr;
+  ArrayData* oldArr = base->m_data.parr;
+  ArrayData* newArr =
+    MixedArray::LvalSilentStrDict(oldArr, key, ret, oldArr->cowCheck());
+  if (UNLIKELY(!ret)) {
+    return const_cast<TypedValue*>(init_null_variant.asTypedValue());
+  }
+  if (newArr != oldArr) {
+    base->m_type = KindOfDict;
+    base->m_data.parr = newArr;
+    assertx(cellIsPlausible(*base));
+    decRefArr(oldArr);
+  }
+  return ret->asTypedValue();
+}
+
+inline TypedValue* ElemUDictPre(TypedValue* base, TypedValue key) {
+  auto const dt = key.m_type;
+  if (isIntType(dt))    return ElemUDictPre(base, key.m_data.num);
+  if (isStringType(dt)) return ElemUDictPre(base, key.m_data.pstr);
+  throwInvalidArrayKeyException(&key, base->m_data.parr);
+}
+
+template <KeyType keyType>
+inline TypedValue* ElemUDict(TypedValue* base, key_type<keyType> key) {
+  assertx(tvIsDict(base));
+  assertx(tvIsPlausible(*base));
+  auto* result = ElemUDictPre(base, key);
+  assertx(tvIsDict(base));
+  assertx(tvIsPlausible(*base));
+  assertx(result->m_type != KindOfUninit);
+  return result;
+}
+
+/**
+ * ElemU when base is a Keyset
+ */
+[[noreturn]]
+inline TypedValue* ElemUKeysetPre(TypedValue* base, int64_t key) {
+  throwInvalidKeysetOperation();
+}
+
+[[noreturn]]
+inline TypedValue* ElemUKeysetPre(TypedValue* base, StringData* key) {
+  throwInvalidKeysetOperation();
+}
+
+[[noreturn]]
+inline TypedValue* ElemUKeysetPre(TypedValue* base, TypedValue key) {
+  auto const dt = key.m_type;
+  if (isIntType(dt))    ElemUKeysetPre(base, key.m_data.num);
+  if (isStringType(dt)) ElemUKeysetPre(base, key.m_data.pstr);
+  throwInvalidArrayKeyException(&key, base->m_data.parr);
+}
+
+template <KeyType keyType>
+[[noreturn]]
+inline TypedValue* ElemUKeyset(TypedValue* base, key_type<keyType> key) {
+  assertx(tvIsKeyset(base));
+  assertx(tvIsPlausible(*base));
+  ElemUKeysetPre(base, key);
 }
 
 /**
@@ -560,6 +981,8 @@ inline TypedValue* ElemUObject(TypedValue& tvRef, TypedValue* base,
 template <KeyType keyType = KeyType::Any>
 TypedValue* ElemU(TypedValue& tvRef, TypedValue* base, key_type<keyType> key) {
   base = tvToCell(base);
+  assertx(cellIsPlausible(*base));
+
   switch (base->m_type) {
     case KindOfUninit:
     case KindOfNull:
@@ -574,6 +997,15 @@ TypedValue* ElemU(TypedValue& tvRef, TypedValue* base, key_type<keyType> key) {
     case KindOfString:
       raise_error(Strings::OP_NOT_SUPPORTED_STRING);
       return nullptr;
+    case KindOfPersistentVec:
+    case KindOfVec:
+      return ElemUVec<keyType>(base, key);
+    case KindOfPersistentDict:
+    case KindOfDict:
+      return ElemUDict<keyType>(base, key);
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+      return ElemUKeyset<keyType>(base, key);
     case KindOfPersistentArray:
     case KindOfArray:
       return ElemUArray<keyType>(base, key);
@@ -631,6 +1063,8 @@ inline TypedValue* NewElemString(TypedValue& tvRef, TypedValue* base) {
  */
 template <bool reffy>
 inline TypedValue* NewElemArray(TypedValue* base) {
+  assertx(tvIsArray(base));
+  assertx(tvIsPlausible(*base));
   return reffy ?
     tvAsVariant(base).asArrRef().lvalAtRef().asTypedValue() :
     tvAsVariant(base).asArrRef().lvalAt().asTypedValue();
@@ -641,7 +1075,7 @@ inline TypedValue* NewElemArray(TypedValue* base) {
  */
 inline TypedValue* NewElemObject(TypedValue& tvRef, TypedValue* base) {
   if (base->m_data.pobj->isCollection()) {
-    throw_cannot_use_newelem_for_lval_read();
+    throw_cannot_use_newelem_for_lval_read_col();
     return nullptr;
   }
   tvRef = objOffsetGet(instanceFromTv(base), make_tv<KindOfNull>());
@@ -655,6 +1089,8 @@ template <bool reffy>
 inline TypedValue* NewElem(TypedValue& tvRef,
                            TypedValue* base) {
   base = tvToCell(base);
+  assertx(cellIsPlausible(*base));
+
   switch (base->m_type) {
     case KindOfUninit:
     case KindOfNull:
@@ -668,6 +1104,15 @@ inline TypedValue* NewElem(TypedValue& tvRef,
     case KindOfPersistentString:
     case KindOfString:
       return NewElemString(tvRef, base);
+    case KindOfPersistentVec:
+    case KindOfVec:
+      throw_cannot_use_newelem_for_lval_read_vec();
+    case KindOfPersistentDict:
+    case KindOfDict:
+      throw_cannot_use_newelem_for_lval_read_dict();
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+      throw_cannot_use_newelem_for_lval_read_keyset();
     case KindOfPersistentArray:
     case KindOfArray:
       return NewElemArray<reffy>(base);
@@ -850,7 +1295,7 @@ template<> struct ShuffleReturn<false> {
   static ArrayData* do_return(ArrayData* a) { return a; }
 };
 
-template<bool setRef> inline
+template<bool setRef, DataType dt> inline
 typename ShuffleReturn<setRef>::return_type
 arrayRefShuffle(ArrayData* oldData, ArrayData* newData, TypedValue* base) {
   if (newData == oldData) {
@@ -858,9 +1303,10 @@ arrayRefShuffle(ArrayData* oldData, ArrayData* newData, TypedValue* base) {
   }
 
   if (setRef) {
-    if (isArrayType(base->m_type) && base->m_data.parr == oldData) {
+    if (isArrayLikeType(base->m_type) && base->m_data.parr == oldData) {
+      base->m_type = dt;
       base->m_data.parr = newData;
-      base->m_type = KindOfArray;
+      assertx(cellIsPlausible(*base));
     } else {
       // The base was in a reference that was overwritten by the set operation,
       // so we don't want to store the new ArrayData to it. oldData has already
@@ -910,13 +1356,10 @@ inline ArrayData* SetElemArrayPre(ArrayData* a,
   if (key.m_type == KindOfInt64) {
     return SetElemArrayPre<setResult>(a, key.m_data.num, value, copy);
   }
-  if (!a->useWeakKeys()) {
-    throwInvalidArrayKeyException(&key, a);
-  }
   if (isNullType(key.m_type)) {
     return a->set(staticEmptyString(), cellAsCVarRef(*value), copy);
   }
-  if (!isArrayType(key.m_type) && key.m_type != KindOfObject) {
+  if (!isArrayLikeType(key.m_type) && key.m_type != KindOfObject) {
     return SetElemArrayPre<setResult>(a, tvAsCVarRef(&key).toInt64(),
                                       value, copy);
   }
@@ -938,13 +1381,113 @@ inline ArrayData* SetElemArrayPre(ArrayData* a,
 template <bool setResult, KeyType keyType>
 inline void SetElemArray(TypedValue* base, key_type<keyType> key,
                          Cell* value) {
+  assertx(tvIsArray(base));
+  assertx(tvIsPlausible(*base));
+
   ArrayData* a = base->m_data.parr;
   bool copy = a->cowCheck() ||
-              (isArrayType(value->m_type) && value->m_data.parr == a);
+    (tvIsArray(value) && value->m_data.parr == a);
 
   auto* newData = SetElemArrayPre<setResult>(a, key, value, copy);
+  assertx(newData->isPHPArray());
 
-  arrayRefShuffle<true>(a, newData, base);
+  arrayRefShuffle<true, KindOfArray>(a, newData, base);
+}
+
+/**
+ * SetElem when base is a Vec
+ */
+template<bool setResult>
+inline ArrayData* SetElemVecPre(ArrayData* a,
+                                int64_t key,
+                                Cell* value,
+                                bool copy) {
+  return PackedArray::SetIntVec(a, key, *value, copy);
+}
+
+template<bool setResult>
+inline ArrayData* SetElemVecPre(ArrayData* a,
+                                StringData* key,
+                                Cell* value,
+                                bool copy) {
+  throwInvalidArrayKeyException(key, a);
+}
+
+template<bool setResult>
+inline ArrayData* SetElemVecPre(ArrayData* a,
+                                TypedValue key,
+                                Cell* value,
+                                bool copy) {
+  auto const dt = key.m_type;
+  if (LIKELY(isIntType(dt))) return SetElemVecPre<setResult>(a, key.m_data.num,
+                                                             value, copy);
+  if (isStringType(dt))      return SetElemVecPre<setResult>(a, key.m_data.pstr,
+                                                             value, copy);
+  throwInvalidArrayKeyException(&key, a);
+}
+
+template <bool setResult, KeyType keyType>
+inline void SetElemVec(TypedValue* base, key_type<keyType> key,
+                       Cell* value) {
+  assertx(tvIsVecArray(base));
+  assertx(tvIsPlausible(*base));
+
+  ArrayData* a = base->m_data.parr;
+  bool copy = a->cowCheck() ||
+    (tvIsVecArray(value) && value->m_data.parr == a);
+
+  auto* newData = SetElemVecPre<setResult>(a, key, value, copy);
+  assertx(newData->isVecArray());
+
+  arrayRefShuffle<true, KindOfVec>(a, newData, base);
+}
+
+/**
+ * SetElem when base is a Dict
+ */
+template<bool setResult>
+inline ArrayData* SetElemDictPre(ArrayData* a,
+                                 int64_t key,
+                                 Cell* value,
+                                 bool copy) {
+  return MixedArray::SetIntDict(a, key, *value, copy);
+}
+
+template<bool setResult>
+inline ArrayData* SetElemDictPre(ArrayData* a,
+                                 StringData* key,
+                                 Cell* value,
+                                 bool copy) {
+  return MixedArray::SetStrDict(a, key, *value, copy);
+}
+
+template<bool setResult>
+inline ArrayData* SetElemDictPre(ArrayData* a,
+                                 TypedValue key,
+                                 Cell* value,
+                                 bool copy) {
+  auto const dt = key.m_type;
+  if (isIntType(dt))    return SetElemDictPre<setResult>(a, key.m_data.num,
+                                                         value, copy);
+  if (isStringType(dt)) return SetElemDictPre<setResult>(a, key.m_data.pstr,
+                                                         value, copy);
+  throwInvalidArrayKeyException(&key, a);
+}
+
+template <bool setResult, KeyType keyType>
+inline void SetElemDict(TypedValue* base, key_type<keyType> key,
+                        Cell* value) {
+  assertx(tvIsDict(base));
+  assertx(tvIsPlausible(*base));
+
+  ArrayData* a = base->m_data.parr;
+  bool copy = a->cowCheck() ||
+    (tvIsDict(value) && value->m_data.parr == a);
+
+  auto* newData = SetElemDictPre<setResult>(a, key, value, copy);
+  assertx(newData->isDict());
+
+  arrayRefShuffle<true, KindOfDict>(a, newData, base);
 }
 
 /**
@@ -956,6 +1499,8 @@ template <bool setResult, KeyType keyType>
 NEVER_INLINE
 StringData* SetElemSlow(TypedValue* base, key_type<keyType> key, Cell* value) {
   base = tvToCell(base);
+  assertx(cellIsPlausible(*base));
+
   switch (base->m_type) {
     case KindOfUninit:
     case KindOfNull:
@@ -972,6 +1517,17 @@ StringData* SetElemSlow(TypedValue* base, key_type<keyType> key, Cell* value) {
     case KindOfPersistentString:
     case KindOfString:
       return SetElemString<setResult, keyType>(base, key, value);
+    case KindOfPersistentVec:
+    case KindOfVec:
+      SetElemVec<setResult, keyType>(base, key, value);
+      return nullptr;
+    case KindOfPersistentDict:
+    case KindOfDict:
+      SetElemDict<setResult, keyType>(base, key, value);
+      return nullptr;
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+      throwInvalidKeysetOperation();
     case KindOfPersistentArray:
     case KindOfArray:
       SetElemArray<setResult, keyType>(base, key, value);
@@ -992,8 +1548,18 @@ StringData* SetElemSlow(TypedValue* base, key_type<keyType> key, Cell* value) {
 template <bool setResult, KeyType keyType = KeyType::Any>
 inline StringData* SetElem(TypedValue* base, key_type<keyType> key,
                            Cell* value) {
-  if (LIKELY(isArrayType(base->m_type))) {
+  assertx(tvIsPlausible(*base));
+
+  if (LIKELY(tvIsArray(base))) {
     SetElemArray<setResult, keyType>(base, key, value);
+    return nullptr;
+  }
+  if (LIKELY(tvIsVecArray(base))) {
+    SetElemVec<setResult, keyType>(base, key, value);
+    return nullptr;
+  }
+  if (LIKELY(tvIsDict(base))) {
+    SetElemDict<setResult, keyType>(base, key, value);
     return nullptr;
   }
   return SetElemSlow<setResult, keyType>(base, key, value);
@@ -1050,16 +1616,73 @@ inline void SetNewElemString(TypedValue* base, Cell* value) {
  */
 inline void SetNewElemArray(TypedValue* base, Cell* value) {
   base = tvToCell(base);
-  assert(isArrayType(base->m_type));
+  assertx(tvIsArray(base));
+  assertx(tvIsPlausible(*base));
   auto a = base->m_data.parr;
   auto const copy = a->cowCheck() ||
-    (isArrayType(value->m_type) && value->m_data.parr == a);
+    (tvIsArray(value) && value->m_data.parr == a);
   auto a2 = a->append(*value, copy);
   if (a2 != a) {
-    auto old = base->m_data.parr;
-    base->m_data.parr = a2;
     base->m_type = KindOfArray;
-    old->decRefAndRelease();
+    base->m_data.parr = a2;
+    a->decRefAndRelease();
+  }
+}
+
+/**
+ * SetNewElem when base is a Vec
+ */
+inline void SetNewElemVec(TypedValue* base, Cell* value) {
+  base = tvToCell(base);
+  assertx(tvIsVecArray(base));
+  assertx(tvIsPlausible(*base));
+  auto a = base->m_data.parr;
+  auto const copy = a->cowCheck() ||
+    (tvIsVecArray(value) && value->m_data.parr == a);
+  auto a2 = PackedArray::AppendVec(a, *value, copy);
+  if (a2 != a) {
+    base->m_type = KindOfVec;
+    base->m_data.parr = a2;
+    assertx(cellIsPlausible(*base));
+    a->decRefAndRelease();
+  }
+}
+
+/**
+ * SetNewElem when base is a Dict
+ */
+inline void SetNewElemDict(TypedValue* base, Cell* value) {
+  base = tvToCell(base);
+  assertx(tvIsDict(base));
+  assertx(tvIsPlausible(*base));
+  auto a = base->m_data.parr;
+  auto const copy = a->cowCheck() ||
+    (tvIsDict(value) && value->m_data.parr == a);
+  auto a2 = MixedArray::AppendDict(a, *value, copy);
+  if (a2 != a) {
+    base->m_type = KindOfDict;
+    base->m_data.parr = a2;
+    assertx(cellIsPlausible(*base));
+    a->decRefAndRelease();
+  }
+}
+
+/**
+ * SetNewElem when base is a Keyset
+ */
+inline void SetNewElemKeyset(TypedValue* base, Cell* value) {
+  base = tvToCell(base);
+  assertx(tvIsKeyset(base));
+  assertx(tvIsPlausible(*base));
+  auto a = base->m_data.parr;
+  auto const copy = a->cowCheck() ||
+    (tvIsKeyset(value) && value->m_data.parr == a);
+  auto a2 = MixedArray::AppendKeyset(a, *value, copy);
+  if (a2 != a) {
+    base->m_type = KindOfKeyset;
+    base->m_data.parr = a2;
+    assertx(cellIsPlausible(*base));
+    a->decRefAndRelease();
   }
 }
 
@@ -1080,6 +1703,8 @@ inline void SetNewElemObject(TypedValue* base, Cell* value) {
 template <bool setResult>
 inline void SetNewElem(TypedValue* base, Cell* value) {
   base = tvToCell(base);
+  assertx(cellIsPlausible(*base));
+
   switch (base->m_type) {
     case KindOfUninit:
     case KindOfNull:
@@ -1093,6 +1718,15 @@ inline void SetNewElem(TypedValue* base, Cell* value) {
     case KindOfPersistentString:
     case KindOfString:
       return SetNewElemString(base, value);
+    case KindOfPersistentVec:
+    case KindOfVec:
+      return SetNewElemVec(base, value);
+    case KindOfPersistentDict:
+    case KindOfDict:
+      return SetNewElemDict(base, value);
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+      return SetNewElemKeyset(base, value);
     case KindOfPersistentArray:
     case KindOfArray:
       return SetNewElemArray(base, value);
@@ -1140,6 +1774,8 @@ inline TypedValue* SetOpElem(TypedValue& tvRef,
                              SetOpOp op, TypedValue* base,
                              TypedValue key, Cell* rhs) {
   base = tvToCell(base);
+  assertx(cellIsPlausible(*base));
+
   switch (base->m_type) {
     case KindOfUninit:
     case KindOfNull:
@@ -1164,11 +1800,33 @@ inline TypedValue* SetOpElem(TypedValue& tvRef,
       }
       return SetOpElemEmptyish(op, base, key, rhs);
 
+    case KindOfPersistentVec:
+    case KindOfVec: {
+      TypedValue* result;
+      result = ElemDVec<false, KeyType::Any>(base, key);
+      result = tvAssertCell(result);
+      setopBody(result, op, rhs);
+      return result;
+    }
+
+    case KindOfPersistentDict:
+    case KindOfDict: {
+      TypedValue* result;
+      result = ElemDDict<false, KeyType::Any>(base, key);
+      result = tvAssertCell(result);
+      setopBody(result, op, rhs);
+      return result;
+    }
+
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+      throwInvalidKeysetOperation();
+
     case KindOfPersistentArray:
     case KindOfArray: {
       TypedValue* result;
       auto constexpr flags = MoreWarnings ? MOpFlags::Warn : MOpFlags::None;
-      result = ElemDArray<flags, KeyType::Any>(base, key);
+      result = ElemDArray<flags, false, KeyType::Any>(base, key);
       result = tvToCell(result);
       setopBody(result, op, rhs);
       return result;
@@ -1212,6 +1870,8 @@ inline TypedValue* SetOpNewElem(TypedValue& tvRef,
                                 SetOpOp op, TypedValue* base,
                                 Cell* rhs) {
   base = tvToCell(base);
+  assertx(cellIsPlausible(*base));
+
   switch (base->m_type) {
     case KindOfUninit:
     case KindOfNull:
@@ -1235,6 +1895,16 @@ inline TypedValue* SetOpNewElem(TypedValue& tvRef,
       }
       return SetOpNewElemEmptyish(op, base, rhs);
 
+    case KindOfPersistentVec:
+    case KindOfVec:
+      throw_cannot_use_newelem_for_lval_read_vec();
+    case KindOfPersistentDict:
+    case KindOfDict:
+      throw_cannot_use_newelem_for_lval_read_dict();
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+      throw_cannot_use_newelem_for_lval_read_keyset();
+
     case KindOfPersistentArray:
     case KindOfArray: {
       TypedValue* result;
@@ -1246,7 +1916,7 @@ inline TypedValue* SetOpNewElem(TypedValue& tvRef,
     case KindOfObject: {
       TypedValue* result;
       if (base->m_data.pobj->isCollection()) {
-        throw_cannot_use_newelem_for_lval_read();
+        throw_cannot_use_newelem_for_lval_read_col();
         result = nullptr;
       } else {
         tvRef = objOffsetGet(instanceFromTv(base), make_tv<KindOfNull>());
@@ -1350,6 +2020,8 @@ inline void IncDecElem(
   TypedValue& dest
 ) {
   base = tvToCell(base);
+  assertx(cellIsPlausible(*base));
+
   switch (base->m_type) {
     case KindOfUninit:
     case KindOfNull:
@@ -1374,10 +2046,26 @@ inline void IncDecElem(
       }
       return IncDecElemEmptyish(op, base, key, dest);
 
+    case KindOfPersistentVec:
+    case KindOfVec: {
+      auto result = ElemDVec<false, KeyType::Any>(base, key);
+      return IncDecBody(op, tvAssertCell(result), &dest);
+    }
+
+    case KindOfPersistentDict:
+    case KindOfDict: {
+      auto result = ElemDDict<false, KeyType::Any>(base, key);
+      return IncDecBody(op, tvAssertCell(result), &dest);
+    }
+
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+      throwInvalidKeysetOperation();
+
     case KindOfPersistentArray:
     case KindOfArray: {
       auto constexpr flags = MoreWarnings ? MOpFlags::Warn : MOpFlags::None;
-      auto result = ElemDArray<flags, KeyType::Any>(base, key);
+      auto result = ElemDArray<flags, false, KeyType::Any>(base, key);
       return IncDecBody(op, tvToCell(result), &dest);
     }
 
@@ -1429,6 +2117,8 @@ inline void IncDecNewElem(
   TypedValue& dest
 ) {
   base = tvToCell(base);
+  assertx(cellIsPlausible(*base));
+
   switch (base->m_type) {
     case KindOfUninit:
     case KindOfNull:
@@ -1452,6 +2142,16 @@ inline void IncDecNewElem(
       }
       return IncDecNewElemEmptyish(op, base, dest);
 
+    case KindOfPersistentVec:
+    case KindOfVec:
+      throw_cannot_use_newelem_for_lval_read_vec();
+    case KindOfPersistentDict:
+    case KindOfDict:
+      throw_cannot_use_newelem_for_lval_read_dict();
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+      throw_cannot_use_newelem_for_lval_read_keyset();
+
     case KindOfPersistentArray:
     case KindOfArray: {
       TypedValue* result = (TypedValue*)&tvAsVariant(base).asArrRef().lvalAt();
@@ -1462,7 +2162,7 @@ inline void IncDecNewElem(
     case KindOfObject: {
       TypedValue* result;
       if (base->m_data.pobj->isCollection()) {
-        throw_cannot_use_newelem_for_lval_read();
+        throw_cannot_use_newelem_for_lval_read_col();
         result = nullptr;
       } else {
         tvRef = objOffsetGet(instanceFromTv(base), make_tv<KindOfNull>());
@@ -1518,15 +2218,129 @@ inline ArrayData* UnsetElemArrayPre(ArrayData* a, TypedValue key,
  */
 template <KeyType keyType>
 inline void UnsetElemArray(TypedValue* base, key_type<keyType> key) {
+  assertx(tvIsArray(base));
+  assertx(tvIsPlausible(*base));
   ArrayData* a = base->m_data.parr;
-  bool copy = a->cowCheck();
-  ArrayData* a2 = UnsetElemArrayPre(a, key, copy);
+  ArrayData* a2 = UnsetElemArrayPre(a, key, a->cowCheck());
 
   if (a2 != a) {
-    auto old = base->m_data.parr;
-    base->m_data.parr = a2;
     base->m_type = KindOfArray;
-    old->decRefAndRelease();
+    base->m_data.parr = a2;
+    assertx(cellIsPlausible(*base));
+    a->decRefAndRelease();
+ }
+}
+
+/**
+ * UnsetElem when base is a Vec
+ */
+
+inline ArrayData* UnsetElemVecPre(ArrayData* a, int64_t key,
+                                  bool copy) {
+  return PackedArray::RemoveIntVec(a, key, copy);
+}
+
+inline ArrayData* UnsetElemVecPre(ArrayData* a, StringData* key,
+                                  bool copy) {
+  /* Never contains strings, so a no-op. */
+  return a;
+}
+
+inline ArrayData* UnsetElemVecPre(ArrayData* a, TypedValue key,
+                                  bool copy) {
+  auto const dt = key.m_type;
+  if (LIKELY(isIntType(dt))) return UnsetElemVecPre(a, key.m_data.num, copy);
+  if (isStringType(dt))      return UnsetElemVecPre(a, key.m_data.pstr, copy);
+  throwInvalidArrayKeyException(&key, a);
+}
+
+template <KeyType keyType>
+inline void UnsetElemVec(TypedValue* base, key_type<keyType> key) {
+  assertx(tvIsVecArray(base));
+  assertx(tvIsPlausible(*base));
+  ArrayData* a = base->m_data.parr;
+  ArrayData* a2 = UnsetElemVecPre(a, key, a->cowCheck());
+  assertx(a2->isVecArray() || a2->isDict());
+
+  if (a2 != a) {
+    base->m_type = a2->toDataType();
+    base->m_data.parr = a2;
+    assertx(cellIsPlausible(*base));
+    a->decRefAndRelease();
+ }
+}
+
+/**
+ * UnsetElem when base is a Dict
+ */
+
+inline ArrayData* UnsetElemDictPre(ArrayData* a, int64_t key,
+                                   bool copy) {
+  return MixedArray::RemoveIntDict(a, key, copy);
+}
+
+inline ArrayData* UnsetElemDictPre(ArrayData* a, StringData* key,
+                                   bool copy) {
+  return MixedArray::RemoveStrDict(a, key, copy);
+}
+
+inline ArrayData* UnsetElemDictPre(ArrayData* a, TypedValue key,
+                                   bool copy) {
+  auto const dt = key.m_type;
+  if (isIntType(dt))    return UnsetElemDictPre(a, key.m_data.num, copy);
+  if (isStringType(dt)) return UnsetElemDictPre(a, key.m_data.pstr, copy);
+  throwInvalidArrayKeyException(&key, a);
+}
+
+template <KeyType keyType>
+inline void UnsetElemDict(TypedValue* base, key_type<keyType> key) {
+  assertx(tvIsDict(base));
+  assertx(tvIsPlausible(*base));
+  ArrayData* a = base->m_data.parr;
+  ArrayData* a2 = UnsetElemDictPre(a, key, a->cowCheck());
+
+  if (a2 != a) {
+    base->m_type = KindOfDict;
+    base->m_data.parr = a2;
+    assertx(cellIsPlausible(*base));
+    a->decRefAndRelease();
+ }
+}
+
+/**
+ * UnsetElem when base is a Keyset
+ */
+
+inline ArrayData* UnsetElemKeysetPre(ArrayData* a, int64_t key,
+                                     bool copy) {
+  return MixedArray::RemoveIntKeyset(a, key, copy);
+}
+
+inline ArrayData* UnsetElemKeysetPre(ArrayData* a, StringData* key,
+                                     bool copy) {
+  return MixedArray::RemoveStrKeyset(a, key, copy);
+}
+
+inline ArrayData* UnsetElemKeysetPre(ArrayData* a, TypedValue key,
+                                     bool copy) {
+  auto const dt = key.m_type;
+  if (isIntType(dt))    return UnsetElemKeysetPre(a, key.m_data.num, copy);
+  if (isStringType(dt)) return UnsetElemKeysetPre(a, key.m_data.pstr, copy);
+  throwInvalidArrayKeyException(&key, a);
+}
+
+template <KeyType keyType>
+inline void UnsetElemKeyset(TypedValue* base, key_type<keyType> key) {
+  assertx(tvIsKeyset(base));
+  assertx(tvIsPlausible(*base));
+  ArrayData* a = base->m_data.parr;
+  ArrayData* a2 = UnsetElemKeysetPre(a, key, a->cowCheck());
+
+  if (a2 != a) {
+    base->m_type = KindOfKeyset;
+    base->m_data.parr = a2;
+    assertx(cellIsPlausible(*base));
+    a->decRefAndRelease();
  }
 }
 
@@ -1537,6 +2351,8 @@ template <KeyType keyType>
 NEVER_INLINE
 void UnsetElemSlow(TypedValue* base, key_type<keyType> key) {
   base = tvToCell(base);
+  assertx(cellIsPlausible(*base));
+
   switch (base->m_type) {
     case KindOfUninit:
     case KindOfNull:
@@ -1549,6 +2365,21 @@ void UnsetElemSlow(TypedValue* base, key_type<keyType> key) {
     case KindOfPersistentString:
     case KindOfString:
       raise_error(Strings::CANT_UNSET_STRING);
+      return;
+
+    case KindOfPersistentVec:
+    case KindOfVec:
+      UnsetElemVec<keyType>(base, key);
+      return;
+
+    case KindOfPersistentDict:
+    case KindOfDict:
+      UnsetElemDict<keyType>(base, key);
+      return;
+
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+      UnsetElemKeyset<keyType>(base, key);
       return;
 
     case KindOfPersistentArray:
@@ -1578,8 +2409,19 @@ void UnsetElemSlow(TypedValue* base, key_type<keyType> key) {
  */
 template <KeyType keyType = KeyType::Any>
 inline void UnsetElem(TypedValue* base, key_type<keyType> key) {
-  if (LIKELY(isArrayType(base->m_type))) {
+  assertx(tvIsPlausible(*base));
+
+  if (LIKELY(tvIsArray(base))) {
     return UnsetElemArray<keyType>(base, key);
+  }
+  if (LIKELY(tvIsVecArray(base))) {
+    return UnsetElemVec<keyType>(base, key);
+  }
+  if (LIKELY(tvIsDict(base))) {
+    return UnsetElemDict<keyType>(base, key);
+  }
+  if (LIKELY(tvIsKeyset(base))) {
+    return UnsetElemKeyset<keyType>(base, key);
   }
   return UnsetElemSlow<keyType>(base, key);
 }
@@ -1626,7 +2468,7 @@ bool IssetEmptyElemString(TypedValue* base, key_type<keyType> key) {
       }
       int64_t n;
       badKey = !is_strictly_integer(str, len, n);
-    } else if (isArrayType(tv.m_type) || tv.m_type == KindOfObject ||
+    } else if (isArrayLikeType(tv.m_type) || tv.m_type == KindOfObject ||
                tv.m_type == KindOfResource) {
       badKey = true;
     }
@@ -1654,12 +2496,52 @@ bool IssetEmptyElemString(TypedValue* base, key_type<keyType> key) {
  * IssetEmptyElem when base is an Array
  */
 template <bool useEmpty, KeyType keyType>
-bool IssetEmptyElemArray(TypedValue* base, key_type<keyType> key) {
-  auto const result = ElemArray<MOpFlags::None,keyType>(base->m_data.parr, key);
+bool IssetEmptyElemArray(ArrayData* a, key_type<keyType> key) {
+  assertx(a->isPHPArray());
+  auto const result = ElemArray<MOpFlags::None, keyType>(a, key);
   if (useEmpty) {
     return !cellToBool(*tvToCell(result));
   }
   return !cellIsNull(tvToCell(result));
+}
+
+/**
+ * IssetEmptyElem when base is a Vec
+ */
+template <bool useEmpty, KeyType keyType>
+bool IssetEmptyElemVec(ArrayData* a, key_type<keyType> key) {
+  assertx(a->isVecArray());
+  auto const result = ElemVec<MOpFlags::None, keyType>(a, key);
+  if (useEmpty) {
+    return !cellToBool(*tvAssertCell(result));
+  }
+  return !cellIsNull(tvAssertCell(result));
+}
+
+/**
+ * IssetEmptyElem when base is a Dict
+ */
+template <bool useEmpty, KeyType keyType>
+bool IssetEmptyElemDict(ArrayData* a, key_type<keyType> key) {
+  assertx(a->isDict());
+  auto const result = ElemDict<MOpFlags::None, keyType>(a, key);
+  if (useEmpty) {
+    return !cellToBool(*tvAssertCell(result));
+  }
+  return !cellIsNull(tvAssertCell(result));
+}
+
+/**
+ * IssetEmptyElem when base is a Keyset
+ */
+template <bool useEmpty, KeyType keyType>
+bool IssetEmptyElemKeyset(ArrayData* a, key_type<keyType> key) {
+  assertx(a->isKeyset());
+  auto const result = ElemKeyset<MOpFlags::None, keyType>(a, key);
+  if (useEmpty) {
+    return !cellToBool(*tvAssertCell(result));
+  }
+  return !cellIsNull(tvAssertCell(result));
 }
 
 /**
@@ -1668,6 +2550,8 @@ bool IssetEmptyElemArray(TypedValue* base, key_type<keyType> key) {
 template <bool useEmpty, KeyType keyType>
 NEVER_INLINE bool IssetEmptyElemSlow(TypedValue* base, key_type<keyType> key) {
   base = tvToCell(base);
+  assertx(cellIsPlausible(*base));
+
   switch (base->m_type) {
     case KindOfUninit:
     case KindOfNull:
@@ -1681,9 +2565,21 @@ NEVER_INLINE bool IssetEmptyElemSlow(TypedValue* base, key_type<keyType> key) {
     case KindOfString:
       return IssetEmptyElemString<useEmpty, keyType>(base, key);
 
+    case KindOfPersistentVec:
+    case KindOfVec:
+      return IssetEmptyElemVec<useEmpty, keyType>(base->m_data.parr, key);
+
+    case KindOfPersistentDict:
+    case KindOfDict:
+      return IssetEmptyElemDict<useEmpty, keyType>(base->m_data.parr, key);
+
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+      return IssetEmptyElemKeyset<useEmpty, keyType>(base->m_data.parr, key);
+
     case KindOfPersistentArray:
     case KindOfArray:
-      return IssetEmptyElemArray<useEmpty, keyType>(base, key);
+      return IssetEmptyElemArray<useEmpty, keyType>(base->m_data.parr, key);
 
     case KindOfObject:
       return IssetEmptyElemObj<useEmpty, keyType>(base->m_data.pobj, key);
@@ -1700,8 +2596,19 @@ NEVER_INLINE bool IssetEmptyElemSlow(TypedValue* base, key_type<keyType> key) {
  */
 template <bool useEmpty, KeyType keyType = KeyType::Any>
 bool IssetEmptyElem(TypedValue* base, key_type<keyType> key) {
-  if (LIKELY(isArrayType(base->m_type))) {
-    return IssetEmptyElemArray<useEmpty, keyType>(base, key);
+  assertx(tvIsPlausible(*base));
+
+  if (LIKELY(tvIsArray(base))) {
+    return IssetEmptyElemArray<useEmpty, keyType>(base->m_data.parr, key);
+  }
+  if (LIKELY(tvIsVecArray(base))) {
+    return IssetEmptyElemVec<useEmpty, keyType>(base->m_data.parr, key);
+  }
+  if (LIKELY(tvIsDict(base))) {
+    return IssetEmptyElemDict<useEmpty, keyType>(base->m_data.parr, key);
+  }
+  if (LIKELY(tvIsKeyset(base))) {
+    return IssetEmptyElemKeyset<useEmpty, keyType>(base->m_data.parr, key);
   }
   return IssetEmptyElemSlow<useEmpty, keyType>(base, key);
 }
@@ -1762,6 +2669,12 @@ TypedValue* propPre(TypedValue& tvRef, TypedValue* base) {
       }
       return propPreStdclass<flags>(tvRef, base);
 
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
     case KindOfPersistentArray:
     case KindOfArray:
       return propPreNull<flags>(tvRef);
@@ -1792,6 +2705,12 @@ inline TypedValue* nullSafeProp(TypedValue& tvRef,
     case KindOfResource:
     case KindOfPersistentString:
     case KindOfString:
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
     case KindOfPersistentArray:
     case KindOfArray:
       tvWriteNull(&tvRef);
@@ -1930,6 +2849,12 @@ inline void SetProp(Class* ctx, TypedValue* base, key_type<keyType> key,
 
     case KindOfInt64:
     case KindOfDouble:
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
     case KindOfPersistentArray:
     case KindOfArray:
     case KindOfResource:
@@ -2009,6 +2934,12 @@ inline TypedValue* SetOpProp(TypedValue& tvRef,
 
     case KindOfInt64:
     case KindOfDouble:
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
     case KindOfPersistentArray:
     case KindOfArray:
     case KindOfResource:
@@ -2091,6 +3022,12 @@ inline void IncDecProp(
 
     case KindOfInt64:
     case KindOfDouble:
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
     case KindOfPersistentArray:
     case KindOfArray:
     case KindOfResource:
