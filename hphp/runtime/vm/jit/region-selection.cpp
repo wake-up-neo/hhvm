@@ -16,6 +16,7 @@
 #include "hphp/runtime/vm/jit/region-selection.h"
 
 #include <algorithm>
+#include <fstream>
 #include <functional>
 #include <exception>
 #include <utility>
@@ -30,6 +31,7 @@
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/vm/jit/normalized-instruction.h"
 #include "hphp/runtime/vm/jit/prof-data.h"
+#include "hphp/runtime/vm/jit/tc.h"
 #include "hphp/runtime/vm/jit/trans-cfg.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/translator.h"
@@ -770,13 +772,12 @@ RegionDescPtr selectRegion(const RegionContext& context,
   return region;
 }
 
-RegionDescPtr selectHotRegion(TransID transId,
-                              MCGenerator* mcg) {
+RegionDescPtr selectHotRegion(TransID transId) {
   auto const profData = jit::profData();
   assertx(profData);
   auto const& func = *profData->transRec(transId)->func();
   FuncId funcId = func.getFuncId();
-  TransCFG cfg(funcId, profData, mcg->srcDB());
+  TransCFG cfg(funcId, profData);
   assertx(regionMode() != RegionMode::Method);
   RegionDescPtr region;
   HotTransContext ctx;

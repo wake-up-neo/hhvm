@@ -23,8 +23,9 @@
 #include "hphp/runtime/ext/std/ext_std_errorfunc.h"
 #include "hphp/runtime/ext/xdebug/server.h"
 #include "hphp/runtime/server/http-request-handler.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
-#include "hphp/runtime/vm/jit/translator.h"
+#include "hphp/runtime/vm/jit/mcgen.h"
+#include "hphp/runtime/vm/jit/tc.h"
+#include "hphp/runtime/vm/jit/trans-db.h"
 #include "hphp/runtime/vm/ringbuffer-print.h"
 
 #include "hphp/util/build-info.h"
@@ -135,8 +136,8 @@ static void bt_handler(int sig) {
     ::close(fd);
   }
 
-  if (jit::mcg != nullptr && jit::Translator::isTransDBEnabled()) {
-    jit::mcg->dumpTC(true);
+  if (jit::transdb::enabled()) {
+    jit::tc::dump(true);
   }
 
   if (!RuntimeOption::CoreDumpEmail.empty()) {

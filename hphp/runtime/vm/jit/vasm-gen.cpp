@@ -37,7 +37,12 @@ Vout& Vout::operator<<(const Vinstr& inst) {
 
   auto& code = m_unit.blocks[m_block].code;
   code.emplace_back(inst);
-  code.back().origin = m_origin;
+  code.back().origin = m_irctx.origin;
+  code.back().voff = m_irctx.voff == Vinstr::kInvalidVoff
+    ? m_unit.cur_voff++
+    : m_irctx.voff;
+  // TODO(t13282062)
+  // assertx(m_unit.cur_voff != Vinstr::kInvalidVoff);
 
   FTRACE(6, "Vout << {}\n", show(m_unit, inst));
   return *this;
@@ -52,7 +57,7 @@ bool Vout::closed() const {
 }
 
 Vout Vout::makeBlock() {
-  return {m_unit, m_unit.makeBlock(area()), m_origin};
+  return {m_unit, m_unit.makeBlock(area()), m_irctx};
 }
 
 ///////////////////////////////////////////////////////////////////////////////

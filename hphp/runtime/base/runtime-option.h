@@ -331,6 +331,7 @@ struct RuntimeOption {
   static std::string CoreDumpReportDirectory;
   static std::string StackTraceFilename;
   static int StackTraceTimeout;
+  static std::string RemoteTraceOutputDir;
 
   static bool EnableStats;
   static bool EnableAPCStats;
@@ -516,6 +517,7 @@ struct RuntimeOption {
   F(bool, JitDisabledByHphpd,          false)                           \
   F(bool, JitTransCounters,            false)                           \
   F(bool, JitPseudomain,               true)                            \
+  F(uint32_t, JitWarmupStatusBytes,    ((25 << 10) + 1))                \
   F(uint32_t, JitWriteLeaseExpiration, 1500) /* in microseconds */      \
   F(bool, HHIRLICM,                    false)                           \
   F(bool, HHIRSimplification,          true)                            \
@@ -557,6 +559,8 @@ struct RuntimeOption {
   F(double,   JitPGOMinArcProbability, 0.0)                             \
   F(uint32_t, JitPGOMaxFuncSizeDupBody, 80)                             \
   F(uint32_t, JitPGORelaxPercent,      100)                             \
+  F(uint64_t, FuncCountHint,           10000)                           \
+  F(uint64_t, PGOFuncCountHint,        1000)                            \
   F(uint32_t, HotFuncCount,            4100)                            \
   F(bool, RegionRelaxGuards,           true)                            \
   /* DumpBytecode =1 dumps user php, =2 dumps systemlib & user php */   \
@@ -581,7 +585,9 @@ struct RuntimeOption {
   F(bool, Quarantine,                  false)                           \
   F(bool, EnableGCTypeScan,            false)                           \
   F(bool, RaiseMissingThis,            !EnableHipHopSyntax)             \
+  F(bool, QuoteEmptyShellArg,          !EnableHipHopSyntax)             \
   F(uint32_t, GCSampleRate,                1)                           \
+  F(uint32_t, SerDesSampleRate,            0)                           \
   F(uint32_t, JitSampleRate,               0)                           \
   F(uint32_t, JitFilterLease,              1)                           \
   F(bool, DisableSomeRepoAuthNotices,  true)                            \
@@ -597,6 +603,7 @@ struct RuntimeOption {
   F(bool, EnableReusableTC,   reuseTCDefault())                         \
   F(uint32_t, ReusableTCPadding, 128)                                   \
   F(int64_t,  StressUnitCacheFreq, 0)                                   \
+  F(int64_t, PerfWarningSampleRate, 1)                                  \
   /* Profiling flags */                                                 \
   F(bool, EnableReverseDataMap, false)                                  \
   /* */
@@ -621,6 +628,9 @@ public:
   static std::string RepoLocalMode;
   static std::string RepoLocalPath;
   static std::string RepoCentralPath;
+  static int32_t RepoCentralFileMode;
+  static std::string RepoCentralFileUser;
+  static std::string RepoCentralFileGroup;
   static std::string RepoEvalMode;
   static std::string RepoJournal;
   static bool RepoCommit;

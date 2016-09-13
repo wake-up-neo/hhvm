@@ -16,14 +16,14 @@ module SourceText = Full_fidelity_source_text
 module SyntaxError = Full_fidelity_syntax_error
 module Operator = Full_fidelity_operator
 module PrecedenceParser = Full_fidelity_precedence_parser
-module TypeParser = Full_fidelity_type_parser
 
 open TokenKind
 open Syntax
 
-module WithStatementAndDeclParser
+module WithStatementAndDeclAndTypeParser
   (StatementParser : Full_fidelity_statement_parser_type.StatementParserType)
-  (DeclParser : Full_fidelity_declaration_parser_type.DeclarationParserType) :
+  (DeclParser : Full_fidelity_declaration_parser_type.DeclarationParserType)
+  (TypeParser : Full_fidelity_type_parser_type.TypeParserType) :
   Full_fidelity_expression_parser_type.ExpressionParserType = struct
 
   include PrecedenceParser
@@ -62,6 +62,9 @@ module WithStatementAndDeclParser
   and parse_expression_with_reset_precedence parser =
     with_reset_precedence parser parse_expression
 
+  and parse_expression_with_operator_precedence parser operator =
+    with_operator_precedence parser operator parse_expression
+
   (* try to parse an expression. If parser cannot make progress, return None *)
   and parse_expression_optional parser ~reset_prec =
     let module Lexer = PrecedenceParser.Lexer in
@@ -79,7 +82,7 @@ module WithStatementAndDeclParser
     old_errors = new_errors
 
   and parse_term parser =
-    let (parser1, token) = next_token parser in
+    let (parser1, token) = next_xhp_class_name_or_other parser in
     match (Token.kind token) with
     | DecimalLiteral
     | OctalLiteral
@@ -103,6 +106,10 @@ module WithStatementAndDeclParser
     | Name
     | QualifiedName ->
         parse_name_or_collection_literal_expression parser1 token
+    | XHPClassName
+    | Self
+    | Parent
+    | Static -> parse_scope_resolution_expression parser1 (make_token token)
     | Yield -> parse_yield_expression parser
     | Print -> parse_print_expression parser
     | Exclamation
@@ -153,9 +160,17 @@ module WithStatementAndDeclParser
       (* TODO: Error, expected expression *)
       (parser1, make_token token)
 
+  and next_is_lower_precedence parser =
+    let kind = peek_token_kind parser in
+    if not (Operator.is_trailing_operator_token kind) then
+      true (* No trailing operator; terminate the expression. *)
+    else
+      let operator = Operator.trailing_from_token kind in
+      (Operator.precedence operator) < parser.precedence
+
   and parse_remaining_expression parser term =
-    let (parser1, token) = next_token parser in
-    match (Token.kind token) with
+    if next_is_lower_precedence parser then (parser, term)
+    else match peek_token_kind parser with
     (* Binary operators *)
     | Plus
     | Minus
@@ -193,21 +208,44 @@ module WithStatementAndDeclParser
     | GreaterThanGreaterThan
     | Carat
     | BarGreaterThan
-    | MinusGreaterThan
-    | QuestionMinusGreaterThan
-    | ColonColon
     | QuestionQuestion
     | Instanceof ->
     (* TODO: "and" "or" "xor" *)
       parse_remaining_binary_operator parser term
-
+    | QuestionMinusGreaterThan
+    | MinusGreaterThan -> parse_member_selection_expression parser term
+    | ColonColon ->
+      parse_scope_resolution_expression parser term
     | PlusPlus
     | MinusMinus -> parse_postfix_unary parser term
     | LeftParen -> parse_function_call parser term
     | LeftBracket
     | LeftBrace -> parse_subscript parser term
-    | Question -> parse_conditional_expression parser1 term (make_token token)
+    | Question ->
+      let (parser, token) = assert_token parser Question in
+      parse_conditional_expression parser term token
     | _ -> (parser, term)
+
+  and parse_member_selection_expression parser term =
+    (* SPEC:
+    member-selection-expression:
+      postfix-expression  ->  name
+      postfix-expression  ->  variable-name
+
+    null-safe-member-selection-expression:
+      postfix-expression  ->  name
+      postfix-expression  ->  variable-name
+    *)
+    let (parser, token) = next_token parser in
+    let op = make_token token in
+    (* TODO: We are putting the name / variable into the tree as a token
+    leaf, rather than as a name or variable expression. Is that right? *)
+    let (parser, name) = expect_name_or_variable parser in
+    let result = if (Token.kind token) = MinusGreaterThan then
+      make_member_selection_expression term op name
+    else
+      make_safe_member_selection_expression term op name in
+    parse_remaining_expression parser result
 
   and parse_subscript parser term =
     (* SPEC
@@ -260,43 +298,42 @@ module WithStatementAndDeclParser
       parser, make_decorated_expression dots expr
     | _ -> parse_expression parser
 
+  and parse_designator parser =
+    (* SPEC:
+        class-type-designator:
+          parent
+          self
+          static
+          member-selection-expression
+          null-safe-member-selection-expression
+          qualified-name
+          scope-resolution-expression
+          subscript-expression
+          variable-name
+    *)
+    let (parser1, token) = next_token parser in
+    let kind = peek_token_kind parser1 in
+    match Token.kind token with
+    | Parent
+    | Self
+    | Static when kind = LeftParen ->
+      (parser1, make_token token)
+    | _ ->
+        parse_expression_with_operator_precedence parser Operator.NewOperator
+        (* TODO: We need to verify in a later pass that the expression is a
+        scope resolution (that does not end in class!), a member selection,
+        a name, a variable, a property, or an array subscript expression. *)
+
   and parse_object_creation_expression parser =
     (* SPEC
       object-creation-expression:
-        new  class-type-designator  (  argument-expression-listopt  )
-
-      class-type-designator:
-        static
-        qualified-name
-        variable-name
+        new  class-type-designator  (  argument-expression-list-opt  )
     *)
-    let (parser, new_token) = next_token parser in
-    let (parser1, token) = next_token parser in
-    (* TODO: handle error reporting:
-      not all types of expressions are allowed
-      dynamic calls are not allowed in strict mode
-    *)
-    let (parser, designator, left, args, right) = match Token.kind token with
-    | Static ->
-        let (parser, designator) = parser1, (make_token token) in
-        let (parser, left, args, right) = parse_expression_list_opt parser in
-        (parser, designator, left, args, right)
-    | _ ->
-      let (parser, expr) = parse_expression parser in
-      match syntax expr with
-        | FunctionCallExpression fce -> (
-            parser,
-            fce.function_call_receiver,
-            fce.function_call_lparen,
-            fce.function_call_arguments,
-            fce.function_call_rparen
-          )
-        | _ ->
-          (parser, expr, make_missing(), make_missing(), make_missing())
-    in
-
-    let result = make_object_creation_expression (make_token new_token)
-      designator left args right in
+    let (parser, new_token) = assert_token parser New in
+    let (parser, designator) = parse_designator parser in
+    let (parser, left, args, right) = parse_expression_list_opt parser in
+    let result =
+      make_object_creation_expression new_token designator left args right in
     (parser, result)
 
   and parse_function_call parser receiver =
@@ -477,7 +514,9 @@ module WithStatementAndDeclParser
 
   and parse_remaining_binary_operator parser left_term =
     (* We have a left term. If we get here then we know that
-     * we have a binary operator to its right.
+     * we have a binary operator to its right, and that furthermore,
+     * the binary operator is of equal or higher precedence than the
+     * whatever is going on in the left term.
      *
      * Here's how this works.  Suppose we have something like
      *
@@ -499,9 +538,9 @@ module WithStatementAndDeclParser
      *
      * How are we going to figure this out?
      *
-     * We have the term A in hand; the precedence is zero.
+     * We have the term A in hand; the precedence is low.
      * We see that x follows A.
-     * We obtain the precedence of x. It is greater than zero,
+     * We obtain the precedence of x. It is higher than the precedence of A,
      * so we obtain B, and then we call a helper method that
      * collects together everything to the right of B that is
      * of higher precedence than x. (Or equal, and right-associative.)
@@ -512,19 +551,15 @@ module WithStatementAndDeclParser
      * will simply return B, we'll construct (A x B) and recurse with that
      * as the left term.
      *)
-
+      assert (not (next_is_lower_precedence parser));
       let (parser1, token) = next_token parser in
       let operator = Operator.trailing_from_token (Token.kind token) in
       let precedence = Operator.precedence operator in
-      if precedence < parser.precedence then
-        (parser, left_term)
-      else
-        let (parser2, right_term) = parse_term parser1 in
-        let (parser2, right_term) = parse_remaining_binary_operator_helper
-          parser2 right_term precedence in
-        let term =
-          make_binary_operator left_term (make_token token) right_term in
-        parse_remaining_expression parser2 term
+      let (parser2, right_term) = parse_term parser1 in
+      let (parser2, right_term) = parse_remaining_binary_operator_helper
+        parser2 right_term precedence in
+      let term = make_binary_operator left_term (make_token token) right_term in
+      parse_remaining_expression parser2 term
 
   and parse_remaining_binary_operator_helper
       parser right_term left_precedence =
@@ -742,23 +777,13 @@ module WithStatementAndDeclParser
         single-quoted-string-literal  =>  expression
         integer-literal  =>  expression
         qualified-name  =>  expression
+        scope-resolution-expression  =>  expression
         *)
-    let (parser1, token) = next_token parser in
-    let (parser, name) = match Token.kind token with
-    | SingleQuotedStringLiteral
-    | DecimalLiteral
-    | OctalLiteral
-    | HexadecimalLiteral
-    | BinaryLiteral
-    | Name
-    | QualifiedName -> (parser1, make_token token)
-    | EqualGreaterThan ->
-      (* ERROR RECOVERY: We're missing the name. *)
-      (with_error parser SyntaxError.error1025, make_missing())
-    | _ ->
-      (* ERROR RECOVERY: We're missing the name and we have no arrow either.
-         Just eat the token and hope we get an arrow next. *)
-      (with_error parser1 SyntaxError.error1025, make_missing()) in
+
+    (* ERROR RECOVERY: We allow any expression as the left hand side.
+       TODO: Make a later error pass that detects when it is not a
+       literal or name. *)
+    let (parser, name) = with_reset_precedence parser parse_expression in
     let (parser, arrow) = expect_arrow parser in
     let (parser, value) = with_reset_precedence parser parse_expression in
     let result = make_field_initializer name arrow value in
@@ -770,6 +795,7 @@ module WithStatementAndDeclParser
         field-initializer
         field-initializer-list    ,  field-initializer
     *)
+    (* TODO: Do we allow trailing commas? Do we need to update the spec? *)
     parse_comma_list_opt
       parser RightParen SyntaxError.error1025 parse_field_initializer
 
@@ -883,6 +909,7 @@ module WithStatementAndDeclParser
 
   and parse_braced_expression parser =
     let (parser, left_brace) = next_token parser in
+    (* TODO: Rewrite this to use helper methods. *)
     let precedence = parser.precedence in
     let parser = with_precedence parser 0 in
     let (parser, expression) = parse_expression parser in
@@ -1009,4 +1036,29 @@ module WithStatementAndDeclParser
       missing, give a missing node for the left side, and parse the
       remainder as the right side. We'll go for the former for now. *)
       (with_error parser SyntaxError.error1015, (make_token token))
+
+  and parse_scope_resolution_expression parser qualifier =
+    (* SPEC
+      scope-resolution-expression:
+        scope-resolution-qualifier  ::  name
+        scope-resolution-qualifier  ::  class
+
+      scope-resolution-qualifier:
+        qualified-name
+        variable-name
+        self
+        parent
+        static
+    *)
+    (* TODO: The left hand side can in fact be any expression in this parser;
+    we need to add a later error pass to detect that the left hand side is
+    a valid qualifier. *)
+    (* TODO: The right hand side, if a name or a variable, is treated as a
+    name or variable *token* and not a name or variable *expression*. Is
+    that the desired tree topology? Give this more thought; it might impact
+    rename refactoring semantics. *)
+    let (parser, op) = expect_coloncolon parser in
+    let (parser, name) = expect_name_variable_or_class parser in
+    let result = make_scope_resolution_expression qualifier op name in
+    parse_remaining_expression parser result
 end

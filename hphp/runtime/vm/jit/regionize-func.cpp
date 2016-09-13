@@ -15,12 +15,15 @@
 */
 
 #include <algorithm>
+#include <fstream>
 #include <vector>
 
 #include "hphp/util/assertions.h"
 #include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/vm/jit/mcgen.h"
 #include "hphp/runtime/vm/jit/prof-data.h"
 #include "hphp/runtime/vm/jit/region-selection.h"
+#include "hphp/runtime/vm/jit/tc.h"
 #include "hphp/runtime/vm/jit/timer.h"
 #include "hphp/runtime/vm/jit/trans-cfg.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
@@ -269,8 +272,7 @@ bool allArcsCovered(const TransCFG::ArcPtrVec& arcs,
  *      2.2) select a region starting at this node and mark nodes/arcs as
  *           covered appropriately
  */
-RegionVec regionizeFunc(const Func* func, MCGenerator* mcg,
-                        std::string& transCFGAnnot) {
+RegionVec regionizeFunc(const Func* func, std::string& transCFGAnnot) {
   const Timer rf_timer(Timer::regionizeFunc);
   assertx(profData());
 
@@ -278,7 +280,7 @@ RegionVec regionizeFunc(const Func* func, MCGenerator* mcg,
 
   auto const funcId = func->getFuncId();
   auto const profData = jit::profData();
-  TransCFG cfg(funcId, profData, mcg->srcDB());
+  TransCFG cfg(funcId, profData);
 
   if (Trace::moduleEnabled(HPHP::Trace::pgo, 5)) {
     auto dotFileName = folly::to<std::string>(
@@ -291,7 +293,7 @@ RegionVec regionizeFunc(const Func* func, MCGenerator* mcg,
       outFile.close();
     }
   }
-  if (dumpTCAnnotation(*func, TransKind::Optimize) &&
+  if (mcgen::dumpTCAnnotation(*func, TransKind::Optimize) &&
       RuntimeOption::EvalDumpRegion >= 2) {
     std::ostringstream cfgStream;
     cfg.print(cfgStream, funcId, profData);

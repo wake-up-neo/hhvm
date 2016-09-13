@@ -8,8 +8,8 @@
  *
  *)
 
-type result = Pos.absolute list
+val go_from_file: (string * int * int) -> ServerEnv.env ->
+  ServerHighlightRefsTypes.result
 
-val go_from_file: (string * int * int) -> ServerEnv.env -> result
-
-val go: (string * int * int) -> TypecheckerOptions.t -> result
+val go: (string * int * int) -> TypecheckerOptions.t ->
+  ServerHighlightRefsTypes.result

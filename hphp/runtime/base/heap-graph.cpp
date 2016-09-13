@@ -67,17 +67,10 @@ struct PtrFilter: F {
   void operator()(const Variant& p) { (*this)(*p.asTypedValue()); }
   void operator()(const StringBuffer& p) { p.scan(*this); }
   void operator()(const NameValueTable& p) { p.scan(*this); }
-  void operator()(const ArrayIter& p) { p.scan(*this); }
-  void operator()(const MArrayIter& p) { p.scan(*this); }
   void operator()(const VarEnv& venv) { (*this)(&venv); }
 
   void operator()(const RequestEventHandler& p) { p.scan(*this); }
   void operator()(const RequestEventHandler* p) { p->scan(*this); }
-
-  // TODO (6512343): this needs to be hooked into scan methods for Extensions.
-  void operator()(const Extension&) { }
-
-  void operator()(const AsioContext& p) { scanner().scan(p, *this); }
 
   // mark a TypedValue or TypedValueAux. taking tv by value would exclude aux.
   void operator()(const TypedValueAux& v) { (*this)(*(const TypedValue*)&v); }
@@ -288,7 +281,7 @@ HeapGraph makeHeapGraph(bool include_free) {
   PtrMap blocks;
 
   // parse the heap once to create a PtrMap for pointer filtering. Create
-  // one node for every parsed block, including NativeData and ResumableFrame
+  // one node for every parsed block, including NativeData and AsyncFuncFrame
   // blocks. Only include free blocks if requested.
   MM().forEachHeader([&](Header* h) {
     if (h->kind() != HeaderKind::Free || include_free) {

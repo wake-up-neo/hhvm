@@ -20,6 +20,9 @@
 #include "hphp/runtime/vm/jit/irgen-interpone.h"
 #include "hphp/runtime/vm/jit/irgen-exit.h"
 #include "hphp/runtime/vm/jit/irgen-internal.h"
+#include "hphp/runtime/base/mixed-array.h"
+#include "hphp/runtime/base/packed-array.h"
+#include "hphp/runtime/base/set-array.h"
 
 namespace HPHP { namespace jit { namespace irgen {
 
@@ -321,6 +324,7 @@ void emitBareThis(IRGS& env, BareThisOp subop) {
                        return t;
                      },
                      [&] {
+                       hint(env, Block::Hint::Unlikely);
                        return cns(env, TInitNull);
                      });
     push(env, thiz);

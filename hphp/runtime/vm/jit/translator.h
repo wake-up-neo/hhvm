@@ -25,7 +25,7 @@
 
 #include "hphp/runtime/vm/jit/location.h"
 #include "hphp/runtime/vm/jit/prof-src-key.h"
-#include "hphp/runtime/vm/jit/recycle-tc.h"
+#include "hphp/runtime/vm/jit/tc.h"
 #include "hphp/runtime/vm/jit/region-selection.h"
 #include "hphp/runtime/vm/jit/trans-rec.h"
 #include "hphp/runtime/vm/jit/type.h"
@@ -128,146 +128,6 @@ struct TransContext {
   Offset initBcOffset;
   bool prologue;
   bool resumed;
-};
-
-/*
- * Arguments for the translate() entry points in Translator.
- *
- * These include a variety of flags that help decide what to translate, or what
- * to do after we're done, so it's distinct from the TransContext above.
- */
-struct TransArgs {
-  explicit TransArgs(SrcKey sk) : sk{sk} {}
-
-  SrcKey sk;
-  Annotations annotations;
-  bool allowPartial{false};
-  TransFlags flags{0};
-  TransID transId{kInvalidTransID};
-  TransKind kind{TransKind::Invalid};
-  RegionDescPtr region{nullptr};
-};
-
-
-///////////////////////////////////////////////////////////////////////////////
-// Translator.
-
-/*
- * Module for converting a RegionDesc into an IR instruction stream.
- *
- * There is only ever one single Translator, owned by the global MCGenerator,
- * whose state is reset in between translations.
- */
-struct Translator {
-  Translator();
-
-  /////////////////////////////////////////////////////////////////////////////
-  // Translation DB.
-  //
-  // We maintain mappings from TCAs and TransIDs to translation information,
-  // for debugging purposes only.  Outside of debug builds and processes with
-  // TC dumps enabled, these routines do no work, and their corresponding data
-  // structures are unused.
-  //
-  // Note that PGO always has a coherent notion of TransID---the so-called
-  // `profTransID', which is just the region block ID (which are globally
-  // unique).  This is completely distinct from the Translator's TransID.
-
-  /*
-   * Whether the TransDB structures should be used.
-   *
-   * True only for debug builds or when TC dumps are enabled.
-   */
-  static bool isTransDBEnabled();
-
-  /*
-   * Get a TransRec by TCA or TransID.
-   *
-   * Return nullptr if the TransDB is not enabled.
-   */
-  const TransRec* getTransRec(TCA tca) const;
-  const TransRec* getTransRec(TransID transId) const;
-
-  /*
-   * Add a translation.
-   *
-   * Does nothing but trace if the TransDB is not enabled.
-   */
-  void addTranslation(const TransRec& transRec);
-
-  /*
-   * Get the number of translations added (0 if the TransDB is not enabled).
-   */
-  size_t getNumTranslations() const;
-
-  /*
-   * Get the translation counter for `transId'.
-   *
-   * Return -1 if the TransDB is not enabled.
-   */
-  uint64_t getTransCounter(TransID transId) const;
-
-  /*
-   * Get a pointer to the translation counter for the current translation.
-   *
-   * Return nullptr if the TransDB is not enabled.
-   */
-  uint64_t* getTransCounterAddr();
-
-
-  /////////////////////////////////////////////////////////////////////////////
-  // Debug blacklist.
-  //
-  // The set of PC's and SrcKey's we refuse to JIT because they contain hphpd
-  // breakpoints.
-
-  /*
-   * Atomically clear all entries from the debug blacklist.
-   */
-  void clearDbgBL();
-
-  /*
-   * Add `pc' to the debug blacklist.
-   *
-   * Return whether we actually performed an insertion.
-   */
-  bool addDbgBLPC(PC pc);
-
-  /*
-   * Check if `sk' is in the debug blacklist.
-   *
-   * Lazily populates m_dbgBLSrcKey from m_dbgBLPC if we don't find the entry.
-   */
-  bool isSrcKeyInBL(SrcKey sk);
-
-
-  /////////////////////////////////////////////////////////////////////////////
-  // Static data.
-
-  static Lease& WriteLease();
-
-  static const int MaxJmpsTracedThrough = 5;
-
-
-  /////////////////////////////////////////////////////////////////////////////
-  // Data members.
-
-private:
-  int64_t m_createdTime;
-
-  // Translation DB.
-  typedef std::map<TCA, TransID> TransDB;
-  TransDB m_transDB;
-  std::vector<TransRec> m_translations;
-  std::vector<uint64_t*> m_transCounters;
-
-  // Debug blacklist.
-  PCFilter m_dbgBLPC;
-  hphp_hash_set<SrcKey,SrcKey::Hasher> m_dbgBLSrcKey;
-  Mutex m_dbgBlacklistLock;
-
-  // Write lease.
-  static Lease s_writeLease;
 };
 
 
@@ -525,6 +385,12 @@ bool builtinFuncDestroysLocals(const Func* callee);
 
 ///////////////////////////////////////////////////////////////////////////////
 // Completely unrelated functionality.
+
+/*
+ * Initialize the instruction table queried by the various functions in this
+ * module.
+ */
+void initInstrInfo();
 
 /*
  * This routine attempts to find the Func* that will be called for a given

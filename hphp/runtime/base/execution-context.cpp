@@ -57,7 +57,9 @@
 #include "hphp/runtime/ext/reflection/ext_reflection.h"
 #include "hphp/runtime/ext/apc/ext_apc.h"
 #include "hphp/runtime/server/server-stats.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/debug/debug.h"
+#include "hphp/runtime/vm/jit/enter-tc.h"
+#include "hphp/runtime/vm/jit/tc.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/translator.h"
 #include "hphp/runtime/vm/debugger-hook.h"
@@ -128,8 +130,6 @@ void ExecutionContext::cleanup() {
   // Discard all units that were created via create_function().
   for (auto& v : m_createdFuncs) delete v;
   m_createdFuncs.clear();
-
-  always_assert(m_activeSims.empty());
 }
 
 void ExecutionContext::sweep() {
@@ -1315,7 +1315,7 @@ ObjectData* ExecutionContext::getThis() {
     fp = getPrevVMState(fp);
     if (!fp) return nullptr;
   }
-  if (fp->hasThis()) {
+  if (fp->func()->cls() && fp->hasThis()) {
     return fp->getThis();
   }
   return nullptr;
@@ -1488,7 +1488,7 @@ void ExecutionContext::invokeUnit(TypedValue* retval, const Unit* unit) {
 
 void ExecutionContext::syncGdbState() {
   if (RuntimeOption::EvalJit && !RuntimeOption::EvalJitNoGdb) {
-    jit::mcg->debugInfo()->debugSync();
+    Debug::DebugInfo::Get()->debugSync();
   }
 }
 
@@ -1589,7 +1589,7 @@ void ExecutionContext::requestInit() {
   vmStack().requestInit();
   ObjectData::resetMaxId();
   ResourceHdr::resetMaxId();
-  jit::mcg->requestInit();
+  jit::tc::requestInit();
 
   if (RuntimeOption::EvalJitEnableRenameFunction) {
     assert(SystemLib::s_anyNonPersistentBuiltins);
@@ -1711,7 +1711,7 @@ void ExecutionContext::invokeFuncImpl(TypedValue* retptr, const Func* f,
   } else if (cls) {
     ar->setClass(cls);
   } else {
-    ar->setThis(nullptr);
+    ar->trashThis();
   }
   ar->initNumArgs(argc);
 
@@ -1952,7 +1952,7 @@ void ExecutionContext::resumeAsyncFunc(Resumable* resumable,
     const bool useJit = RID().getJit();
     if (LIKELY(useJit && resumable->resumeAddr())) {
       Stats::inc(Stats::VMEnter);
-      jit::mcg->enterTCAfterPrologue(resumable->resumeAddr());
+      jit::enterTCAfterPrologue(resumable->resumeAddr());
     } else {
       enterVMAtCurPC();
     }
@@ -2043,23 +2043,20 @@ bool ExecutionContext::evalUnit(Unit* unit, PC& pc, int funcType) {
   Stats::inc(Stats::PseudoMain_Executed);
 
   ActRec* ar = vmStack().allocA();
-  assert((uintptr_t)&ar->m_func < (uintptr_t)&ar->m_r);
-  Class* cls = liveClass();
-  if (vmfp()->hasThis()) {
-    ObjectData *this_ = vmfp()->getThis();
-    this_->incRefCount();
-    ar->setThis(this_);
-  } else if (vmfp()->hasClass()) {
-    ar->setClass(vmfp()->getClass());
-  } else {
-    ar->setThis(nullptr);
-  }
-  Func* func = unit->getMain(cls);
+  assertx(AROFF(m_func) < AROFF(m_r));
+  auto const cls = vmfp()->func()->cls();
+  auto const func = unit->getMain(cls);
   assert(!func->isCPPBuiltin());
   ar->m_func = func;
+  if (cls) {
+    ar->setThisOrClass(vmfp()->getThisOrClass());
+    if (ar->hasThis()) ar->getThis()->incRefCount();
+  } else {
+    ar->trashThis();
+  }
   ar->initNumArgs(0);
   assert(vmfp());
-  ar->setReturn(vmfp(), pc, jit::mcg->ustubs().retHelper);
+  ar->setReturn(vmfp(), pc, jit::tc::ustubs().retHelper);
   pushLocalsAndIterators(func);
   assert(vmfp()->func()->attrs() & AttrMayUseVV);
   if (!vmfp()->hasVarEnv()) {
@@ -2302,12 +2299,14 @@ bool ExecutionContext::evalPHPDebugger(TypedValue* retval,
   Class *frameClass = nullptr;
   Class *functionClass = nullptr;
   if (fp) {
-    if (fp->hasThis()) {
-      this_ = fp->getThis();
-    } else if (fp->hasClass()) {
-      frameClass = fp->getClass();
-    }
     functionClass = fp->m_func->cls();
+    if (functionClass) {
+      if (fp->hasThis()) {
+        this_ = fp->getThis();
+      } else if (fp->hasClass()) {
+        frameClass = fp->getClass();
+      }
+    }
     phpDebuggerEvalHook(fp->m_func);
   }
 
@@ -2377,7 +2376,7 @@ void ExecutionContext::enterDebuggerDummyEnv() {
   ActRec* ar = vmStack().allocA();
   ar->m_func = s_debuggerDummy->getMain(nullptr);
   ar->initNumArgs(0);
-  ar->setThis(nullptr);
+  ar->trashThis();
   ar->setReturnVMExit();
   vmfp() = ar;
   vmpc() = s_debuggerDummy->entry();
@@ -2399,7 +2398,8 @@ void ExecutionContext::exitDebuggerDummyEnv() {
   // Teardown the frame we erected by enterDebuggerDummyEnv()
   const Func* func = vmfp()->m_func;
   try {
-    frame_free_locals_inl_no_hook<true>(vmfp(), func->numLocals());
+    vmfp()->setLocalsDecRefd();
+    frame_free_locals_no_hook(vmfp());
   } catch (...) {}
   vmStack().ndiscard(func->numSlotsInFrame());
   vmStack().discardAR();

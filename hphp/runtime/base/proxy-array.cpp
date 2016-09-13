@@ -322,7 +322,6 @@ ProxyArray::PlusEq(ArrayData* ad, const ArrayData* elems) {
 
 ArrayData*
 ProxyArray::Merge(ArrayData* ad, const ArrayData* elems) {
-  if (!elems->isPHPArray()) throwInvalidMergeException(elems);
   auto r = innerArr(ad)->merge(elems);
   reseatable(ad, r);
   return ad;
@@ -365,7 +364,7 @@ ArrayData* ProxyArray::ToVec(ArrayData* ad, bool copy) {
 ArrayData* ProxyArray::ToKeyset(ArrayData* ad, bool copy) {
   auto r = innerArr(ad)->toKeyset(innerArr(ad)->cowCheck());
   reseatable(ad, r);
-  return ad;
+  return const_cast<ArrayData*>(ad);
 }
 
 void ProxyArray::Renumber(ArrayData* ad) {

@@ -36,12 +36,19 @@
 #include "hphp/runtime/base/string-util.h"
 #include "hphp/runtime/base/init-fini-node.h"
 #include "hphp/runtime/base/zend-functions.h"
-#include "hphp/runtime/ext/std/ext_std_function.h"
-#include "hphp/runtime/ext/string/ext_string.h"
+#include "hphp/runtime/vm/debug/debug.h"
 #include "hphp/runtime/vm/treadmill.h"
 #include "hphp/runtime/vm/vm-regs.h"
+
+#include "hphp/runtime/ext/std/ext_std_function.h"
+#include "hphp/runtime/ext/string/ext_string.h"
+
+#include "hphp/runtime/vm/jit/mcgen.h"
 #include "hphp/runtime/vm/jit/types.h"
 #include "hphp/runtime/vm/jit/vtune-jit.h"
+
+#include "hphp/compiler/json.h"
+
 #include "hphp/util/logger.h"
 #include "hphp/util/concurrent-scalable-cache.h"
 
@@ -746,20 +753,19 @@ pcre_get_compiled_regex_cache(PCRECache::Accessor& accessor,
       TCA end = start + size;
       std::string name = folly::sformat("HHVM::pcre_jit::{}", pattern);
 
-      if (!RuntimeOption::EvalJitNoGdb && jit::mcg) {
-        jit::mcg->debugInfo()->recordStub(Debug::TCRange(start, end, false),
-                                          name);
+      if (!RuntimeOption::EvalJitNoGdb && jit::mcgen::initialized()) {
+        Debug::DebugInfo::Get()->recordStub(Debug::TCRange(start, end, false),
+                                            name);
       }
       if (RuntimeOption::EvalJitUseVtuneAPI) {
         HPHP::jit::reportHelperToVtune(name.c_str(), start, end);
       }
-      if (RuntimeOption::EvalPerfPidMap && jit::mcg) {
-        jit::mcg->debugInfo()->recordPerfMap(Debug::TCRange(start, end, false),
-                                             SrcKey{},
-                                             nullptr,
-                                             false,
-                                             false,
-                                             name);
+      if (RuntimeOption::EvalPerfPidMap && jit::mcgen::initialized()) {
+        Debug::DebugInfo::Get()->recordPerfMap(
+          Debug::TCRange(start, end, false),
+          SrcKey{}, nullptr, false, false,
+          HPHP::JSON::Escape(name.c_str())
+        );
       }
     }
   }
@@ -1419,17 +1425,29 @@ static Variant php_pcre_replace(const String& pattern, const String& subject,
             prefixedCode += "<?php return ";
             prefixedCode += folly::StringPiece{data, full_len - result_len};
             prefixedCode += ";";
-            Unit* unit = g_context->compileEvalString(prefixedCode.get());
+            auto const unit = g_context->compileEvalString(prefixedCode.get());
             Variant v;
             auto const ar = GetCallerFrame();
-            auto const thiz = ar->hasThis() ? ar->getThis() : nullptr;
-            auto const cls = thiz ? thiz->getVMClass() :
-              ar->hasClass() ? ar->getClass() : nullptr;
-            Func* func = unit->getMain(ar->func()->cls());
+            auto const ctx = ar->func()->cls();
+            auto const func = unit->getMain(ctx);
+            ObjectData* thiz;
+            Class* cls;
+            if (ctx) {
+              if (ar->hasThis()) {
+                thiz = ar->getThis();
+                cls = thiz->getVMClass();
+              } else {
+                thiz = nullptr;
+                cls = ar->getClass();
+              }
+            } else {
+              thiz = nullptr;
+              cls = nullptr;
+            }
             g_context->invokeFunc(v.asTypedValue(), func, init_null_variant,
                                   thiz, cls, nullptr, nullptr,
                                   ExecutionContext::InvokePseudoMain);
-            eval_result = std::move(v).toString();
+            eval_result = v.toString();
 
             result.resize(result_len);
             result.append(eval_result.data(), eval_result.size());

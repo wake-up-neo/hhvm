@@ -18,36 +18,17 @@
 
 #include <folly/Random.h>
 
+#include "hphp/util/stack-trace.h"
+
 namespace HPHP {
 
-///////////////////////////////////////////////////////////////////////////////
-
-StructuredLogImpl StructuredLog::s_impl = nullptr;
-
-bool StructuredLog::enabled() {
-  return s_impl != nullptr;
-}
-
-bool StructuredLog::coinflip(uint32_t rate) {
-  return enabled() && rate > 0 && folly::Random::rand32(rate) == 0;
-}
-
-void StructuredLog::enable(StructuredLogImpl impl) {
-  s_impl = impl;
-}
-
-void StructuredLog::log(const std::string& tableName,
-                        const StructuredLogEntry& cols) {
-  if (enabled()) {
-    s_impl(tableName, cols);
-  }
-}
-
-///////////////////////////////////////////////////////////////////////////////
-
 StructuredLogEntry::StructuredLogEntry()
-  : ints(folly::dynamic::object()), strs(folly::dynamic::object())
-{}
+  : ints(folly::dynamic::object())
+  , strs(folly::dynamic::object())
+  , sets(folly::dynamic::object())
+  , vecs(folly::dynamic::object())
+{
+}
 
 void StructuredLogEntry::setInt(folly::StringPiece key, int64_t value) {
   ints[key] = value;
@@ -58,17 +39,72 @@ void StructuredLogEntry::setStr(folly::StringPiece key,
   strs[key] = value;
 }
 
+void StructuredLogEntry::setSet(folly::StringPiece key,
+                                const std::set<folly::StringPiece>& value) {
+  sets[key] = folly::dynamic::object();
+  for (auto const& v : value) sets[key][v] = 1;
+}
+
+void StructuredLogEntry::setVec(folly::StringPiece key,
+                                const std::vector<folly::StringPiece>& value) {
+  folly::dynamic arr = folly::dynamic::array();
+  arr.resize(value.size());
+  for (int i = 0; i < value.size(); ++i) {
+    arr[i] = value[i];
+  }
+  vecs[key] = arr;
+}
+
+void StructuredLogEntry::setStackTrace(folly::StringPiece key, StackTrace& st) {
+  std::vector<folly::StringPiece> stackFrames;
+  folly::split("\n", st.toString(), stackFrames);
+  for (auto& frame : stackFrames) {
+    const char* p = frame.begin();
+    while (*p == '#' || *p == ' ' || (*p >= '0' && *p <= '9')) ++p;
+    frame = folly::StringPiece(p, frame.end());
+  }
+  setVec(key, stackFrames);
+}
+
 void StructuredLogEntry::clear() {
   ints = folly::dynamic::object();
   strs = folly::dynamic::object();
+  sets = folly::dynamic::object();
+  vecs = folly::dynamic::object();
+}
+
+namespace StructuredLog {
+namespace {
+StructuredLogImpl s_impl = nullptr;
+}
+
+bool enabled() {
+  return s_impl != nullptr;
+}
+
+bool coinflip(uint32_t rate) {
+  return enabled() && rate > 0 && folly::Random::rand32(rate) == 0;
+}
+
+void enable(StructuredLogImpl impl) {
+  s_impl = impl;
+}
+
+void log(const std::string& tableName, const StructuredLogEntry& cols) {
+  if (enabled()) {
+    s_impl(tableName, cols);
+  }
+}
 }
 
 std::string show(const StructuredLogEntry& cols) {
   folly::dynamic out = cols.strs;
   out["ints"] = cols.ints;
-  return folly::toJson(out);
+  out["sets"] = cols.sets;
+  out["vecs"] = cols.vecs;
+  std::ostringstream oss;
+  oss << out;
+  return oss.str();
 }
-
-///////////////////////////////////////////////////////////////////////////////
 
 }

@@ -47,15 +47,15 @@ void print_string(StringData* s) {
 }
 
 void print_int(int64_t i) {
-  char buf[256];
-  snprintf(buf, 256, "%" PRId64, i);
-  g_context->write(buf);
-  TRACE(1, "t-x64 output(int): %" PRId64 "\n", i);
+  char intbuf[21];
+  auto const s = conv_10(i, intbuf + sizeof(intbuf));
+
+  g_context->write(s.data(), s.size());
 }
 
 void print_boolean(bool val) {
   if (val) {
-    g_context->write("1");
+    g_context->write("1", 1);
   }
 }
 
@@ -151,8 +151,8 @@ StringData* concat_s4(StringData* v1, StringData* v2,
 }
 
 Unit* compile_file(const char* s, size_t sz, const MD5& md5,
-                   const char* fname) {
-  return g_hphp_compiler_parse(s, sz, md5, fname);
+                   const char* fname, Unit** releaseUnit) {
+  return g_hphp_compiler_parse(s, sz, md5, fname, releaseUnit);
 }
 
 std::string mangleSystemMd5(const std::string& fileMd5) {
@@ -167,7 +167,8 @@ std::string mangleSystemMd5(const std::string& fileMd5) {
 
 Unit* compile_string(const char* s,
                      size_t sz,
-                     const char* fname /* = nullptr */) {
+                     const char* fname,
+                     Unit** releaseUnit) {
   auto const md5 = MD5{mangleSystemMd5(string_md5(folly::StringPiece{s, sz}))};
   if (auto u = Repo::get().loadUnit(fname ? fname : "", md5).release()) {
     return u;
@@ -175,7 +176,7 @@ Unit* compile_string(const char* s,
   // NB: fname needs to be long-lived if generating a bytecode repo because it
   // can be cached via a Location ultimately contained by ErrorInfo for printing
   // code errors.
-  return g_hphp_compiler_parse(s, sz, md5, fname);
+  return g_hphp_compiler_parse(s, sz, md5, fname, releaseUnit);
 }
 
 Unit* compile_systemlib_string(const char* s, size_t sz, const char* fname) {
@@ -196,16 +197,20 @@ Unit* compile_systemlib_string(const char* s, size_t sz, const char* fname) {
 int init_closure(ActRec* ar, TypedValue* sp) {
   auto closure = c_Closure::fromObject(ar->getThis());
 
-  // Swap in the $this or late bound class or null if it is ony from a plain
-  // function or pseudomain
-  ar->setThisOrClassAllowNull(closure->getThisOrClass());
-
-  if (ar->hasThis()) {
-    ar->getThis()->incRefCount();
-  }
-
   // Put in the correct context
   ar->m_func = closure->getInvokeFunc();
+
+  if (ar->func()->cls()) {
+    // Swap in the $this or late bound class or null if it is ony from a plain
+    // function or pseudomain
+    ar->setThisOrClass(closure->getThisOrClass());
+
+    if (ar->hasThis()) {
+      ar->getThis()->incRefCount();
+    }
+  } else {
+    ar->trashThis();
+  }
 
   // The closure is the first local.
   // Similar to tvWriteObject() but we don't incref because it used to be $this

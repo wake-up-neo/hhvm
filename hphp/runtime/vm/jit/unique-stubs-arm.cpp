@@ -24,7 +24,6 @@
 #include "hphp/runtime/vm/jit/code-gen-cf.h"
 #include "hphp/runtime/vm/jit/code-gen-helpers.h"
 #include "hphp/runtime/vm/jit/code-gen-tls.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/unique-stubs.h"
 #include "hphp/runtime/vm/jit/unwind-itanium.h"
@@ -216,6 +215,9 @@ TCA emitCallToExit(CodeBlock& cb, DataBlock& data, const UniqueStubs& us) {
   a.Br(rAsm);
   a.bind(&target_data);
   a.dc64(us.enterTCExit);
+
+  __builtin___clear_cache(reinterpret_cast<char*>(start),
+                          reinterpret_cast<char*>(cb.frontier()));
   return start;
 }
 

@@ -95,13 +95,16 @@ struct c_Closure : ObjectData {
    * just like in the ActRec.
    */
   void* getThisOrClass() const { return m_ctx; }
-
+  void setThisOrClass(void* p) { m_ctx = p; }
+  ObjectData* getThisUnchecked() const {
+    assertx(!ctxIsClass());
+    return reinterpret_cast<ObjectData*>(m_ctx);
+  }
   ObjectData* getThis() const {
     if (UNLIKELY(ctxIsClass())) {
       return nullptr;
-    } else {
-      return reinterpret_cast<ObjectData*>(m_ctx);
     }
+    return getThisUnchecked();
   }
   void setThis(ObjectData* od) { m_ctx = od; }
   bool hasThis() const { return m_ctx && !ctxIsClass(); }
@@ -116,11 +119,12 @@ struct c_Closure : ObjectData {
     }
   }
   void setClass(Class* cls) {
+    assertx(cls);
     m_ctx = reinterpret_cast<void*>(
       reinterpret_cast<uintptr_t>(cls) | kClassBit
     );
   }
-  bool hasClass() const { return m_ctx && ctxIsClass(); }
+  bool hasClass() const { return ctxIsClass(); }
 
   ObjectData* clone();
 

@@ -22,7 +22,7 @@
 #include "hphp/runtime/base/rds.h"
 
 #include "hphp/runtime/vm/jit/ir-instruction.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/translator.h"
 #include "hphp/runtime/vm/jit/type.h"
 
 #include "hphp/util/type-scan.h"
@@ -223,11 +223,11 @@ struct MethProfile {
   }
 
   void reportMeth(const ActRec* ar, const Class* cls) {
-    if (!cls) {
+    auto const meth = ar->func();
+    if (!cls && meth->cls()) {
       cls = ar->hasThis() ?
         ar->getThis()->getVMClass() : ar->getClass();
     }
-    auto const meth = ar->func();
     reportMethHelper(cls, meth);
   }
 

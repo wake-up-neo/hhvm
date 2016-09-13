@@ -51,6 +51,7 @@
 #include "hphp/runtime/base/hhprof.h"
 #include "hphp/runtime/base/memory-manager.h"
 #include "hphp/runtime/base/mixed-array.h"
+#include "hphp/runtime/base/set-array.h"
 #include "hphp/runtime/base/program-functions.h"
 #include "hphp/runtime/base/rds.h"
 #include "hphp/runtime/base/repo-auth-type-codec.h"
@@ -108,8 +109,11 @@
 #include "hphp/runtime/vm/type-profile.h"
 #include "hphp/runtime/vm/unwind.h"
 
-#include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/code-cache.h"
+#include "hphp/runtime/vm/jit/debugger.h"
+#include "hphp/runtime/vm/jit/enter-tc.h"
 #include "hphp/runtime/vm/jit/perf-counters.h"
+#include "hphp/runtime/vm/jit/tc.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/translator-runtime.h"
 #include "hphp/runtime/vm/jit/translator.h"
@@ -131,7 +135,6 @@ const bool skipCufOnInvalidParams = false;
 // to be closer to other bytecode.cpp data.
 bool RuntimeOption::RepoAuthoritative = false;
 
-using jit::mcg;
 using jit::TCA;
 
 // GCC 4.8 has some real problems with all the inlining in this file, so don't
@@ -173,7 +176,7 @@ Class* arGetContextClassImpl<true>(const ActRec* ar) {
 }
 
 void frame_free_locals_no_hook(ActRec* fp) {
-  frame_free_locals_inl_no_hook<false>(fp, fp->func()->numLocals());
+  frame_free_locals_inl_no_hook(fp, fp->func()->numLocals());
 }
 
 const StaticString s_call_user_func("call_user_func");
@@ -292,13 +295,11 @@ ALWAYS_INLINE intva_t decode_intva(PC& pc) {
 // Miscellaneous helpers.
 
 static inline Class* frameStaticClass(ActRec* fp) {
+  if (!fp->func()->cls()) return nullptr;
   if (fp->hasThis()) {
     return fp->getThis()->getVMClass();
-  } else if (fp->hasClass()) {
-    return fp->getClass();
-  } else {
-    return nullptr;
   }
+  return fp->getClass();
 }
 
 //=============================================================================
@@ -878,7 +879,8 @@ static void toStringFrame(std::ostream& os, const ActRec* fp,
   std::string funcName(func->fullName()->data());
   os << "{func:" << funcName
      << ",soff:" << fp->m_soff
-     << ",this:0x" << std::hex << (fp->hasThis() ? fp->getThis() : nullptr)
+     << ",this:0x"
+     << std::hex << (func->cls() && fp->hasThis() ? fp->getThis() : nullptr)
      << std::dec << "}";
   TypedValue* tv = (TypedValue*)fp;
   tv--;
@@ -1486,7 +1488,7 @@ void enterVMAtFunc(ActRec* enterFnAr, StackArgsState stk, VarEnv* varEnv) {
     int na = enterFnAr->numArgs();
     if (na > np) na = np + 1;
     jit::TCA start = enterFnAr->m_func->getPrologue(na);
-    mcg->enterTCAtPrologue(enterFnAr, start);
+    jit::enterTCAtPrologue(enterFnAr, start);
     return;
   }
 
@@ -1507,7 +1509,7 @@ void enterVMAtFunc(ActRec* enterFnAr, StackArgsState stk, VarEnv* varEnv) {
 
   if (useJit) {
     jit::TCA start = enterFnAr->m_func->getFuncBody();
-    mcg->enterTCAfterPrologue(start);
+    jit::enterTCAfterPrologue(start);
   } else {
     dispatch();
   }
@@ -1519,7 +1521,7 @@ void enterVMAtCurPC() {
   assert(vmfp()->func()->contains(vmpc()));
   Stats::inc(Stats::VMEnter);
   if (RID().getJit()) {
-    mcg->enterTC();
+    jit::enterTC();
   } else {
     dispatch();
   }
@@ -1541,13 +1543,13 @@ void pushLocalsAndIterators(const Func* func, int nparams /*= 0*/) {
 
 void unwindPreventReturnToTC(ActRec* ar) {
   auto const savedRip = reinterpret_cast<jit::TCA>(ar->m_savedRip);
-  always_assert_flog(mcg->code().isValidCodeAddress(savedRip),
+  always_assert_flog(jit::tc::isValidCodeAddress(savedRip),
                      "preventReturnToTC({}): {} isn't in TC",
                      ar, savedRip);
 
   if (isReturnHelper(savedRip)) return;
 
-  auto& ustubs = mcg->ustubs();
+  auto& ustubs = jit::tc::ustubs();
   if (ar->resumed()) {
     // async functions use callToExit stub
     assert(ar->func()->isGenerator());
@@ -1560,7 +1562,7 @@ void unwindPreventReturnToTC(ActRec* ar) {
 
 void debuggerPreventReturnToTC(ActRec* ar) {
   auto const savedRip = reinterpret_cast<jit::TCA>(ar->m_savedRip);
-  always_assert_flog(mcg->code().isValidCodeAddress(savedRip),
+  always_assert_flog(jit::tc::isValidCodeAddress(savedRip),
                      "preventReturnToTC({}): {} isn't in TC",
                      ar, savedRip);
 
@@ -1571,7 +1573,7 @@ void debuggerPreventReturnToTC(ActRec* ar) {
   // unwinder can find it when needed.
   jit::stashDebuggerCatch(ar);
 
-  auto& ustubs = mcg->ustubs();
+  auto& ustubs = jit::tc::ustubs();
   if (ar->resumed()) {
     // async functions use callToExit stub
     assert(ar->func()->isGenerator());
@@ -1971,7 +1973,7 @@ OPTBLD_INLINE void iopNewVecArray(intva_t n) {
 
 OPTBLD_INLINE void iopNewKeysetArray(intva_t n) {
   // This constructor moves values, no inc/decref is necessary.
-  auto* a = MixedArray::MakeKeyset(n, vmStack().topC());
+  auto* a = SetArray::MakeSet(n, vmStack().topC());
   vmStack().ndiscard(n);
   vmStack().pushKeysetNoRc(a);
 }
@@ -2450,9 +2452,6 @@ OPTBLD_INLINE void iopInstanceOf() {
 }
 
 OPTBLD_INLINE void iopInstanceOfD(Id id) {
-  if (isProfileRequest()) {
-    InstanceBits::profile(vmfp()->m_func->unit()->lookupLitstrId(id));
-  }
   const NamedEntity* ne = vmfp()->m_func->unit()->lookupNamedEntityId(id);
   Cell* c1 = vmStack().topC();
   bool r = cellInstanceOf(c1, ne);
@@ -2785,7 +2784,7 @@ OPTBLD_INLINE JitReturn jitReturnPre(ActRec* fp) {
     // interpreter. callToExit is special: it's a return helper but we don't
     // treat it like one in here in order to simplify some things higher up in
     // the pipeline.
-    if (reinterpret_cast<TCA>(savedRip) != mcg->ustubs().callToExit) {
+    if (reinterpret_cast<TCA>(savedRip) != jit::tc::ustubs().callToExit) {
       savedRip = 0;
     }
   } else if (!RID().getJit()) {
@@ -2849,7 +2848,7 @@ OPTBLD_INLINE TCA jitReturnPost(JitReturn retInfo) {
   // live VM frame in %rbp.
   if (vmJitCalledFrame() == retInfo.fp) {
     FTRACE(1, "Returning from frame {}; resuming", vmJitCalledFrame());
-    return mcg->ustubs().resumeHelper;
+    return jit::tc::ustubs().resumeHelper;
   }
 
   return nullptr;
@@ -4181,7 +4180,7 @@ OPTBLD_INLINE void iopFPushFunc(intva_t numArgs) {
     } else if (cls) {
       ar->setClass(cls);
     } else {
-      ar->setThis(nullptr);
+      ar->trashThis();
     }
 
     if (UNLIKELY(invName != nullptr)) {
@@ -4207,7 +4206,7 @@ OPTBLD_FLT_INLINE void iopFPushFuncD(intva_t numArgs, Id id) {
                 vmfp()->m_func->unit()->lookupLitstrId(id)->data());
   }
   ActRec* ar = fPushFuncImpl(func, numArgs);
-  ar->setThis(nullptr);
+  ar->trashThis();
 }
 
 OPTBLD_INLINE void iopFPushFuncU(intva_t numArgs, Id nsFunc, Id globalFunc) {
@@ -4223,13 +4222,13 @@ OPTBLD_INLINE void iopFPushFuncU(intva_t numArgs, Id nsFunc, Id globalFunc) {
     }
   }
   ActRec* ar = fPushFuncImpl(func, numArgs);
-  ar->setThis(nullptr);
+  ar->trashThis();
 }
 
-void fPushObjMethodImpl(Class* cls, StringData* name, ObjectData* obj,
-                        int numArgs) {
+void fPushObjMethodImpl(StringData* name, ObjectData* obj, int numArgs) {
   const Func* f;
   LookupResult res;
+  auto cls = obj->getVMClass();
   try {
     res = g_context->lookupObjMethod(
       f, cls, name, arGetContextClass(vmfp()), true);
@@ -4263,7 +4262,7 @@ void fPushNullObjMethod(int numArgs) {
   assert(SystemLib::s_nullFunc);
   ActRec* ar = vmStack().allocA();
   ar->m_func = SystemLib::s_nullFunc;
-  ar->setThis(nullptr);
+  ar->trashThis();
   ar->initNumArgs(numArgs);
   ar->trashVarEnv();
 }
@@ -4297,11 +4296,10 @@ OPTBLD_INLINE void iopFPushObjMethod(intva_t numArgs, ObjMethodOp op) {
     return;
   }
   ObjectData* obj = c2->m_data.pobj;
-  Class* cls = obj->getVMClass();
   StringData* name = c1->m_data.pstr;
   // We handle decReffing obj and name in fPushObjMethodImpl
   vmStack().ndiscard(2);
-  fPushObjMethodImpl(cls, name, obj, numArgs);
+  fPushObjMethodImpl(name, obj, numArgs);
 }
 
 OPTBLD_INLINE void
@@ -4317,18 +4315,17 @@ iopFPushObjMethodD(intva_t numArgs, const StringData* name, ObjMethodOp op) {
     return;
   }
   ObjectData* obj = c1->m_data.pobj;
-  Class* cls = obj->getVMClass();
   // We handle decReffing obj in fPushObjMethodImpl
   vmStack().discard();
-  fPushObjMethodImpl(cls, const_cast<StringData*>(name), obj, numArgs);
+  fPushObjMethodImpl(const_cast<StringData*>(name), obj, numArgs);
 }
 
 template<bool forwarding>
-void pushClsMethodImpl(Class* cls, StringData* name, ObjectData* obj,
-                       int numArgs) {
+void pushClsMethodImpl(Class* cls, StringData* name, int numArgs) {
+  auto const ctx = liveClass();
+  auto obj = ctx && vmfp()->hasThis() ? vmfp()->getThis() : nullptr;
   const Func* f;
-  LookupResult res = g_context->lookupClsMethod(f, cls, name, obj,
-                                     arGetContextClass(vmfp()), true);
+  auto const res = g_context->lookupClsMethod(f, cls, name, obj, ctx, true);
   if (res == LookupResult::MethodFoundNoThis ||
       res == LookupResult::MagicCallStaticFound) {
     if (!f->isStaticInProlog()) {
@@ -4341,24 +4338,22 @@ void pushClsMethodImpl(Class* cls, StringData* name, ObjectData* obj,
            res == LookupResult::MagicCallFound);
     obj->incRefCount();
   }
-  assert(f);
+  assertx(f);
   ActRec* ar = vmStack().allocA();
   ar->m_func = f;
   if (obj) {
     ar->setThis(obj);
   } else {
-    if (!forwarding) {
-      ar->setClass(cls);
-    } else {
+    if (forwarding && ctx) {
       /* Propagate the current late bound class if there is one, */
       /* otherwise use the class given by this instruction's input */
       if (vmfp()->hasThis()) {
         cls = vmfp()->getThis()->getVMClass();
-      } else if (vmfp()->hasClass()) {
+      } else {
         cls = vmfp()->getClass();
       }
-      ar->setClass(cls);
     }
+    ar->setClass(cls);
   }
   ar->initNumArgs(numArgs);
   if (res == LookupResult::MagicCallFound ||
@@ -4383,8 +4378,7 @@ OPTBLD_INLINE void iopFPushClsMethod(intva_t numArgs) {
   // pushClsMethodImpl will take care of decReffing name
   vmStack().ndiscard(2);
   assert(cls && name);
-  ObjectData* obj = vmfp()->hasThis() ? vmfp()->getThis() : nullptr;
-  pushClsMethodImpl<false>(cls, name, obj, numArgs);
+  pushClsMethodImpl<false>(cls, name, numArgs);
 }
 
 OPTBLD_INLINE
@@ -4395,8 +4389,7 @@ void iopFPushClsMethodD(intva_t numArgs, const StringData* name, Id classId) {
   if (cls == nullptr) {
     raise_error(Strings::UNKNOWN_CLASS, nep.first->data());
   }
-  ObjectData* obj = vmfp()->hasThis() ? vmfp()->getThis() : nullptr;
-  pushClsMethodImpl<false>(cls, const_cast<StringData*>(name), obj, numArgs);
+  pushClsMethodImpl<false>(cls, const_cast<StringData*>(name), numArgs);
 }
 
 OPTBLD_INLINE void iopFPushClsMethodF(intva_t numArgs) {
@@ -4411,8 +4404,7 @@ OPTBLD_INLINE void iopFPushClsMethodF(intva_t numArgs) {
   StringData* name = c1->m_data.pstr;
   // pushClsMethodImpl will take care of decReffing name
   vmStack().ndiscard(2);
-  ObjectData* obj = vmfp()->hasThis() ? vmfp()->getThis() : nullptr;
-  pushClsMethodImpl<true>(cls, name, obj, numArgs);
+  pushClsMethodImpl<true>(cls, name, numArgs);
 }
 
 OPTBLD_INLINE void iopFPushCtor(intva_t numArgs) {
@@ -4506,8 +4498,13 @@ OPTBLD_INLINE void iopFPushCufIter(intva_t numArgs, Iter* it) {
 
   ActRec* ar = vmStack().allocA();
   ar->m_func = f;
-  ar->m_this = (ObjectData*)o;
-  if (o && !(uintptr_t(o) & 1)) ar->m_this->incRefCount();
+  assertx((f->implCls() != nullptr) == (o != nullptr));
+  if (o) {
+    ar->setThisOrClass(o);
+    if (ActRec::checkThis(o)) ar->getThis()->incRefCount();
+  } else {
+    ar->trashThis();
+  }
   ar->initNumArgs(numArgs);
   if (n) {
     ar->setMagicDispatch(n);
@@ -4533,6 +4530,8 @@ OPTBLD_INLINE void doFPushCuf(int32_t numArgs, bool forward, bool safe) {
   vmStack().ndiscard(1);
   if (f == nullptr) {
     f = SystemLib::s_nullFunc;
+    obj = nullptr;
+    cls = nullptr;
     if (safe) {
       vmStack().pushBool(false);
     }
@@ -4548,7 +4547,7 @@ OPTBLD_INLINE void doFPushCuf(int32_t numArgs, bool forward, bool safe) {
   } else if (cls) {
     ar->setClass(cls);
   } else {
-    ar->setThis(nullptr);
+    ar->trashThis();
   }
   ar->initNumArgs(numArgs);
   if (invName) {
@@ -4672,7 +4671,7 @@ bool doFCall(ActRec* ar, PC& pc) {
 OPTBLD_INLINE void iopFCall(ActRec* ar, PC& pc, intva_t numArgs) {
   assert(numArgs == ar->numArgs());
   checkStack(vmStack(), ar->m_func, 0);
-  ar->setReturn(vmfp(), pc, mcg->ustubs().retHelper);
+  ar->setReturn(vmfp(), pc, jit::tc::ustubs().retHelper);
   doFCall(ar, pc);
 }
 
@@ -4685,7 +4684,7 @@ void iopFCallD(ActRec* ar, PC& pc, intva_t numArgs, const StringData* clsName,
   }
   assert(numArgs == ar->numArgs());
   checkStack(vmStack(), ar->m_func, 0);
-  ar->setReturn(vmfp(), pc, mcg->ustubs().retHelper);
+  ar->setReturn(vmfp(), pc, jit::tc::ustubs().retHelper);
   doFCall(ar, pc);
 }
 
@@ -4698,7 +4697,7 @@ void iopFCallAwait(ActRec* ar, PC& pc, intva_t numArgs,
   }
   assert(numArgs == ar->numArgs());
   checkStack(vmStack(), ar->m_func, 0);
-  ar->setReturn(vmfp(), pc, mcg->ustubs().retHelper);
+  ar->setReturn(vmfp(), pc, jit::tc::ustubs().retHelper);
   ar->setFCallAwait();
   doFCall(ar, pc);
 }
@@ -4788,7 +4787,7 @@ static bool doFCallArray(PC& pc, int numStackValues,
     TRACE(3, "FCallArray: pc %p func %p base %d\n", vmpc(),
           vmfp()->unit()->entry(),
           int(vmfp()->m_func->base()));
-    ar->setReturn(vmfp(), pc, mcg->ustubs().retHelper);
+    ar->setReturn(vmfp(), pc, jit::tc::ustubs().retHelper);
 
     // When called from the jit, populate the correct return address
     if (ret) {
@@ -5122,11 +5121,11 @@ OPTBLD_INLINE void iopDefClsNop(intva_t cid) {
 }
 
 OPTBLD_INLINE void iopDefTypeAlias(intva_t tid) {
-  vmfp()->m_func->unit()->defTypeAlias(tid);
+  vmfp()->func()->unit()->defTypeAlias(tid);
 }
 
 static inline void checkThis(ActRec* fp) {
-  if (!fp->hasThis()) {
+  if (!fp->func()->cls() || !fp->hasThis()) {
     raise_error(Strings::FATAL_NULL_THIS);
   }
 }
@@ -5138,7 +5137,7 @@ OPTBLD_INLINE void iopThis() {
 }
 
 OPTBLD_INLINE void iopBareThis(BareThisOp bto) {
-  if (vmfp()->hasThis()) {
+  if (vmfp()->func()->cls() && vmfp()->hasThis()) {
     ObjectData* this_ = vmfp()->getThis();
     vmStack().pushObject(this_);
   } else {
@@ -5159,7 +5158,7 @@ OPTBLD_INLINE void iopCheckThis() {
 
 OPTBLD_INLINE void iopInitThisLoc(local_var thisLoc) {
   tvRefcountedDecRef(thisLoc.ptr);
-  if (vmfp()->hasThis()) {
+  if (vmfp()->func()->cls() && vmfp()->hasThis()) {
     thisLoc->m_data.pobj = vmfp()->getThis();
     thisLoc->m_type = KindOfObject;
     tvIncRef(thisLoc.ptr);
@@ -5381,8 +5380,8 @@ OPTBLD_INLINE void moveProgramCounterIntoGenerator(PC &pc, BaseGenerator* gen) {
   assert(gen->isRunning());
   ActRec* genAR = gen->actRec();
   genAR->setReturn(vmfp(), pc, genAR->func()->isAsync() ?
-    mcg->ustubs().asyncGenRetHelper :
-    mcg->ustubs().genRetHelper);
+    jit::tc::ustubs().asyncGenRetHelper :
+    jit::tc::ustubs().genRetHelper);
 
   vmfp() = genAR;
 
@@ -5866,7 +5865,7 @@ TCA suspendStack(PC &pc) {
     auto retIp = jitReturnPost(jitReturn);
     if (!suspendOuter) return retIp;
     if (retIp) {
-      auto const& us = mcg->ustubs();
+      auto const& us = jit::tc::ustubs();
       if (retIp == us.resumeHelper) retIp = us.fcallAwaitSuspendHelper;
       return retIp;
     }
@@ -6013,7 +6012,7 @@ void PrintTCCallerInfo() {
     // NB: We can't directly mutate the register-mapped `reg_fp'.
     for (ActRec* fp = reg_fp; fp; fp = fp->m_sfp) {
       auto const rip = jit::TCA(fp->m_savedRip);
-      if (mcg->code().isValidCodeAddress(rip)) return rip;
+      if (jit::tc::isValidCodeAddress(rip)) return rip;
     }
     return nullptr;
   }();
@@ -6723,7 +6722,7 @@ TCA dispatchImpl() {
        * been returned by jitReturnPost(), whether or not we were called from
        * the TC. We only actually return callToExit to our caller if that
        * caller is dispatchBB(). */                           \
-      assert(retAddr == mcg->ustubs().callToExit);    \
+      assert(retAddr == jit::tc::ustubs().callToExit);    \
       return breakOnCtlFlow ? retAddr : nullptr;              \
     }                                                         \
     assert(isCtlFlow || !retAddr);                            \
@@ -6783,7 +6782,7 @@ OPTBLD_INLINE TCA switchModeForDebugger(TCA retAddr) {
       // that will throw the execution from a safe place.
       FTRACE(1, "Want to throw VMSwitchMode but retAddr = {}, "
              "overriding with throwSwitchMode stub.\n", retAddr);
-      return mcg->ustubs().throwSwitchMode;
+      return jit::tc::ustubs().throwSwitchMode;
     } else {
       throw VMSwitchMode();
     }

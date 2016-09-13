@@ -96,8 +96,8 @@ struct ActRec {
     TypedValue m_r;
     struct {
       union {
-        ObjectData* m_this; // This.
-        Class* m_cls;       // Late bound class.
+        ObjectData* m_thisUnsafe; // This.
+        Class* m_clsUnsafe;       // Late bound class.
       };
       union {
         // Variable environment; only used when the ActRec is live.
@@ -149,6 +149,7 @@ struct ActRec {
   static auto constexpr      kExtraArgsBit = 0x1;  // unset for m_varEnv
 
   static constexpr uintptr_t kTrashedVarEnvSlot = 0xfeeefeee000f000f;
+  static constexpr uintptr_t kTrashedThisSlot = 0xfeeefeeef00fe00e;
 
   /////////////////////////////////////////////////////////////////////////////
 
@@ -239,6 +240,21 @@ struct ActRec {
   static void* encodeClass(const Class* cls);
 
   /*
+   * Determine whether p is a Class* or an ObjectData* based
+   * on kHasClassBit.
+   *
+   * @requires: p != nullptr
+   */
+  static bool checkThis(void* p);
+
+  /*
+   * Determine whether p is a Class* based on kHasClassBit.
+   *
+   * @requires: p is a Cctx, an ObjectData* or a nullptr
+   */
+  static bool checkThisOrNull(void* p);
+
+  /*
    * Decode `p', encoded in the format of m_this/m_cls.
    *
    * If `p' has the other encoding (or is nullptr), return nullptr.
@@ -257,16 +273,22 @@ struct ActRec {
   /*
    * Whether the m_this/m_cls union is discriminated in the desired way.
    *
-   * Always returns false if the union is nullptr.
+   * @requires: m_func->implCls() != nullptr
    */
   bool hasThis() const;
   bool hasClass() const;
 
   /*
-   * Get the raw (encoded) value of the m_this/m_cls union.
+   * Get the (encoded) value of the m_this/m_cls union.
+   *
+   * @requires: hasThis() || hasClass()
    */
   void* getThisOrClass() const;
 
+  /*
+   * Get m_thisUnsafe. Caller takes responsibility for its meaning.
+   */
+  ObjectData* getThisUnsafe() const;
   /*
    * Get and decode the value of m_this/m_cls.
    *
@@ -276,10 +298,24 @@ struct ActRec {
   Class* getClass() const;
 
   /*
-   * Encode and set `val' to the m_this/m_cls union.
+   * Encode and set `val' to m_this/m_cls
+   *
+   * @requires: m_func->implClass() and
+   *            !m_func->isStaticInProlog()
    */
   void setThis(ObjectData* val);
+  /*
+   * Encode and set `val' to m_this/m_cls
+   *
+   * @requires: m_func->implClass() and
+   *            !(m_func->attrs() & AttrRequiresThis)
+   */
   void setClass(Class* val);
+
+  /*
+   * Write garbage to the m_this/m_cls union (in debug mode only).
+   */
+  void trashThis();
 
   /////////////////////////////////////////////////////////////////////////////
   // VarEnv / ExtraArgs.

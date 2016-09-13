@@ -72,12 +72,20 @@ struct IRBuilder {
    */
   IRUnit& unit() const { return m_unit; }
   FrameStateMgr& fs() { return m_state; }
-  BCMarker curMarker() const { return m_curMarker; }
+  BCMarker curMarker() const { return m_curBCContext.marker; }
 
   /*
-   * Update the marker for instructions that were generated without one.
+   * Get the current BCContext, incrementing its `iroff'.
+   */
+  BCContext nextBCContext() {
+    return BCContext { m_curBCContext.marker, m_curBCContext.iroff++ };
+  }
+
+  /*
+   * Update the current BCContext.
    */
   void setCurMarker(BCMarker);
+  void resetCurIROff() { m_curBCContext.iroff = 0; }
 
   /*
    * Exception handling and IRBuilder.
@@ -263,7 +271,7 @@ private:
         return optimizeInst(inst, CloneFlag::Yes, nullptr);
       },
       op,
-      m_curMarker,
+      nextBCContext(),
       std::forward<Args>(args)...
     );
   }
@@ -289,6 +297,7 @@ private:
   SSATmp* preOptimizeAssertLocation(IRInstruction*, Location);
   SSATmp* preOptimizeAssertLoc(IRInstruction*);
   SSATmp* preOptimizeAssertStk(IRInstruction*);
+  SSATmp* preOptimizeLdARFuncPtr(IRInstruction*);
   SSATmp* preOptimizeCheckCtxThis(IRInstruction*);
   SSATmp* preOptimizeLdCtxHelper(IRInstruction*);
   SSATmp* preOptimizeLdCtx(IRInstruction* i) {
@@ -325,7 +334,7 @@ private:
 private:
   struct BlockState {
     Block* block;
-    BCMarker marker;
+    BCContext bcctx;
     ExnStackState exnStack;
     std::function<Block* ()> catchCreator;
   };
@@ -333,12 +342,12 @@ private:
 private:
   IRUnit& m_unit;
   BCMarker m_initialMarker;
-  BCMarker m_curMarker;
+  BCContext m_curBCContext;
   FrameStateMgr m_state;
 
   /*
    * m_savedBlocks will be nonempty iff we're emitting code to a block other
-   * than the main block. m_curMarker, and m_curBlock are all set from the
+   * than the main block. m_curBCContext, and m_curBlock are all set from the
    * most recent call to pushBlock() or popBlock().
    */
   jit::vector<BlockState> m_savedBlocks;

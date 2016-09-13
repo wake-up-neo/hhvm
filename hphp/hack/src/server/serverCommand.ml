@@ -10,14 +10,13 @@
 
 open Utils
 open ServerCommandTypes
-open ServerEnv
 
 module TLazyHeap = Typing_lazy_heap
 
 (****************************************************************************)
 (* Called by the client *)
 (****************************************************************************)
-let rpc : type a. Timeout.in_channel * out_channel -> a ServerRpc.t -> a
+let rpc : type a. Timeout.in_channel * out_channel -> a t -> a
 = fun (_, oc) cmd ->
   Marshal.to_channel oc (Rpc cmd) [];
   flush oc;
@@ -128,7 +127,7 @@ let stream_response (genv:ServerEnv.genv) env (ic, oc) ~cmd =
       | None -> ServerUtils.shutdown_client (ic, oc)
       | Some build_hook -> begin
         ServerTypeCheck.hook_after_parsing :=
-          Some (fun genv old_env env updates ->
+          Some (fun genv env ->
             (* subtle: an exception there (such as writing on a closed pipe)
              * will not be caught by handle_connection() because
              * we have already returned from handle_connection(), hence
@@ -138,7 +137,7 @@ let stream_response (genv:ServerEnv.genv) env (ic, oc) ~cmd =
               with_context
                 ~enter:(fun () -> ())
                 ~exit:(fun () -> ServerUtils.shutdown_client (ic, oc))
-                ~do_:(fun () -> build_hook genv old_env env updates);
+                ~do_:(fun () -> build_hook genv env);
             with exn ->
               let msg = Printexc.to_string exn in
               Printf.printf "Exn in build_hook: %s" msg;
@@ -147,15 +146,6 @@ let stream_response (genv:ServerEnv.genv) env (ic, oc) ~cmd =
             ServerTypeCheck.hook_after_parsing := None
           )
       end)
-
-let get_persistent_fds env =
-  match env.persistent_client_fd with
-  | Some fd -> fd
-  | None ->
-    failwith ("Persistent channel not found!")
-
-let send_response_to_client fd response =
-  Marshal_tools.to_fd_with_preamble fd response
 
 let handle genv env client =
   let msg = ClientProvider.read_client_msg client in
@@ -166,10 +156,10 @@ let handle genv env client =
       let cmd_string = ServerRpc.to_string cmd in
       HackEventLogger.handled_command cmd_string t;
       ClientProvider.send_response_to_client client response;
-      if cmd = ServerRpc.DISCONNECT ||
-          not @@ (ClientProvider.is_persistent client env)
+      if cmd = ServerCommandTypes.DISCONNECT ||
+          not @@ (ClientProvider.is_persistent client)
         then ClientProvider.shutdown_client client;
-      if cmd = ServerRpc.KILL then ServerUtils.die_nicely ();
+      if cmd = ServerCommandTypes.KILL then ServerUtils.die_nicely ();
       new_env
   | Stream cmd ->
       let ic, oc = ClientProvider.get_channels client in

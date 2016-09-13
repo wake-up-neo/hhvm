@@ -16,10 +16,12 @@
 
 #include "hphp/runtime/vm/named-entity.h"
 
+#include "hphp/runtime/base/perf-warning.h"
 #include "hphp/runtime/base/rds.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/string-data.h"
 #include "hphp/runtime/base/type-string.h"
+
 #include "hphp/runtime/vm/class.h"
 #include "hphp/runtime/vm/reverse-data-map.h"
 #include "hphp/runtime/vm/type-alias.h"
@@ -87,6 +89,11 @@ void NamedEntity::pushClass(Class* cls) {
 void NamedEntity::removeClass(Class* goner) {
   Class* head = m_clsList;
   if (!head) return;
+
+  if (RuntimeOption::EvalEnableReverseDataMap) {
+    data_map::deregister(this);
+  }
+
   if (head == goner) {
     m_clsList = head->m_nextClass;
     return;
@@ -128,8 +135,10 @@ NamedEntity* insertNamedEntity(const StringData* str) {
     str = makeStaticString(str);
   }
   auto res = s_namedDataMap->insert(str, NamedEntity());
-  auto const ne = &res.first->second;
+  static std::atomic<bool> signaled{false};
+  checkAHMSubMaps(*s_namedDataMap, "named entity table", signaled);
 
+  auto const ne = &res.first->second;
   if (res.second && RuntimeOption::EvalEnableReverseDataMap) {
     data_map::register_start(ne);
   }

@@ -39,6 +39,13 @@ module WithParser(Parser : ParserType) = struct
     in
       lex_ahead (Parser.lexer parser) lookahead
 
+  let next_token_as_name parser =
+    (* TODO: This isn't right.  Pass flags to the lexer. *)
+    let lexer = Parser.lexer parser in
+    let (lexer, token) = Parser.Lexer.next_token_as_name lexer in
+    let parser = Parser.with_lexer parser lexer in
+    (parser, token)
+
   let peek_token_kind parser =
     Token.kind (peek_token parser)
 
@@ -65,12 +72,80 @@ module WithParser(Parser : ParserType) = struct
          and continue on from the current token. Don't skip it. *)
       (with_error parser error, (Syntax.make_missing()))
 
+  let expect_required parser =
+    expect_token parser TokenKind.Required SyntaxError.error1051
+
   let expect_name parser =
     expect_token parser TokenKind.Name SyntaxError.error1004
+
+  let expect_name_allow_keywords parser =
+    let (parser1, token) = next_token_as_name parser in
+    if (Token.kind token) = TokenKind.Name then
+      (parser1, Syntax.make_token token)
+    else
+      (* ERROR RECOVERY: Create a missing token for the expected token,
+         and continue on from the current token. Don't skip it. *)
+      (with_error parser SyntaxError.error1004, (Syntax.make_missing()))
+
+  (* We have a number of issues involving xhp class names, which begin with
+     a colon and may contain internal colons and dashes.  These are some
+     helper methods to deal with them. *)
+
+  let is_next_name parser =
+    Parser.Lexer.is_next_name (Parser.lexer parser)
+
+  let next_xhp_name parser =
+    assert(is_next_name parser);
+    let lexer = Parser.lexer parser in
+    let (lexer, token) = Parser.Lexer.next_xhp_name lexer in
+    let parser = Parser.with_lexer parser lexer in
+    (parser, token)
+
+  let is_next_xhp_class_name parser =
+    Parser.Lexer.is_next_xhp_class_name (Parser.lexer parser)
+
+  let next_xhp_class_name parser =
+    assert(is_next_xhp_class_name parser);
+    let lexer = Parser.lexer parser in
+    let (lexer, token) = Parser.Lexer.next_xhp_class_name lexer in
+    let parser = Parser.with_lexer parser lexer in
+    (parser, token)
+
+  let expect_xhp_class_name parser =
+    if is_next_xhp_class_name parser then
+      let (parser, token) = next_xhp_class_name parser in
+      (parser, Syntax.make_token token)
+    else
+      (* ERROR RECOVERY: Create a missing token for the expected token,
+         and continue on from the current token. Don't skip it. *)
+      (* TODO: Different error? *)
+      (with_error parser SyntaxError.error1004, (Syntax.make_missing()))
+
+  let expect_xhp_name parser =
+    if is_next_name parser then
+      let (parser, token) = next_xhp_name parser in
+      (parser, Syntax.make_token token)
+    else
+      (* ERROR RECOVERY: Create a missing token for the expected token,
+         and continue on from the current token. Don't skip it. *)
+      (* TODO: Different error? *)
+      (with_error parser SyntaxError.error1004, (Syntax.make_missing()))
+
+  let expect_class_name parser =
+    if is_next_xhp_class_name parser then
+      let (parser, token) = next_xhp_class_name parser in
+      (parser, Syntax.make_token token)
+    else
+      expect_name parser
+
+  let next_xhp_class_name_or_other parser =
+    if is_next_xhp_class_name parser then next_xhp_class_name parser
+    else next_token parser
 
   (* We accept either a Name or a QualifiedName token when looking for a
      qualified name. *)
   let expect_qualified_name parser =
+    (* TODO: What if the name is a keyword? *)
     let (parser1, name) = next_token parser in
     match Token.kind name with
     | TokenKind.QualifiedName
@@ -132,6 +207,33 @@ module WithParser(Parser : ParserType) = struct
   let expect_while parser =
     expect_token parser TokenKind.While SyntaxError.error1018
 
+  let expect_coloncolon parser =
+    expect_token parser TokenKind.ColonColon SyntaxError.error1047
+
+  let expect_name_or_variable parser =
+    let (parser1, token) = next_token_as_name parser in
+    match Token.kind token with
+    | TokenKind.Name
+    | TokenKind.Variable -> (parser1, Syntax.make_token token)
+    | _ ->
+      (* ERROR RECOVERY: Create a missing token for the expected token,
+         and continue on from the current token. Don't skip it. *)
+      (with_error parser SyntaxError.error1050, (Syntax.make_missing()))
+
+  let expect_name_variable_or_class parser =
+    let (parser1, token) = next_token parser in
+    if Token.kind token = TokenKind.Class then
+      (parser1, Syntax.make_token token)
+    else
+      let (parser1, token) = next_token_as_name parser in
+      match Token.kind token with
+      | TokenKind.Name
+      | TokenKind.Variable -> (parser1, Syntax.make_token token)
+      | _ ->
+        (* ERROR RECOVERY: Create a missing token for the expected token,
+           and continue on from the current token. Don't skip it. *)
+        (with_error parser SyntaxError.error1048, (Syntax.make_missing()))
+
   let optional_token parser kind =
     let (parser1, token) = next_token parser in
     if (Token.kind token) = kind then
@@ -143,13 +245,6 @@ module WithParser(Parser : ParserType) = struct
     let (parser, token) = next_token parser in
     assert ((Token.kind token) = kind);
     (parser, Syntax.make_token token)
-
-  let next_token_as_name parser =
-    (* TODO: This isn't right.  Pass flags to the lexer. *)
-    let lexer = Parser.lexer parser in
-    let (lexer, token) = Parser.Lexer.next_token_as_name lexer in
-    let parser = Parser.with_lexer parser lexer in
-    (parser, token)
 
   (* This helper method parses a list of the form
 
@@ -272,5 +367,21 @@ module WithParser(Parser : ParserType) = struct
       parse_comma_list_opt_allow_trailing
         parser TokenKind.RightParen SyntaxError.error1011 parse_item in
     parse_parenthesized_list parser parse_items
+
+  let parse_braced_list parser parse_items =
+    parse_delimited_list parser TokenKind.LeftBrace SyntaxError.error1034
+      TokenKind.RightBrace SyntaxError.error1006 parse_items
+
+  let parse_braced_comma_list_opt parser parse_item =
+    let parse_items parser =
+      parse_comma_list_opt
+        parser TokenKind.RightBrace SyntaxError.error1006 parse_item in
+    parse_braced_list parser parse_items
+
+  let parse_braced_comma_list_opt_allow_trailing parser parse_item =
+    let parse_items parser =
+      parse_comma_list_opt_allow_trailing
+        parser TokenKind.RightBrace SyntaxError.error1006 parse_item in
+    parse_braced_list parser parse_items
 
 end

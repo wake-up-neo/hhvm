@@ -41,10 +41,12 @@ struct Vreg;
  * Writer stream for adding instructions to a Vblock.
  */
 struct Vout {
-  Vout(Vunit& u, Vlabel b, const IRInstruction* origin = nullptr)
+  Vout(Vunit& u, Vlabel b,
+       folly::Optional<Vinstr::ir_context> irctx = folly::none)
     : m_unit(u)
     , m_block(b)
-    , m_origin(origin)
+    , m_irctx ( irctx ? *irctx
+                      : Vinstr::ir_context { nullptr, Vinstr::kInvalidVoff } )
   {}
 
   Vout(Vout&&) = default;
@@ -91,7 +93,7 @@ struct Vout {
    * Set the current block and Vinstr origin.
    */
   void use(Vlabel b)                     { m_block = b; }
-  void setOrigin(const IRInstruction* i) { m_origin = i; }
+  void setOrigin(const IRInstruction* i) { m_irctx.origin = i; }
 
   /*
    * Vunit delegations.
@@ -106,7 +108,7 @@ struct Vout {
 private:
   Vunit& m_unit;
   Vlabel m_block;
-  const IRInstruction* m_origin;
+  Vinstr::ir_context m_irctx;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

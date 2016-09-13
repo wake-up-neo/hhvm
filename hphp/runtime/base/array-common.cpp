@@ -21,7 +21,8 @@
 #include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/base/mixed-array-defs.h"
-#include "hphp/runtime/base/packed-array-defs.h"
+#include "hphp/runtime/base/set-array.h"
+#include "hphp/runtime/base/packed-array.h"
 #include "hphp/runtime/base/type-variant.h"
 
 namespace HPHP {
@@ -35,12 +36,15 @@ ssize_t ArrayCommon::ReturnInvalidIndex(const ArrayData*) {
 bool ArrayCommon::ValidMArrayIter(const ArrayData* ad, const MArrayIter& fp) {
   assert(fp.getContainer() == ad);
   if (fp.getResetFlag()) return false;
-  if (ad->isPackedLayout()) {
+  if (ad->hasPackedLayout()) {
     assert(PackedArray::checkInvariants(ad));
     return fp.m_pos != ad->getSize();
+  } else if (ad->isKeyset()) {
+    return false;
+  } else {
+    assert(MixedArray::asMixed(ad));
+    return fp.m_pos != MixedArray::asMixed(ad)->iterLimit();
   }
-  assert(MixedArray::asMixed(ad));
-  return fp.m_pos != MixedArray::asMixed(ad)->iterLimit();
 }
 
 ArrayData* ArrayCommon::Pop(ArrayData* a, Variant &value) {
@@ -106,11 +110,24 @@ ArrayData* ArrayCommon::ToKeyset(ArrayData* a, bool) {
   auto const size = a->size();
   if (!size) return staticEmptyKeysetArray();
   KeysetInit init{size};
-  IterateKV(
+  IterateV(
     a,
-    [&](const TypedValue* k, const TypedValue*) {
-      assert(isIntType(k->m_type) || isStringType(k->m_type));
-      init.add(tvAsCVarRef(k));
+    [&](const TypedValue* v) {
+      if (UNLIKELY(v->m_type == KindOfRef)) {
+        if (v->m_data.pref->isReferenced()) {
+          throwRefInvalidArrayValueException(init.toArray());
+        }
+        v = v->m_data.pref->tv();
+        assertx(v->m_type != KindOfRef);
+      }
+
+      if (LIKELY(isStringType(v->m_type))) {
+        init.add(v->m_data.pstr);
+      } else if (LIKELY(isIntType(v->m_type))) {
+        init.add(v->m_data.num);
+      } else {
+        throwInvalidArrayKeyException(v, init.toArray().get());
+      }
     }
   );
   return init.create();

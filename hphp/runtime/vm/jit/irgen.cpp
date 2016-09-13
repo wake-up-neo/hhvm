@@ -20,7 +20,6 @@
 #include "hphp/runtime/vm/jit/cfg.h"
 #include "hphp/runtime/vm/jit/dce.h"
 #include "hphp/runtime/vm/jit/prof-data.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
 
 #include "hphp/runtime/vm/jit/irgen-internal.h"
 
@@ -254,6 +253,7 @@ void prepareForNextHHBC(IRGS& env,
   updateMarker(env);
   env.lastBcInst = lastBcInst;
   env.irb->exceptionStackBoundary();
+  env.irb->resetCurIROff();
 }
 
 void finishHHBC(IRGS& env) {

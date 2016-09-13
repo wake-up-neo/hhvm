@@ -16,7 +16,6 @@
 #include "hphp/runtime/vm/jit/write-lease.h"
 
 #include "hphp/runtime/vm/bytecode.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/treadmill.h"
 
 #include "hphp/util/atomic-vector.h"
@@ -33,10 +32,16 @@ namespace {
 __thread bool threadCanAcquire = true;
 __thread bool threadCanAcquireConcurrent = true;
 
-AtomicVector<int64_t> s_funcOwners{kFuncCountHint,
-                                   Treadmill::kInvalidThreadIdx};
+AtomicVector<int64_t> s_funcOwners{0, Treadmill::kInvalidThreadIdx};
+AtomicVectorInit s_funcOwnersInit{
+  s_funcOwners, RuntimeOption::EvalFuncCountHint
+};
 std::atomic<int> s_jittingThreads{0};
+
+Lease s_writeLease;
 }
+
+Lease& GetWriteLease() { return s_writeLease; }
 
 Lease::Lease() {
   pthread_mutex_init(&m_lock, nullptr);

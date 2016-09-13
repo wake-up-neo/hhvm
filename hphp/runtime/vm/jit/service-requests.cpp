@@ -18,8 +18,9 @@
 
 #include "hphp/runtime/vm/jit/types.h"
 #include "hphp/runtime/vm/jit/abi.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/stack-offsets.h"
+#include "hphp/runtime/vm/jit/stub-alloc.h"
+#include "hphp/runtime/vm/jit/tc.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/unique-stubs.h"
 #include "hphp/runtime/vm/jit/vasm-gen.h"
@@ -128,7 +129,7 @@ void emit_svcreq(CodeBlock& cb,
     live_out |= r_svcreq_stub();
     live_out |= r_svcreq_req();
 
-    v << jmpi{mcg->ustubs().handleSRHelper, live_out};
+    v << jmpi{tc::ustubs().handleSRHelper, live_out};
 
     // We pad ephemeral stubs unconditionally.  This is required for
     // correctness by the x64 code relocator.
@@ -150,7 +151,7 @@ TCA emit_bindjmp_stub(CodeBlock& cb, DataBlock& data, CGMeta& fixups,
   return emit_ephemeral(
     cb,
     data,
-    mcg->getFreeStub(cb, &fixups),
+    allocTCStub(cb, &fixups),
     target.resumed() ? folly::none : folly::make_optional(spOff),
     REQ_BIND_JMP,
     jmp,
@@ -165,7 +166,7 @@ TCA emit_bindaddr_stub(CodeBlock& cb, DataBlock& data, CGMeta& fixups,
   return emit_ephemeral(
     cb,
     data,
-    mcg->getFreeStub(cb, &fixups),
+    allocTCStub(cb, &fixups),
     target.resumed() ? folly::none : folly::make_optional(spOff),
     REQ_BIND_ADDR,
     addr,

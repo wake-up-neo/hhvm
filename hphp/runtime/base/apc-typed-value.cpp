@@ -17,6 +17,7 @@
 
 #include "hphp/runtime/base/mixed-array.h"
 #include "hphp/runtime/base/packed-array.h"
+#include "hphp/runtime/base/set-array.h"
 #include "hphp/runtime/ext/apc/ext_apc.h"
 
 namespace HPHP {
@@ -64,8 +65,8 @@ bool APCTypedValue::checkInvariants() const {
       assert(m_data.dict->isStatic());
       break;
     case APCKind::StaticKeyset:
-      assert(m_data.dict->isKeyset());
-      assert(m_data.dict->isStatic());
+      assert(m_data.keyset->isKeyset());
+      assert(m_data.keyset->isStatic());
       break;
     case APCKind::UncountedArray:
       assert(m_data.arr->isPHPArray());
@@ -80,8 +81,8 @@ bool APCTypedValue::checkInvariants() const {
       assert(m_data.dict->isUncounted());
       break;
     case APCKind::UncountedKeyset:
-      assert(m_data.dict->isKeyset());
-      assert(m_data.dict->isUncounted());
+      assert(m_data.keyset->isKeyset());
+      assert(m_data.keyset->isUncounted());
       break;
     case APCKind::SharedString:
     case APCKind::SharedArray:
@@ -116,7 +117,7 @@ void APCTypedValue::deleteUncounted() {
     m_data.str->destructUncounted();
   } else if (kind == APCKind::UncountedArray) {
     assert(m_data.arr->isPHPArray());
-    if (m_data.arr->isPackedLayout()) {
+    if (m_data.arr->hasPackedLayout()) {
       auto arr = m_data.arr;
       this->~APCTypedValue();
       PackedArray::ReleaseUncounted(arr, sizeof(APCTypedValue));
@@ -143,7 +144,7 @@ void APCTypedValue::deleteUncounted() {
     auto keyset = m_data.keyset;
     assert(keyset->isKeyset());
     this->~APCTypedValue();
-    MixedArray::ReleaseUncounted(keyset, sizeof(APCTypedValue));
+    SetArray::ReleaseUncounted(keyset, sizeof(APCTypedValue));
     return;
   }
 

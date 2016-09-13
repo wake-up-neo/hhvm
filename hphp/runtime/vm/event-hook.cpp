@@ -26,7 +26,7 @@
 #include "hphp/runtime/ext/std/ext_std_function.h"
 #include "hphp/runtime/ext/xenon/ext_xenon.h"
 
-#include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/tc.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/func.h"
 
@@ -145,7 +145,8 @@ void addFramePointers(const ActRec* ar, Array& frameinfo, bool isEnter) {
   }
 
   if (isEnter) {
-    auto this_ptr = ar->hasThis() ? intptr_t(ar->getThis()) : 0;
+    auto this_ptr = ar->func()->cls() && ar->hasThis() ?
+      intptr_t(ar->getThis()) : 0;
     frameinfo.set(s_this_ptr, Variant(this_ptr));
   }
 
@@ -272,16 +273,17 @@ bool EventHook::RunInterceptHandler(ActRec* ar) {
   PC savePc = vmpc();
 
   Variant doneFlag = true;
-  Variant called_on;
+  Variant called_on = [&] {
+    if (func->cls()) {
+      if (ar->hasThis()) {
+        return Variant(ar->getThis());
+      }
+      // For static methods, give handler the name of called class
+      return Variant{ar->getClass()->name(), Variant::PersistentStrInit{}};
+    }
+    return init_null();
+  }();
 
-  if (ar->hasThis()) {
-    called_on = Variant(ar->getThis());
-  } else if (ar->hasClass()) {
-    // For static methods, give handler the name of called class
-    called_on = Variant(const_cast<StringData*>(ar->getClass()->name()));
-  } else {
-    called_on = init_null();
-  }
   Variant intArgs =
     PackedArrayInit(5)
       .append(VarNR(ar->func()->fullName()))
@@ -296,7 +298,8 @@ bool EventHook::RunInterceptHandler(ActRec* ar) {
     Offset pcOff;
     ActRec* outer = g_context->getPrevVMState(ar, &pcOff);
 
-    frame_free_locals_inl_no_hook<true>(ar, ar->func()->numLocals());
+    ar->setLocalsDecRefd();
+    frame_free_locals_no_hook(ar);
     Stack& stack = vmStack();
     stack.top() = (Cell*)(ar + 1);
     cellDup(*ret.asCell(), *stack.allocTV());
@@ -388,7 +391,7 @@ void EventHook::onFunctionExit(const ActRec* ar, const TypedValue* retval,
   // side exit in an inlined callee, we short-circuit here in order to skip
   // exit events that could unbalance the call stack.
   if (RuntimeOption::EvalJit &&
-      ((jit::TCA) ar->m_savedRip == jit::mcg->ustubs().retInlHelper)) {
+      ((jit::TCA) ar->m_savedRip == jit::tc::ustubs().retInlHelper)) {
     return;
   }
 
@@ -518,9 +521,9 @@ void EventHook::onFunctionSuspendE(ActRec* suspending,
   // teleported the ActRec from suspending over to resumableAR, so we need to
   // make sure the unwinder knows not to touch the locals, $this, or
   // VarEnv/ExtraArgs.
-  suspending->setThisOrClassAllowNull(nullptr);
   suspending->setLocalsDecRefd();
-  suspending->setVarEnv(nullptr);
+  suspending->trashThis();
+  suspending->trashVarEnv();
 
   try {
     auto const flags = handle_request_surprise();
@@ -551,10 +554,10 @@ void EventHook::onFunctionSuspendE(ActRec* suspending,
 }
 
 void EventHook::onFunctionReturn(ActRec* ar, TypedValue retval) {
-  // The locals are already gone. Null out everything.
-  ar->setThisOrClassAllowNull(nullptr);
+  // The locals are already gone. Tell everyone
   ar->setLocalsDecRefd();
-  ar->setVarEnv(nullptr);
+  ar->trashThis();
+  ar->trashVarEnv();
 
   try {
     auto const flags = handle_request_surprise();
@@ -581,10 +584,10 @@ void EventHook::onFunctionReturn(ActRec* ar, TypedValue retval) {
 }
 
 void EventHook::onFunctionUnwind(ActRec* ar, ObjectData* phpException) {
-  // The locals are already gone. Null out everything.
-  ar->setThisOrClassAllowNull(nullptr);
+  // The locals are already gone. Tell everyone
   ar->setLocalsDecRefd();
-  ar->setVarEnv(nullptr);
+  ar->trashThis();
+  ar->trashVarEnv();
 
   // TODO(#2329497) can't handle_request_surprise() yet, unwinder unable to
   // replace fault

@@ -16,11 +16,12 @@
 
 #include "hphp/runtime/vm/debug/debug.h"
 #include "hphp/runtime/vm/debug/gdb-jit.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/mcgen.h"
 
 #include "hphp/runtime/base/execution-context.h"
 
 #include "hphp/util/current-executable.h"
+#include "hphp/util/portability.h"
 
 #include <sys/types.h>
 #include <stdio.h>
@@ -40,12 +41,17 @@ using namespace HPHP::jit;
 
 namespace HPHP {
 namespace Debug {
+namespace { DebugInfo* s_info; }
 
 void* DebugInfo::pidMapOverlayStart;
 void* DebugInfo::pidMapOverlayEnd;
 
+void initDebugInfo() {
+  s_info = new DebugInfo();
+}
+
 DebugInfo* DebugInfo::Get() {
-  return mcg->debugInfo();
+  return s_info;
 }
 
 DebugInfo::DebugInfo() {
@@ -254,7 +260,7 @@ void DebugInfo::recordTracelet(TCRange range, const Func* func,
 
 void DebugInfo::recordDataMap(const void* from, const void* to,
                               const std::string& desc) {
-  if (!mcg) return;
+  if (!mcgen::initialized()) return;
   if (auto dataMap = Get()->m_dataMap) {
     fprintf(dataMap, "%" PRIxPTR " %" PRIx64 " %s\n",
             uintptr_t(from),

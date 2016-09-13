@@ -185,8 +185,8 @@ public:
   bool isVecArray() const { return kind() == kVecKind; }
   bool isKeyset() const { return kind() == kKeysetKind; }
 
-  bool isPackedLayout() const { return isPacked() || isVecArray(); }
-  bool isMixedLayout() const { return isMixed() || isDict() || isKeyset(); }
+  bool hasPackedLayout() const { return isPacked() || isVecArray(); }
+  bool hasMixedLayout() const { return isMixed() || isDict(); }
 
   bool isPHPArray() const { return kind() < kDictKind; }
   bool isHackArray() const { return kind() >= kDictKind; }
@@ -682,7 +682,6 @@ void decRefArr(ArrayData* arr) {
 [[noreturn]] void throwRefInvalidArrayValueException(const Array& arr);
 [[noreturn]] void throwInvalidKeysetOperation();
 [[noreturn]] void throwInvalidAdditionException(const ArrayData* ad);
-[[noreturn]] void throwInvalidMergeException(const ArrayData* ad);
 
 ///////////////////////////////////////////////////////////////////////////////
 }

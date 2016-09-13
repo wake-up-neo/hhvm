@@ -231,7 +231,7 @@ struct IRUnit {
   /*
    * Create a DefLabel instruction.
    */
-  IRInstruction* defLabel(unsigned numDst, BCMarker marker);
+  IRInstruction* defLabel(unsigned numDst, BCContext bcctx);
 
   /*
    * Add some extra destinations to a defLabel.
@@ -242,6 +242,8 @@ struct IRUnit {
    * Add an extra SSATmp to jmp.
    */
   void expandJmp(IRInstruction* jmp, SSATmp* value);
+
+  /////////////////////////////////////////////////////////////////////////////
 
 private:
   template<class... Args> SSATmp* newSSATmp(Args&&...);
@@ -266,9 +268,13 @@ private:
   // Map from SSATmp ids to SSATmp*.
   jit::vector<SSATmp*> m_ssaTmps;
 
-  Block::Hint m_defHint = Block::Hint::Neither;
+  // Default hint value for new blocks in this unit.
+  Block::Hint m_defHint{Block::Hint::Neither};
 
-  // timestamp at construction time.
+  // "Cursor" for IRInstructions in the current bytecode.  Managed externally.
+  uint16_t m_iroff{0};
+
+  // Timestamp at construction time.
   int64_t m_startNanos;
 };
 

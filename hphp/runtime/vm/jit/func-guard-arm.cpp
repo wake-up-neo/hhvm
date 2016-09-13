@@ -17,9 +17,9 @@
 #include "hphp/runtime/vm/jit/func-guard-arm.h"
 
 #include "hphp/runtime/vm/jit/abi-arm.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/translator.h"
 #include "hphp/runtime/vm/jit/smashable-instr-arm.h"
+#include "hphp/runtime/vm/jit/tc.h"
 #include "hphp/runtime/vm/jit/unique-stubs.h"
 #include "hphp/runtime/vm/jit/vasm-reg.h"
 
@@ -37,7 +37,7 @@ namespace {
 ///////////////////////////////////////////////////////////////////////////////
 
 ALWAYS_INLINE bool isPrologueStub(TCA addr) {
-  return addr == mcg->ustubs().fcallHelperThunk;
+  return addr == tc::ustubs().fcallHelperThunk;
 }
 
 vixl::Register X(Vreg64 r) {
@@ -60,6 +60,7 @@ void emitFuncGuard(const Func* func, CodeBlock& cb, CGMeta& fixups) {
   vixl::MacroAssembler a { cb };
   vixl::Label after_data;
   vixl::Label target_data;
+  auto const start = reinterpret_cast<char*>(cb.frontier());
 
   assertx(arm::abi(CodeKind::CrossTrace).gpUnreserved.contains(vixl::x0));
 
@@ -72,8 +73,10 @@ void emitFuncGuard(const Func* func, CodeBlock& cb, CGMeta& fixups) {
   a.  Br    (rAsm);
 
   a.  bind  (&target_data);
-  a.  dc64  (mcg->ustubs().funcPrologueRedispatch);
+  a.  dc64  (tc::ustubs().funcPrologueRedispatch);
   a.  bind  (&after_data);
+
+  __builtin___clear_cache(start, reinterpret_cast<char*>(cb.frontier()));
 }
 
 TCA funcGuardFromPrologue(TCA prologue, const Func* func) {

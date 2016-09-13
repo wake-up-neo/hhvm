@@ -54,7 +54,7 @@ PackedArray::VecInitializer PackedArray::s_initializer;
 //////////////////////////////////////////////////////////////////////
 
 bool PackedArray::checkInvariants(const ArrayData* arr) {
-  assert(arr->isPackedLayout());
+  assert(arr->hasPackedLayout());
   assert(arr->checkCount());
   assert(arr->m_size <= arr->cap());
   assert(arr->m_pos >= 0 && arr->m_pos <= arr->m_size);
@@ -905,7 +905,7 @@ PackedArray::SetRefStrVec(ArrayData* adIn, StringData* k, Variant&, bool) {
 }
 
 static void adjustMArrayIter(ArrayData* ad, ssize_t pos) {
-  assert(ad->isPackedLayout());
+  assert(ad->hasPackedLayout());
   for_each_strong_iterator([&] (MIterTable::Ent& miEnt) {
     if (miEnt.array != ad) return;
     auto const iter = miEnt.iter;
@@ -1101,37 +1101,9 @@ ArrayData* PackedArray::PlusEqVec(ArrayData* adIn, const ArrayData* elems) {
 
 ArrayData* PackedArray::Merge(ArrayData* adIn, const ArrayData* elems) {
   assert(checkInvariants(adIn));
-  assert(adIn->isPacked());
-  if (!elems->isPHPArray()) throwInvalidMergeException(elems);
   auto const neededSize = adIn->m_size + elems->size();
   auto const ret = ToMixedCopyReserve(adIn, neededSize);
   return MixedArray::ArrayMergeGeneric(ret, elems);
-}
-
-ArrayData* PackedArray::MergeVec(ArrayData* adIn, const ArrayData* elems) {
-  assert(checkInvariants(adIn));
-  assert(adIn->isVecArray());
-
-  if (!elems->isVecArray()) throwInvalidMergeException(adIn);
-
-  // Merging two arrays renumbers integer keys, and a vec has nothing but
-  // integer keys, so this just appends the two arrays together.
-  auto const outSize = adIn->m_size + elems->m_size;
-  auto const out = MakeReserveVec(outSize);
-  auto outData = packedData(out);
-
-  static_assert(sizeof(ArrayData) == 16 && sizeof(TypedValue) == 16, "");
-  memcpy16_inline(packedData(out), packedData(adIn), adIn->m_size * 16);
-  memcpy16_inline(packedData(out) + adIn->m_size, packedData(elems),
-                  elems->m_size * 16);
-
-  for (uint32_t i = 0; i < outSize; ++i) {
-    assert(outData[i].m_type != KindOfRef);
-    tvRefcountedIncRef(outData + i);
-  }
-  out->m_size = outSize;
-
-  return out;
 }
 
 ArrayData* PackedArray::Pop(ArrayData* adIn, Variant& value) {
@@ -1281,15 +1253,6 @@ ArrayData* PackedArray::ToVec(ArrayData* adIn, bool copy) {
   assert(ad->hasExactlyOneRef());
   assert(checkInvariants(ad));
   return ad;
-}
-
-ArrayData* PackedArray::ToKeyset(ArrayData* ad, bool copy) {
-  assert(checkInvariants(ad));
-  if (ad->empty()) return staticEmptyKeysetArray();
-  auto const size = ad->getSize();
-  KeysetInit ai{size};
-  for (uint32_t i = 0; i < size; ++i) ai.add(i);
-  return ai.create();
 }
 
 ArrayData* PackedArray::ToVecVec(ArrayData* ad, bool) {

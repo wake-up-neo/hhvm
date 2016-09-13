@@ -23,10 +23,12 @@
 
 #include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/array-iterator.h"
+#include "hphp/runtime/base/set-array.h"
 #include "hphp/runtime/base/collections.h"
 #include "hphp/runtime/base/comparisons.h"
 #include "hphp/runtime/base/dummy-resource.h"
 #include "hphp/runtime/base/execution-context.h"
+#include "hphp/runtime/base/struct-log-util.h"
 #include "hphp/runtime/base/thread-info.h"
 #include "hphp/runtime/base/variable-serializer.h"
 #include "hphp/runtime/base/zend-strtod.h"
@@ -326,6 +328,10 @@ void VariableUnserializer::add(Variant* v, UnserializeMode mode) {
   }
 }
 
+void VariableUnserializer::reserveForAdd(size_t count) {
+  m_refs.reserve(m_refs.size() + count);
+}
+
 Variant* VariableUnserializer::getByVal(int id) {
   if (id <= 0 || id > (int)m_refs.size()) return nullptr;
   Variant* ret = m_refs[id-1].var();
@@ -363,6 +369,11 @@ void VariableUnserializer::set(const char* buf, const char* end) {
 Variant VariableUnserializer::unserialize() {
   Variant v;
   unserializeVariant(v, this);
+  if (UNLIKELY(StructuredLog::coinflip(RuntimeOption::EvalSerDesSampleRate))) {
+    String ser(m_begin, m_end - m_begin, CopyString);
+    auto const fmt = folly::sformat("VU{}", (int)m_type);
+    StructuredLog::logSerDes(fmt.c_str(), "des", ser, v);
+  }
 
   for (auto& obj : m_sleepingObjects) {
     obj->invokeWakeup();
@@ -1066,6 +1077,8 @@ Array unserializeArray(VariableUnserializer* uns) {
   // Pre-allocate an ArrayData of the given size, to avoid escalation in the
   // middle, which breaks references.
   Array arr = ArrayInit(size, ArrayInit::Mixed{}).toArray();
+  uns->reserveForAdd(size);
+
   for (int64_t i = 0; i < size; i++) {
     Variant key;
     unserializeVariant(key, uns, UnserializeMode::Key);
@@ -1173,6 +1186,8 @@ Array unserializeVec(VariableUnserializer* uns) {
   }
 
   Array arr = VecArrayInit(size).toArray();
+  uns->reserveForAdd(size);
+
   for (int64_t i = 0; i < size; i++) {
     Variant* value;
     DEBUG_ONLY auto const ret = PackedArray::LvalNewVec(arr.get(), value, false);
@@ -1283,6 +1298,7 @@ void unserializeVector(ObjectData* obj, VariableUnserializer* uns,
   auto bvec = static_cast<BaseVector*>(obj);
   bvec->reserve(sz);
   assert(bvec->canMutateBuffer());
+  uns->reserveForAdd(sz);
   for (int64_t i = 0; i < sz; ++i) {
     auto tv = bvec->appendForUnserialize(i);
     tv->m_type = KindOfNull;
@@ -1313,35 +1329,37 @@ static int64_t read64(const char*& cur) {
 }
 
 /*
- * Read a key/value pair from 'cur' into 'out'. Returns false on unexpected
- * (but possibly still legal) format or if 'end' is reached.
+ * Read, allocate, and return a string from 'cur'. Returns null on unexpected
+ * (but possibly still legal) format or if 'end' is reached, without allocating.
  */
 ALWAYS_INLINE
-bool readStringIntPair(const char*& cur, const char* const end,
-                       int maxKeyLen, std::pair<String, int64_t>& out) {
-  /*
-   * Expected format:
-   *
-   *   s:3:"key";i:1234;
-   */
-  if (!match(cur, "s:", end)) return false;
-  auto keyLen = read64(cur);
-  if (keyLen < 0 || keyLen >= maxKeyLen) return false;
-  if (!match(cur, ":\"", end)) return false;
-  auto const keySlice = folly::StringPiece(cur, keyLen);
-  if ((cur += keyLen) >= end) return false;
+static StringData* readStringData(const char*& cur, const char* const end,
+                                  int maxLen) {
+  if (!match(cur, "s:", end)) return nullptr;
+  auto len = read64(cur);
+  if (len < 0 || len >= maxLen) return nullptr;
+  if (!match(cur, ":\"", end)) return nullptr;
+  auto const slice = folly::StringPiece(cur, len);
+  if ((cur += len) >= end) return nullptr;
+  if (!match(cur, "\";", end)) return nullptr;
   // TODO(11398853): Consider streaming/non-temporal stores here.
-  auto sd = StringData::Make(keySlice, CopyString);
-  sd->hash(); // Compute hash while the entire string is cached; use it later.
-  out.first = String::attach(sd);
-  if (!match(cur, "\";i:", end)) return false;
-  out.second = read64(cur);
-  if (!match(cur, ";", end)) return false;
-  return true;
+  auto sd = StringData::Make(slice, CopyString);
+  return sd;
 }
 
 /*
- * Attempts to unserialize into an initially empty HH\Map of string->int.
+ * Read an int64 from 'cur' into 'out'. Returns false on unexpected
+ * (but possibly still legal) format or if 'end' is reached.
+ */
+ALWAYS_INLINE
+bool readInt64(const char*& cur, const char* const end, int64_t& out) {
+  if (!match(cur, "i:", end)) return false;
+  out = read64(cur);
+  return match(cur, ";", end);
+}
+
+/*
+ * Attempts to unserialize into an initially empty HH\Map of string->int/string.
  * Returns false and leaves both 'map' and 'uns' untouched on failure, including
  * unexpected types and possibly legal, but uncommon, encodings.
  */
@@ -1365,26 +1383,35 @@ bool tryUnserializeStrIntMap(BaseMap* map,
    * First, parse the entire input and allocate the keys (accessing lots of
    * data, but mostly sequentially).
    */
-  req::deque<std::pair<String, int64_t>> out(1); // Hold off allocation until...
-  for (int64_t i = 0; i < sz; ++i) {
-    if (!readStringIntPair(b, end, maxKeyLen, out[i])) return false;
-    if (UNLIKELY(i == 0)) out.resize(sz); // ...it looks like a string->int map.
+  auto checkPoint = map->batchInsertBegin(sz);
+  int64_t i = 0;
+  for (; i < sz; ++i) {
+    auto sd = readStringData(b, end, maxKeyLen);
+    if (!sd) break;
+    String key = String::attach(sd);
+    auto tv = map->batchInsert(key.get());
+    tv->m_type = KindOfNull;
+    if (*b == 'i') {
+      if (!readInt64(b, end, tv->m_data.num)) break;
+      tv->m_type = KindOfInt64;
+    } else if (*b == 's') {
+      auto sd = readStringData(b, end, maxKeyLen);
+      if (!sd) break;
+      tv->m_data.pstr = sd;
+      tv->m_type = KindOfString;
+    } else {
+      break;
+    }
   }
   /*
-   * On success, populate the output hash map (very random access).
+   * On success, finalize the hash table insertion (very random access).
    */
-  uns->set(b, end);
-  while (!out.empty()) {
-    // Insert from front to back for consistency with slow-case.
-    auto& kv = out.front();
-    // TODO(11398987): Consider back-to-front for cache; avoid refcount updates.
-    if (auto tv = map->findForUnserialize(kv.first.get())) {
-      tv->m_type = KindOfInt64;
-      tv->m_data.num = kv.second;
-    }
-    out.pop_front();
+  if (i == sz && map->tryBatchInsertEnd(checkPoint)) {
+    uns->set(b, end);
+    return true;
   }
-  return true;
+  map->batchInsertAbort(checkPoint);
+  return false;
 }
 
 void unserializeMap(ObjectData* obj, VariableUnserializer* uns,
@@ -1396,6 +1423,7 @@ void unserializeMap(ObjectData* obj, VariableUnserializer* uns,
       tryUnserializeStrIntMap(map, uns, sz)) {
     return;
   }
+  uns->reserveForAdd(sz + sz); // keys + values
   for (int64_t i = 0; i < sz; ++i) {
     Variant k;
     unserializeVariant(k, uns, UnserializeMode::ColKey);
@@ -1430,6 +1458,7 @@ void unserializeSet(ObjectData* obj, VariableUnserializer* uns, int64_t sz,
   if (type != 'V') throwBadFormat(obj, type);
   auto set = static_cast<BaseSet*>(obj);
   set->reserve(sz);
+  uns->reserveForAdd(sz);
   for (int64_t i = 0; i < sz; ++i) {
     // When unserializing an element of a Set, we use Mode::ColKey for now.
     // This will make the unserializer to reserve an id for the element

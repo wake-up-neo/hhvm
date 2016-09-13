@@ -27,17 +27,30 @@
 #include <folly/Range.h>
 
 #include <cstdint>
+#include <limits>
 #include <string>
 
 namespace HPHP { namespace jit {
-//////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
 
 struct Block;
 struct Edge;
 struct IRUnit;
 struct SSATmp;
 
-//////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+
+/*
+ * Bytecode-relative position context for an IRInstruction.
+ *
+ * These are threaded around to construct IRInstructions.
+ */
+struct BCContext {
+  BCMarker marker;
+  uint16_t iroff;
+};
+
+///////////////////////////////////////////////////////////////////////////////
 
 /*
  * An HHIR instruction.
@@ -57,7 +70,7 @@ struct IRInstruction {
    * than directly via the constructor.
    */
   explicit IRInstruction(Opcode op,
-                         BCMarker marker,
+                         BCContext bcctx,
                          Edge* edges = nullptr,
                          uint32_t numSrcs = 0,
                          SSATmp** srcs = nullptr);
@@ -154,6 +167,11 @@ struct IRInstruction {
   bool isTransient() const;
 
   /*
+   * The index of this instruction relative to its BCMarker.
+   */
+  uint16_t iroff() const;
+
+  /*
    * Whether the instruction has one among a variadic list of opcodes.
    */
   template<typename... Args>
@@ -171,6 +189,13 @@ struct IRInstruction {
    */
   const BCMarker& marker() const;
   BCMarker& marker();
+
+  /*
+   * Get the BCContext of the instruction.
+   *
+   * This is only used for threading through to IRInstruction's constructor.
+   */
+  BCContext bcctx() const;
 
   /*
    * Return the current Func, or nullptr if not known (it should only
@@ -354,20 +379,20 @@ private:
 private:
   Type m_typeParam;  // garbage unless m_hasTypeParam is true
   Opcode m_op;
+  uint16_t m_iroff{std::numeric_limits<uint16_t>::max()};
   uint16_t m_numSrcs;
   uint16_t m_numDsts : 15;
   bool m_hasTypeParam : 1;
-  // <2 byte hole>
   BCMarker m_marker;
-  const Id m_id;
-  SSATmp** m_srcs;
+  const Id m_id{kTransient};
+  SSATmp** m_srcs{nullptr};
   union {
-    SSATmp* m_dest; // if HasDest
-    SSATmp** m_dsts;// if NaryDest
+    SSATmp* m_dest;  // if HasDest
+    SSATmp** m_dsts; // if NaryDest
   };
-  Block* m_block;   // what block owns this instruction
-  Edge* m_edges;    // outgoing edges, if this is a block-end
-  IRExtraData* m_extra;
+  Block* m_block{nullptr};  // what block owns this instruction
+  Edge* m_edges{nullptr};   // outgoing edges, if this is a block-end
+  IRExtraData* m_extra{nullptr};
 
 public:
   boost::intrusive::list_member_hook<> m_listNode; // for InstructionList

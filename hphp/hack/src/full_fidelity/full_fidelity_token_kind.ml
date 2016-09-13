@@ -20,6 +20,7 @@ type t =
 | Arraykey
 | As
 | Async
+| Attribute
 | Await
 | Bool
 | Break
@@ -48,6 +49,8 @@ type t =
 | Function
 | If
 | Implements
+| Include
+| Include_once
 | Instanceof
 | Insteadof
 | Int
@@ -67,6 +70,7 @@ type t =
 | Public
 | Require
 | Require_once
+| Required
 | Resource
 | Return
 | Self
@@ -144,7 +148,7 @@ type t =
 | EqualGreaterThan
 | EqualEqualGreaterThan
 | QuestionMinusGreaterThan
-| Backslash
+| NamespacePrefix
 | DotDotDot
 | DollarDollar
 | BarGreaterThan
@@ -162,6 +166,7 @@ type t =
 | NullLiteral
 (* XHP *)
 | XHPElementName
+| XHPClassName
 | XHPStringLiteral
 | XHPBody
 | XHPComment
@@ -176,6 +181,7 @@ let from_string keyword =
   | "arraykey" -> Some Arraykey
   | "as" -> Some As
   | "async" -> Some Async
+  | "attribute" -> Some Attribute
   | "await" -> Some Await
   | "bool" -> Some Bool
   | "break" -> Some Break
@@ -205,6 +211,8 @@ let from_string keyword =
   | "function" -> Some Function
   | "if" -> Some If
   | "implements" -> Some Implements
+  | "include" -> Some Include
+  | "include_once" -> Some Include_once
   | "instanceof" -> Some Instanceof
   | "insteadof" -> Some Insteadof
   | "int" -> Some Int
@@ -224,6 +232,7 @@ let from_string keyword =
   | "protected" -> Some Protected
   | "public" -> Some Public
   | "require" -> Some Require
+  | "required" -> Some Required
   | "require_once" -> Some Require_once
   | "resource" -> Some Resource
   | "return" -> Some Return
@@ -254,6 +263,7 @@ let to_string kind =
   | Arraykey -> "arraykey"
   | As -> "as"
   | Async -> "async"
+  | Attribute -> "attribute"
   | Await -> "await"
   | Bool -> "bool"
   | Break -> "break"
@@ -282,6 +292,8 @@ let to_string kind =
   | Function -> "function"
   | If -> "if"
   | Implements -> "implements"
+  | Include -> "include"
+  | Include_once -> "include_once"
   | Instanceof -> "instanceof"
   | Insteadof -> "insteadof"
   | Int -> "int"
@@ -289,6 +301,7 @@ let to_string kind =
   | List -> "list"
   | Mixed -> "mixed"
   | Namespace -> "namespace"
+  | NamespacePrefix -> "namespace_prefix"
   | New -> "new"
   | Newtype -> "newtype"
   | Noreturn -> "noreturn"
@@ -301,6 +314,7 @@ let to_string kind =
   | Public -> "public"
   | Require -> "require"
   | Require_once -> "require_once"
+  | Required -> "required"
   | Resource -> "resource"
   | Return -> "return"
   | Self -> "self"
@@ -377,7 +391,6 @@ let to_string kind =
   | EqualGreaterThan -> "=>"
   | EqualEqualGreaterThan -> "==>"
   | QuestionMinusGreaterThan -> "?->"
-  | Backslash -> "\\"
   | DotDotDot -> "..."
   | DollarDollar -> "$$"
   | BarGreaterThan -> "|>"
@@ -398,6 +411,7 @@ let to_string kind =
   | BooleanLiteral -> "boolean_literal"
   | NullLiteral -> "null_literal"
   | XHPElementName -> "XHP_element_name"
+  | XHPClassName -> "XHP_class_name"
   | XHPStringLiteral -> "XHP_string_literal"
   | XHPBody -> "XHP_body"
   | XHPComment -> "XHP_comment"

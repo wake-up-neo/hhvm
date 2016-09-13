@@ -17,10 +17,11 @@
 #include "hphp/runtime/vm/act-rec.h"
 
 #include "hphp/runtime/base/types.h"
+#include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/func.h"
 
+#include "hphp/runtime/vm/jit/tc.h"
 #include "hphp/runtime/vm/jit/types.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/unique-stubs.h"
 
 #include "hphp/util/assertions.h"
@@ -34,7 +35,7 @@ TRACE_SET_MOD(bcinterp);
 
 bool isReturnHelper(void* address) {
   auto tca = reinterpret_cast<jit::TCA>(address);
-  auto& u = jit::mcg->ustubs();
+  auto& u = jit::tc::ustubs();
   return tca == u.retHelper ||
          tca == u.genRetHelper ||
          tca == u.asyncGenRetHelper ||
@@ -44,7 +45,7 @@ bool isReturnHelper(void* address) {
 
 bool isDebuggerReturnHelper(void* address) {
   auto tca = reinterpret_cast<jit::TCA>(address);
-  auto& u = jit::mcg->ustubs();
+  auto& u = jit::tc::ustubs();
   return tca == u.debuggerRetHelper ||
          tca == u.debuggerGenRetHelper ||
          tca == u.debuggerAsyncGenRetHelper;

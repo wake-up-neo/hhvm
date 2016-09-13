@@ -28,7 +28,6 @@
 #include "hphp/runtime/vm/jit/analysis.h"
 #include "hphp/runtime/vm/jit/ir-unit.h"
 #include "hphp/runtime/vm/jit/mutation.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/print.h"
 #include "hphp/runtime/vm/jit/punt.h"
 #include "hphp/runtime/vm/jit/simplify.h"
@@ -89,6 +88,7 @@ SSATmp* fwdGuardSource(IRInstruction* inst) {
 #define DCol           return false; // fixed in bytecode
 #define DThis          return false; // fixed type from ctx class
 #define DCtx           return false;
+#define DCtxCls        return false;
 #define DMulti         return true;  // DefLabel; value could be anything
 #define DSetElem       return false; // fixed type
 #define DBuiltin       return false; // from immutable typeParam
@@ -129,7 +129,7 @@ bool dictElemMightRelax(const IRInstruction* inst) {
 IRBuilder::IRBuilder(IRUnit& unit, BCMarker initMarker)
   : m_unit(unit)
   , m_initialMarker(initMarker)
-  , m_curMarker(initMarker)
+  , m_curBCContext{initMarker, 0}
   , m_state(initMarker)
   , m_curBlock(m_unit.entry())
 {
@@ -183,13 +183,6 @@ void IRBuilder::appendInstruction(IRInstruction* inst) {
     // boxed cell, specifically.
     if (inst->is(LdRef, CheckRefInner)) {
       constrainValue(inst->src(0), DataTypeSpecific);
-    }
-
-    // In psuedomains we have to pre-constrain local guards, because we don't
-    // ever actually generate code that will constrain them otherwise.
-    // (Because of the LdLocPseudoMain stuff.)
-    if (inst->marker().func()->isPseudoMain() && inst->is(CheckLoc)) {
-      constrainGuard(inst, DataTypeSpecific);
     }
   }
 
@@ -370,6 +363,23 @@ SSATmp* IRBuilder::preOptimizeAssertStk(IRInstruction* inst) {
   return preOptimizeAssertLocation(inst, stk(inst->extra<AssertStk>()->offset));
 }
 
+SSATmp* IRBuilder::preOptimizeLdARFuncPtr(IRInstruction* inst) {
+  auto const& fpiStack = fs().fpiStack();
+  auto const arOff = inst->extra<LdARFuncPtr>()->offset;
+  auto const invOff = arOff.to<FPInvOffset>(fs().irSPOff()) - kNumActRecCells;
+
+  for (auto i = fpiStack.size(); i--; ) {
+    auto const& info = fpiStack[i];
+    if (info.returnSP == inst->src(0) &&
+        info.returnSPOff == invOff) {
+      if (info.func) return m_unit.cns(info.func);
+      return nullptr;
+    }
+  }
+
+  return nullptr;
+}
+
 SSATmp* IRBuilder::preOptimizeCheckCtxThis(IRInstruction* inst) {
   auto const func = inst->marker().func();
   if (!func->mayHaveThis()) {
@@ -515,6 +525,7 @@ SSATmp* IRBuilder::preOptimize(IRInstruction* inst) {
   X(LdStk)
   X(CastStk)
   X(CoerceStk)
+  X(LdARFuncPtr)
   X(CheckCtxThis)
   X(LdCtx)
   X(LdCctx)
@@ -554,23 +565,24 @@ SSATmp* IRBuilder::optimizeInst(IRInstruction* inst,
     return inst->dst(0);
   };
 
-  // Since some of these optimizations inspect tracked state, we don't
-  // perform any of them on non-main traces.
-  if (m_savedBlocks.size() > 0) return cloneAndAppendOriginal();
-
-  // copy propagation on inst source operands
+  // copy and const propagation on inst source operands
   copyProp(inst);
+  constProp(m_unit, inst, shouldConstrainGuards());
 
-  // First pass of IRBuilder optimizations try to replace an
-  // instruction based on tracked state before we do anything else.
-  // May mutate the IRInstruction in place (and return nullptr) or
-  // return an SSATmp*.
-  if (auto const preOpt = preOptimize(inst)) {
-    FTRACE(1, "  {}preOptimize returned: {}\n",
-           indent(), preOpt->inst()->toString());
-    return preOpt;
+  // Since preOptimize can inspect tracked state, we don't
+  // perform it on non-main traces.
+  if (m_savedBlocks.size() == 0) {
+    // First pass of IRBuilder optimizations try to replace an
+    // instruction based on tracked state before we do anything else.
+    // May mutate the IRInstruction in place (and return nullptr) or
+    // return an SSATmp*.
+    if (auto const preOpt = preOptimize(inst)) {
+      FTRACE(1, "  {}preOptimize returned: {}\n",
+             indent(), preOpt->inst()->toString());
+      return preOpt;
+    }
+    if (inst->op() == Nop) return cloneAndAppendOriginal();
   }
-  if (inst->op() == Nop) return cloneAndAppendOriginal();
 
   if (!m_enableSimplification) {
     return cloneAndAppendOriginal();
@@ -616,18 +628,18 @@ void IRBuilder::exceptionStackBoundary() {
    * trace that the unwinder won't be able to see.
    */
   FTRACE(2, "exceptionStackBoundary()\n");
-  assertx(m_state.bcSPOff() == m_curMarker.spOff());
+  assertx(m_state.bcSPOff() == curMarker().spOff());
   m_exnStack.syncedSpLevel = m_state.bcSPOff();
   m_state.resetStackModified();
 }
 
 void IRBuilder::setCurMarker(BCMarker newMarker) {
-  if (newMarker == m_curMarker) return;
+  if (newMarker == curMarker()) return;
   FTRACE(2, "IRBuilder changing current marker from {} to {}\n",
-         m_curMarker.valid() ? m_curMarker.show() : "<invalid>",
+         curMarker().valid() ? curMarker().show() : "<invalid>",
          newMarker.show());
   assertx(newMarker.valid());
-  m_curMarker = newMarker;
+  m_curBCContext.marker = newMarker;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -968,16 +980,16 @@ void IRBuilder::resetGuardFailBlock() {
 
 void IRBuilder::pushBlock(BCMarker marker, Block* b) {
   FTRACE(2, "IRBuilder saving {}@{} and using {}@{}\n",
-         m_curBlock, m_curMarker.show(), b, marker.show());
+         m_curBlock, curMarker().show(), b, marker.show());
   assertx(b);
 
   m_savedBlocks.push_back(
-    BlockState { m_curBlock, m_curMarker, m_exnStack }
+    BlockState { m_curBlock, m_curBCContext, m_exnStack }
   );
   m_state.pauseBlock(m_curBlock);
   m_state.startBlock(b, false);
   m_curBlock = b;
-  m_curMarker = marker;
+  m_curBCContext = BCContext { marker, 0 };
 
   if (do_assert) {
     for (UNUSED auto const& state : m_savedBlocks) {
@@ -992,11 +1004,11 @@ void IRBuilder::popBlock() {
 
   auto const& top = m_savedBlocks.back();
   FTRACE(2, "IRBuilder popping {}@{} to restore {}@{}\n",
-         m_curBlock, m_curMarker.show(), top.block, top.marker.show());
+         m_curBlock, curMarker().show(), top.block, top.bcctx.marker.show());
   m_state.finishBlock(m_curBlock);
   m_state.unpauseBlock(top.block);
   m_curBlock = top.block;
-  m_curMarker = top.marker;
+  m_curBCContext = top.bcctx;
   m_exnStack = top.exnStack;
   m_savedBlocks.pop_back();
 }

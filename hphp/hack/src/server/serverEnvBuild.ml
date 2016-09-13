@@ -98,9 +98,10 @@ let make_env config =
     failed_parsing = Relative_path.Set.empty;
     failed_decl    = Relative_path.Set.empty;
     failed_check   = Relative_path.Set.empty;
-    persistent_client_fd = None;
-    edited_files   = SMap.empty;
-    files_to_check = SSet.empty;
-    diag_subscribe = Diagnostic_subscription.empty;
+    persistent_client = None;
+    last_command_time = 0.0;
+    edited_files   = Relative_path.Map.empty;
+    files_to_check = Relative_path.Set.empty;
+    diag_subscribe = None;
     symbols_cache  = SMap.empty;
   }

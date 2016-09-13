@@ -24,8 +24,9 @@
 #include "hphp/runtime/base/strings.h"
 #include "hphp/runtime/vm/treadmill.h"
 
-#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/smashable-instr.h"
+#include "hphp/runtime/vm/jit/tc.h"
+#include "hphp/runtime/vm/jit/tc-internal.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/translator-runtime.h"
 #include "hphp/runtime/vm/jit/write-lease.h"
@@ -85,8 +86,10 @@ rds::Handle FuncCache::alloc() {
   return link.handle();
 }
 
-const Func* FuncCache::lookup(rds::Handle handle, StringData* sd) {
-  const Func* func;
+void FuncCache::lookup(rds::Handle handle,
+                       StringData* sd,
+                       ActRec* ar,
+                       ActRec* fp) {
   auto const thiz = handleToPtr<FuncCache>(handle);
   if (!rds::isHandleInit(handle, rds::NormalTag{})) {
     for (std::size_t i = 0; i < FuncCache::kNumLines; ++i) {
@@ -99,33 +102,49 @@ const Func* FuncCache::lookup(rds::Handle handle, StringData* sd) {
   const StringData* pairSd = pair->m_key;
   if (!stringMatches(pairSd, sd)) {
     // Miss. Does it actually exist?
-    func = Unit::lookupFunc(sd);
+    auto const* func = Unit::lookupFunc(sd);
     if (UNLIKELY(!func)) {
-      VMRegAnchor _;
       ObjectData *this_ = nullptr;
       Class* self_ = nullptr;
       StringData* inv = nullptr;
-      func = vm_decode_function(
-        String(sd),
-        vmfp(),
-        false /* forward */,
-        this_,
-        self_,
-        inv,
-        DecodeFlags::NoWarn);
-      if (!func) {
-        raise_error("Call to undefined function %s()", sd->data());
+      try {
+        func = vm_decode_function(
+          String(sd),
+          fp,
+          false /* forward */,
+          this_,
+          self_,
+          inv,
+          DecodeFlags::NoWarn);
+        if (!func) {
+          raise_error("Call to undefined function %s()", sd->data());
+        }
+      } catch (...) {
+        *arPreliveOverwriteCells(ar) = make_tv<KindOfString>(sd);
+        throw;
+      }
+
+      if (this_) {
+        ar->m_func = func;
+        ar->setThis(this_);
+        this_->incRefCount();
+        return;
+      }
+      if (self_) {
+        ar->m_func = func;
+        ar->setClass(self_);
+        return;
       }
     }
+    assertx(!func->implCls());
     func->validate();
     pair->m_key = const_cast<StringData*>(func->name()); // use a static name
     pair->m_value = func;
   }
-  // DecRef the string here; more compact than doing so in callers.
-  decRefStr(sd);
+  ar->m_func = pair->m_value;
+  ar->trashThis();
   assertx(stringMatches(pair->m_key, pair->m_value->name()));
   pair->m_value->validate();
-  return pair->m_value;
 }
 
 void invalidateForRenameFunction(const StringData* name) {
@@ -190,7 +209,9 @@ void raiseFatal(ActRec* ar, Class* cls, StringData* name, Class* ctx) {
     );
     not_reached();
   } catch (...) {
-    auto const obj = ar->getThis();
+    // The jit stored an ObjectData in the ActRec, but we didn't set
+    // a func yet.
+    auto const obj = ar->getThisUnsafe();
     *arPreliveOverwriteCells(ar) = make_tv<KindOfObject>(obj);
     throw;
   }
@@ -202,8 +223,13 @@ void nullFunc(ActRec* ar, StringData* name) {
     raise_warning("Invalid argument: function: method '%s' not found",
                   name->data());
     ar->m_func = SystemLib::s_nullFunc;
+    auto const obj = ar->getThisUnsafe();
+    ar->trashThis();
+    decRefObj(obj);
   } catch (...) {
-    auto const obj = ar->getThis();
+    // The jit stored an ObjectData in the ActRec, but we didn't set
+    // a func yet.
+    auto const obj = ar->getThisUnsafe();
     *arPreliveOverwriteCells(ar) = make_tv<KindOfObject>(obj);
     throw;
   }
@@ -234,14 +260,13 @@ void lookup(Entry* mce, ActRec* ar, StringData* name, Class* cls, Class* ctx) {
     return;
   }
 
-  bool const isStatic = func->isStaticInProlog();
+  auto const isStatic = func->isStaticInProlog();
   mce->m_key   = reinterpret_cast<uintptr_t>(cls) | uintptr_t{isStatic} << 1;
   mce->m_value = func;
   ar->m_func   = func;
 
   if (UNLIKELY(isStatic)) {
     auto const obj = ar->getThis();
-    if (debug) ar->setThis(nullptr); // suppress assert
     ar->setClass(cls);
     decRefObj(obj);
   }
@@ -272,7 +297,6 @@ void readMagicOrStatic(Entry* mce,
 
   assertx(mceKey & 0x2u);
   auto const obj = ar->getThis();
-  if (debug) ar->setThis(nullptr); // suppress assert in setClass
   ar->setClass(cls);
   decRefObj(obj);
 }
@@ -285,7 +309,6 @@ void readPublicStatic(Entry* mce,
                       const Func* cand) {
   mce->m_key = reinterpret_cast<uintptr_t>(cls) | 0x2u;
   auto const obj = ar->getThis();
-  if (debug) ar->setThis(nullptr); // suppress assert in setClass
   ar->setClass(cls);
   decRefObj(obj);
 }
@@ -297,8 +320,8 @@ void handleSlowPath(rds::Handle mce_handle,
                     Class* cls,
                     Class* ctx,
                     uintptr_t mcePrime) {
-  assertx(ar->hasThis());
-  assertx(ar->getThis()->getVMClass() == cls);
+  assertx(ActRec::checkThis(ar->getThisUnsafe()));
+  assertx(ar->getThisUnsafe()->getVMClass() == cls);
   assertx(name->isStatic());
 
   auto const mce = &rds::handleToRef<Entry>(mce_handle);
@@ -487,7 +510,7 @@ void handlePrimeCacheInit(rds::Handle mce_handle,
 
   // We are using whether the code is already smashed to determine which thread
   // should free the SmashLoc.
-  auto codeLock = mcg->lockCode();
+  auto codeLock = tc::lockCode();
 
   auto smashMov = [&] (TCA addr, uintptr_t value) -> bool {
     auto const imm = smashableMovqImm(addr);

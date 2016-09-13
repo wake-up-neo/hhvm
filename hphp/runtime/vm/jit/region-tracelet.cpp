@@ -19,7 +19,6 @@
 #include "hphp/runtime/vm/jit/annotation.h"
 #include "hphp/runtime/vm/jit/inlining-decider.h"
 #include "hphp/runtime/vm/jit/location.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/normalized-instruction.h"
 #include "hphp/runtime/vm/jit/print.h"
 #include "hphp/runtime/vm/jit/punt.h"
@@ -51,6 +50,8 @@ typedef hphp_hash_set<SrcKey, SrcKey::Hasher> InterpSet;
 namespace {
 
 ///////////////////////////////////////////////////////////////////////////////
+
+constexpr int MaxJmpsTracedThrough = 5;
 
 struct Env {
   Env(const RegionContext& ctx,
@@ -275,7 +276,7 @@ bool traceThroughJmp(Env& env) {
   // Don't trace through too many jumps, unless we're inlining. We want to make
   // sure we don't break a tracelet in the middle of an inlined call; if the
   // inlined callee becomes too big that's caught in shouldIRInline.
-  if (env.numJmps == Translator::MaxJmpsTracedThrough && !env.inlining) {
+  if (env.numJmps == MaxJmpsTracedThrough && !env.inlining) {
     return false;
   }
 
@@ -399,6 +400,7 @@ void recordDependencies(Env& env) {
   auto hintMap = std::map<Location,Type>{};
   auto catMap = std::map<Location,DataTypeCategory>{};
   const auto& guards = env.irgs.irb->guards()->guards;
+  auto predictionMap = std::map<Location,Type>{};
   visitGuards(unit, [&] (const IRInstruction* guard,
                          const Location& loc,
                          Type type, bool hint) {
@@ -407,6 +409,19 @@ void recordDependencies(Env& env) {
     if (type <= TCls) return;
     auto& whichMap = hint ? hintMap : guardMap;
     auto inret = whichMap.insert(std::make_pair(loc, type));
+    // Unconstrained pseudo-main guards will be relaxed to Gen by the guard
+    // relaxation pass. Since we don't allow loading TGen locals
+    // in pseudo-main, save the predicted type here.
+    if (guard->marker().func()->isPseudoMain()) {
+      auto ret = predictionMap.insert(std::make_pair(loc,type));
+      if (ret.second) {
+        FTRACE(1, "selectTracelet saving prediction for PseudoMain {}\n",
+            show(RegionDesc::TypedLocation {loc, type}));
+      } else {
+        auto& oldTy = ret.first->second;
+        oldTy &= type;
+      }
+    }
     if (inret.second) {
       if (!hint) {
         catMap[loc] = folly::get_default(guards, guard).category;
@@ -422,7 +437,6 @@ void recordDependencies(Env& env) {
     }
   });
 
-  std::vector<RegionDesc::TypedLocation> typePreds;
   for (auto& kv : guardMap) {
     auto const hint_it = hintMap.find(kv.first);
     // If we have a hinted type that's better than the guarded type, we want to
@@ -430,12 +444,9 @@ void recordDependencies(Env& env) {
     // Gen because we knew something was a BoxedCell statically, but we may
     // need to keep information about what inner type we were predicting.
     if (hint_it != end(hintMap) && hint_it->second < kv.second) {
-      auto const pred = RegionDesc::TypedLocation {
-        hint_it->first,
-        hint_it->second
-      };
-      FTRACE(1, "selectTracelet adding prediction {}\n", show(pred));
-      typePreds.push_back(pred);
+      FTRACE(1, "selectTracelet adding prediction {}\n",
+            show(RegionDesc::TypedLocation {hint_it->first, hint_it->second}));
+      predictionMap.insert(*hint_it);
     }
     if (kv.second == TGen) {
       // Guard was relaxed to Gen---don't record it.  But if there's a hint, we
@@ -450,16 +461,10 @@ void recordDependencies(Env& env) {
     firstBlock.addPreCondition(preCond);
   }
 
-  // Sort the predictions by location, so that we can simply compare
+  // Predictions are already sorted by location, so we can simply compare
   // the type-prediction vectors for different blocks later.
-  std::sort(typePreds.begin(), typePreds.end(),
-            [&](const RegionDesc::TypedLocation& tl1,
-                const RegionDesc::TypedLocation& tl2) {
-              return tl1.location < tl2.location;
-            });
-
-  for (auto& pred : typePreds) {
-    firstBlock.addPredicted(pred);
+  for (auto& pred : predictionMap) {
+    firstBlock.addPredicted(RegionDesc::TypedLocation{pred.first, pred.second});
   }
 }
 

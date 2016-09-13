@@ -59,8 +59,9 @@ let make_next_files genv : Relative_path.t MultiWorker.nextlist =
     (FindUtils.is_php s)
       (** If experimental disabled, we don't parse hhi files under
        * the experimental directory. *)
-      && (TypecheckerOptions.experimental_features
-        (ServerConfig.typechecker_options genv.config)
+      && (TypecheckerOptions.experimental_feature_enabled
+          (ServerConfig.typechecker_options genv.config)
+          TypecheckerOptions.experimental_dict
         || not (FindUtils.has_ancestor s "experimental"))
 
   end in
@@ -104,12 +105,14 @@ let check_json_obj_error kv =
  *)
 let load_state root cmd (_ic, oc) =
   try
+    let load_script_log_file = ServerFiles.load_log root in
     let cmd =
       Printf.sprintf
-        "%s %s %s"
+        "%s %s %s %s"
         (Filename.quote (Path.to_string cmd))
         (Filename.quote (Path.to_string root))
-        (Filename.quote Build_id.build_revision) in
+        (Filename.quote Build_id.build_revision)
+        (Filename.quote load_script_log_file) in
     Hh_logger.log "Running load_mini script: %s\n%!" cmd;
     let ic = Unix.open_process_in cmd in
     let json = read_json_line ic in
@@ -200,7 +203,7 @@ let indexing genv =
 
 let parsing genv env ~get_next t =
   let files_info, errorl, failed =
-    Parsing_service.go genv.workers SMap.empty ~get_next in
+    Parsing_service.go genv.workers Relative_path.Map.empty ~get_next in
   let files_info = Relative_path.Map.union files_info env.files_info in
   let hs = SharedMem.heap_size () in
   Hh_logger.log "Heap size: %d" hs;
@@ -358,7 +361,6 @@ let init ?load_mini_script genv =
   (* Log lazy declarations *)
   let lazy_decl = genv.local_config.SLC.lazy_decl
     && Option.is_none (ServerArgs.ai_mode genv.options) in
-  HackEventLogger.set_lazy_decl lazy_decl;
   let env = ServerEnvBuild.make_env genv.config in
   let root = ServerArgs.root genv.options in
 
@@ -384,7 +386,7 @@ let init ?load_mini_script genv =
   let env, t = naming env t in
   let fast = FileInfo.simplify_fast env.files_info in
   let fast = Relative_path.Set.fold env.failed_parsing
-    ~f:Relative_path.Map.remove ~init:fast in
+    ~f:(fun x m -> Relative_path.Map.remove m x) ~init:fast in
   let env, t =
     if lazy_decl then env, t
     else type_decl genv env fast t in

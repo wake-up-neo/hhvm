@@ -21,6 +21,7 @@
 #include "hphp/runtime/base/datetime.h"
 #include "hphp/runtime/base/hhprof.h"
 #include "hphp/runtime/base/http-client.h"
+#include "hphp/runtime/base/init-fini-node.h"
 #include "hphp/runtime/base/memory-manager.h"
 #include "hphp/runtime/base/preg.h"
 #include "hphp/runtime/base/program-functions.h"
@@ -30,12 +31,14 @@
 #include "hphp/runtime/base/thread-hooks.h"
 #include "hphp/runtime/base/unit-cache.h"
 
+#include "hphp/runtime/vm/jit/cg-meta.h"
+#include "hphp/runtime/vm/jit/fixup.h"
 #include "hphp/runtime/vm/debug/debug.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/mcgen.h"
 #include "hphp/runtime/vm/jit/prof-data.h"
-#include "hphp/runtime/vm/jit/recycle-tc.h"
 #include "hphp/runtime/vm/jit/relocation.h"
-#include "hphp/runtime/vm/jit/tc-info.h"
+#include "hphp/runtime/vm/jit/tc.h"
+#include "hphp/runtime/vm/named-entity.h"
 #include "hphp/runtime/vm/repo.h"
 #include "hphp/runtime/vm/type-profile.h"
 
@@ -151,6 +154,62 @@ void WarnIfNotOK(Transport* transport) {
   }
 }
 
+#ifdef HPHP_TRACE
+namespace {
+/*
+ * Task to trace a total of 'count' requests whose URL contain 'url', using the
+ * module:level,... specificaion 'spec' (see HPHP::Trace).
+ *
+ * To ensure an unbroken trace output stream, the task is held locally by the
+ * thread currently tracing its request. If filtering on URL, threads may pass
+ * the task around to find matches faster. Concurrent tasks are not supported.
+ */
+struct TraceTask {
+  const std::string spec;
+  const std::string url;
+  int64_t count;
+};
+std::atomic<TraceTask*> s_traceTask{nullptr}; // Task up for grabs.
+__thread TraceTask* tl_traceTask{nullptr};
+
+InitFiniNode s_traceRequestStart([]() {
+  if (!tl_traceTask && !s_traceTask.load(std::memory_order_acquire)) return;
+  if (!tl_traceTask) {
+    // Try grab the task.
+    tl_traceTask = s_traceTask.exchange(nullptr, std::memory_order_acq_rel);
+  }
+  if (!tl_traceTask) return; // We lost the race; nothing to do.
+  if (tl_traceTask->count == 0) {
+    // Task already complete.
+    Trace::trace("Trace complete at %d\n", (int)time(nullptr));
+    Trace::setTraceThread("");
+    delete tl_traceTask;
+    tl_traceTask = nullptr;
+    return;
+  }
+  const string url = g_context->getRequestUrl();
+  if (url.find(tl_traceTask->url) == string::npos) {
+    // URL mismatch; hand task back (and discard any unlikely colliding task).
+    delete s_traceTask.exchange(tl_traceTask, std::memory_order_acq_rel);
+    tl_traceTask = nullptr;
+    Trace::setTraceThread("");
+  } else {
+    // Work on task.
+    --tl_traceTask->count;
+    const auto spec = tl_traceTask->spec;
+    Trace::setTraceThread(spec);
+    Trace::trace("Trace for %s at %d using spec %s\n",
+                 url.c_str(), (int)time(nullptr), spec.c_str());
+  }
+}, InitFiniNode::When::RequestStart, "trace");
+
+std::string getTraceOutputFile() {
+  return folly::sformat("{}/hphp.{}.log",
+                        RuntimeOption::RemoteTraceOutputDir, (int64_t)getpid());
+}
+} // namespace
+#endif // HPHP_TRACE
+
 void AdminRequestHandler::logToAccessLog(Transport* transport) {
   GetAccessLog().onNewRequest();
   GetAccessLog().log(transport, nullptr);
@@ -261,7 +320,13 @@ void AdminRequestHandler::handleRequest(Transport *transport) {
         "    random        optional, default false, relocate random subset\n"
         "       all        optional, default false, relocate all translations\n"
         "      time        optional, default 20 (seconds)\n"
-
+#ifdef HPHP_TRACE
+        "/trace-request:   write trace for next request(s) to "
+        + getTraceOutputFile() + "\n"
+        "    spec          module:level,... spec; see hphp/util/trace.h\n"
+        "    count         optional, total requests to trace (default: 1)\n"
+        "    url           optional, trace only if URL contains \'url\'\n"
+#endif
 #ifdef GOOGLE_CPU_PROFILER
         "/prof-cpu-on:     turn on CPU profiler\n"
         "/prof-cpu-off:    turn off CPU profiler\n"
@@ -434,6 +499,19 @@ void AdminRequestHandler::handleRequest(Transport *transport) {
       transport->sendString(result);
       break;
     }
+#ifdef HPHP_TRACE
+    if (cmd == "trace-request") {
+      Trace::ensureInit(getTraceOutputFile());
+      // Just discard any existing task.
+      delete s_traceTask.exchange(
+        new TraceTask{transport->getParam("spec"),
+                      transport->getParam("url"),
+                      std::max(transport->getInt64Param("count"), 1ll)},
+        std::memory_order_acq_rel);
+      transport->sendString("OK\n");
+      break;
+    }
+#endif
     if (cmd == "build-id") {
       transport->sendString(RuntimeOption::BuildId, 200);
       break;
@@ -555,11 +633,11 @@ void AdminRequestHandler::handleRequest(Transport *transport) {
       auto time = transport->getIntParam("time");
       bool random = randomParam == "true" || randomParam == "1";
       if (allParam == "true" || allParam == "1") {
-        jit::liveRelocate(-2);
+        jit::tc::liveRelocate(-2);
       } else if (random || time == 0) {
-        jit::liveRelocate(random);
+        jit::tc::liveRelocate(random);
       } else {
-        jit::liveRelocate(time);
+        jit::tc::liveRelocate(time);
       }
       transport->sendString("OK\n");
       break;
@@ -857,29 +935,30 @@ bool AdminRequestHandler::handleCheckRequest(const std::string &cmd,
     std::stringstream out;
     bool first = true;
     out << "{" << endl;
-    auto appendStat = [&](const std::string& name, int64_t value) {
-       out << folly::format("{} \"{}\":{}\n",
-                            first ? "" : ",", name, value);
+    auto appendStat = [&](folly::StringPiece name, int64_t value) {
+       out << folly::format("{} \"{}\":{}\n", first ? "" : ",", name, value);
        first = false;
     };
     HPHP::Server* server = HttpServer::Server->getPageServer();
     appendStat("load", server->getActiveWorker());
     appendStat("queued", server->getQueuedJobs());
-    auto mcg = jit::mcg;
     appendStat("hhbc-roarena-capac", hhbc_arena_capacity());
-    mcg->code().forEachBlock([&](const char* name, const CodeBlock& a) {
-      auto isMain = strncmp(name, "main", 4) == 0;
-      appendStat(folly::format("tc-{}size",
-                               isMain ? "" : name).str(),
-                 a.used());
-    });
+    auto const memInfos = jit::tc::getTCMemoryUsage();
+    for (auto const info : memInfos) {
+        auto isMain = info.name == "main";
+        appendStat(folly::format("tc-{}size",
+                                 isMain ? "" : info.name).str(),
+                   info.used);
+    }
     appendStat("rds", rds::usedBytes());
     appendStat("rds-local", rds::usedLocalBytes());
     appendStat("rds-persistent", rds::usedPersistentBytes());
-    appendStat("catch-traces", mcg->catchTraceMap().size());
-    appendStat("fixups", mcg->fixupMap().size());
+    appendStat("catch-traces", jit::numCatchTraces());
+    appendStat("fixups", jit::FixupMap::size());
     appendStat("units", numLoadedUnits());
     appendStat("funcs", Func::nextFuncId());
+    appendStat("named-entities", NamedEntity::tableSize());
+    appendStat("static-strings", makeStaticStringCount());
     appendStat("request-count", requestCount());
     appendStat("single-jit-requests", singleJitRequestCount());
 
@@ -896,16 +975,17 @@ bool AdminRequestHandler::handleCheckRequest(const std::string &cmd,
     }
 
     if (RuntimeOption::EvalEnableReusableTC) {
-      mcg->code().forEachBlock([&](const char* name, const CodeBlock& a) {
-        appendStat(folly::format("tc-{}-allocs", name).str(), a.numAllocs());
-        appendStat(folly::format("tc-{}-frees", name).str(), a.numFrees());
-        appendStat(folly::format("tc-{}-free-size", name).str(), a.bytesFree());
-        appendStat(folly::format("tc-{}-free-blocks", name).str(),
-                   a.blocksFree());
-      });
-      appendStat("tc-recorded-funcs", jit::recordedFuncs());
-      appendStat("tc-smashed-calls", jit::smashedCalls());
-      appendStat("tc-smashed-branches", jit::smashedBranches());
+      for (auto const info : memInfos) {
+        appendStat(folly::format("tc-{}-allocs", info.name).str(), info.allocs);
+        appendStat(folly::format("tc-{}-frees", info.name).str(), info.frees);
+        appendStat(folly::format("tc-{}-free-size", info.name).str(),
+                   info.free_size);
+        appendStat(folly::format("tc-{}-free-blocks", info.name).str(),
+                   info.free_blocks);
+      }
+      appendStat("tc-recorded-funcs", jit::tc::recordedFuncs());
+      appendStat("tc-smashed-calls", jit::tc::smashedCalls());
+      appendStat("tc-smashed-branches", jit::tc::smashedBranches());
     }
 
     out << "}" << endl;
@@ -1218,11 +1298,11 @@ bool AdminRequestHandler::handleRandomStaticStringsRequest(
 bool AdminRequestHandler::handleVMRequest(const std::string &cmd,
                                           Transport *transport) {
   if (cmd == "vm-tcspace") {
-    transport->sendString(jit::getTCSpace());
+    transport->sendString(jit::tc::getTCSpace());
     return true;
   }
   if (cmd == "vm-tcaddr") {
-    transport->sendString(jit::getTCAddrs());
+    transport->sendString(jit::tc::getTCAddrs());
     return true;
   }
   if (cmd == "vm-namedentities") {
@@ -1232,7 +1312,7 @@ bool AdminRequestHandler::handleVMRequest(const std::string &cmd,
     return true;
   }
   if (cmd == "vm-dump-tc") {
-    if (jit::mcg && jit::mcg->dumpTC()) {
+    if (jit::tc::dump()) {
       transport->sendString("Done");
     } else {
       transport->sendString("Error dumping the translation cache");

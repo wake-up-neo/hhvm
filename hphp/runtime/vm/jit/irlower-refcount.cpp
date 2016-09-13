@@ -37,6 +37,7 @@
 #include "hphp/runtime/vm/jit/ir-instruction.h"
 #include "hphp/runtime/vm/jit/ir-opcode.h"
 #include "hphp/runtime/vm/jit/ssa-tmp.h"
+#include "hphp/runtime/vm/jit/tc.h"
 #include "hphp/runtime/vm/jit/target-profile.h"
 #include "hphp/runtime/vm/jit/type.h"
 #include "hphp/runtime/vm/jit/type-specialization.h"
@@ -226,7 +227,7 @@ using OptDecRefProfile = folly::Optional<TargetProfile<DecRefProfile>>;
  * Returns the frequency that the DecRef results in destruction.
  */
 float decRefDestroyRate(Vout& v, IRLS& env, const IRInstruction* inst,
-                        OptDecRefProfile& profile, Type type) {
+                        OptDecRefProfile& profile) {
   auto const kind = env.unit.context().kind;
 
   // Without profiling data, we assume destroy is unlikely.
@@ -236,7 +237,6 @@ float decRefDestroyRate(Vout& v, IRLS& env, const IRInstruction* inst,
   auto const profileKey = makeStaticString(folly::to<std::string>(
     "DecRefProfile-",
     opcodeName(inst->op()), '-',
-    type.toString(), '-',
     inst->extra<DecRef>()->locId
   ));
   profile.emplace(env.unit.context(), inst->marker(), profileKey);
@@ -273,7 +273,7 @@ CallSpec getDtorCallSpec(DataType type) {
     case KindOfDict:
       return CallSpec::direct(MixedArray::Release);
     case KindOfKeyset:
-      return CallSpec::direct(MixedArray::Release);
+      return CallSpec::direct(SetArray::Release);
     case KindOfObject:
       return CallSpec::method(
         RuntimeOption::EnableObjDestructCall
@@ -404,7 +404,7 @@ void cgDecRef(IRLS& env, const IRInstruction *inst) {
 
   emitDecRefTypeStat(v, env, inst);
 
-  auto const destroyRate = decRefDestroyRate(v, env, inst, profile, ty);
+  auto const destroyRate = decRefDestroyRate(v, env, inst, profile);
   FTRACE(3, "irlower-inc-dec: destroyPercent {:.2%} for {}\n",
          destroyRate, *inst);
 
@@ -443,7 +443,7 @@ void cgDecRef(IRLS& env, const IRInstruction *inst) {
       emitCmpTVType(v, sf, KindOfRefCountThreshold, type);
 
       unlikelyIfThen(v, vcold(env), CC_NLE, sf, [&] (Vout& v) {
-        auto const stub = mcg->ustubs().decRefGeneric;
+        auto const stub = tc::ustubs().decRefGeneric;
         v << copy2{data, type, rarg(0), rarg(1)};
         v << callfaststub{stub, makeFixup(inst->marker()), arg_regs(2)};
       });

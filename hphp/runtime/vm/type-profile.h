@@ -34,7 +34,6 @@ enum class RequestKind {
 
 //////////////////////////////////////////////////////////////////////
 
-void profileInit();
 void profileWarmupStart();
 void profileWarmupEnd();
 void profileRequestStart();

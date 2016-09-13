@@ -23,8 +23,8 @@
 #include "hphp/runtime/vm/jit/code-gen-helpers.h"
 #include "hphp/runtime/vm/jit/ir-instruction.h"
 #include "hphp/runtime/vm/jit/ir-opcode.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/ssa-tmp.h"
+#include "hphp/runtime/vm/jit/tc.h"
 #include "hphp/runtime/vm/jit/unique-stubs.h"
 #include "hphp/runtime/vm/jit/unwind-itanium.h"
 #include "hphp/runtime/vm/jit/vasm-gen.h"
@@ -53,7 +53,7 @@ void cgBeginCatch(IRLS& env, const IRInstruction* inst) {
 
 void cgEndCatch(IRLS& env, const IRInstruction* inst) {
   // endCatchHelper only expects rvmtl() and rvmfp() to be live.
-  vmain(env) << jmpi{mcg->ustubs().endCatchHelper, rvmtl() | rvmfp()};
+  vmain(env) << jmpi{tc::ustubs().endCatchHelper, rvmtl() | rvmfp()};
 }
 
 void cgUnwindCheckSideExit(IRLS& env, const IRInstruction* inst) {
@@ -88,6 +88,7 @@ IMPL_OPCODE_CALL(RaiseUndefProp)
 IMPL_OPCODE_CALL(RaiseUninitLoc)
 IMPL_OPCODE_CALL(RaiseWarning)
 IMPL_OPCODE_CALL(RaiseMissingThis)
+IMPL_OPCODE_CALL(FatalMissingThis)
 IMPL_OPCODE_CALL(ThrowArithmeticError)
 IMPL_OPCODE_CALL(ThrowDivisionByZeroError)
 IMPL_OPCODE_CALL(ThrowInvalidArrayKey)

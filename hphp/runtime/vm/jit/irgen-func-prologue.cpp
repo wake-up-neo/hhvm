@@ -31,7 +31,6 @@
 #include "hphp/runtime/vm/jit/irgen.h"
 #include "hphp/runtime/vm/jit/irgen-internal.h"
 #include "hphp/runtime/vm/jit/irgen-state.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/prof-data.h"
 #include "hphp/runtime/vm/jit/stack-offsets.h"
 #include "hphp/runtime/vm/jit/translator.h"
@@ -280,7 +279,6 @@ void emitPrologueBody(IRGS& env, uint32_t argc, TransID transID) {
 
   // Increment profiling counter.
   if (env.context.kind == TransKind::ProfPrologue) {
-    assertx(shouldPGOFunc(*func));
     gen(env, IncProfCounter, TransIDData{transID});
     profData()->setProfiling(func->getFuncId());
   }

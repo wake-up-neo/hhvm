@@ -108,7 +108,7 @@ let add_old_decls old_files_info fast =
 let reparse_infos files_info fast =
   Relative_path.Map.fold fast ~f:begin fun x _y acc ->
     try
-      let info = Relative_path.Map.find_unsafe x files_info in
+      let info = Relative_path.Map.find_unsafe files_info x in
       if info.FileInfo.consider_names_just_for_autoload then acc else
       Relative_path.Map.add acc ~key:x ~data:info
     with Not_found -> acc
@@ -144,28 +144,29 @@ let remove_decls env fast_parsed =
 (*****************************************************************************)
 
 let remove_failed fast failed =
-  Relative_path.Set.fold failed ~init:fast ~f:Relative_path.Map.remove
+  Relative_path.Set.fold failed ~init:fast
+    ~f:(fun x m -> Relative_path.Map.remove m x)
 
 (*****************************************************************************)
 (* Parses the set of modified files *)
 (*****************************************************************************)
 
 let parsing genv env =
-  let files_map = SSet.fold env.files_to_check ~init:SMap.empty
-    ~f:(fun path map ->
-      let content = File_content.get_content @@ SMap.find_unsafe path
-        env.edited_files in
-      SMap.add map path content) in
-  let to_check = SSet.fold env.files_to_check ~init:env.failed_parsing
-    ~f:(fun path set ->
-      let fn = Relative_path.create Relative_path.Root path in
-      Relative_path.Set.add set fn) in
-  Parser_heap.ParserHeap.remove_batch env.failed_parsing;
+  let files_map = Relative_path.Map.filter env.edited_files
+    (fun path _ -> Relative_path.Set.mem env.files_to_check path) in
+
+  let to_check =
+    Relative_path.Set.union env.files_to_check env.failed_parsing in
+
+  let disk_files = Relative_path.Set.filter env.failed_parsing
+    (fun x -> not @@ Relative_path.Map.mem env.edited_files x) in
+
+  Parser_heap.ParserHeap.remove_batch disk_files;
   Fixmes.HH_FIXMES.remove_batch to_check;
   HackSearchService.MasterApi.clear_shared_memory to_check;
   SharedMem.collect `gentle;
   let get_next = MultiWorker.next
-   genv.workers (Relative_path.Set.elements env.failed_parsing) in
+    genv.workers (Relative_path.Set.elements disk_files) in
   Parsing_service.go genv.workers files_map ~get_next
 
 (*****************************************************************************)
@@ -211,25 +212,14 @@ let hook_after_parsing = ref None
 
 let type_check genv env =
 
-  (* PREPARE FOR PARSING *)
-  let failed_parsing_ide, failed_parsing_ = Relative_path.Set.partition
-    (fun fn -> let path = Relative_path.to_absolute fn in
-      SMap.exists (fun p _ -> p = path) env.edited_files) env.failed_parsing in
-  let files_to_check_ = Relative_path.Set.fold failed_parsing_ide
-    ~init:SSet.empty ~f:(fun fn set ->
-      SSet.add set (Relative_path.to_absolute fn)) in
-  let check_now = SSet.filter files_to_check_ (fun s -> not @@
-      File_content.being_edited @@ SMap.find_unsafe s env.edited_files) in
-  let env = {env with failed_parsing = failed_parsing_;
-    files_to_check = check_now} in
-  let reparse_count = Relative_path.Set.cardinal env.failed_parsing +
-  SSet.cardinal env.files_to_check in
+  let reparse_count = Relative_path.Set.cardinal env.failed_parsing in
   Printf.eprintf "******************************************\n";
   Hh_logger.log "Files to recompute: %d" reparse_count;
 
   (* RESET HIGHLIGHTS CACHE FOR RECHECKED IDE FILES *)
-  let symbols_cache = SSet.fold env.files_to_check ~init:env.symbols_cache
-    ~f:(fun path map -> SMap.remove path map) in
+  let symbols_cache = Relative_path.Set.fold env.files_to_check
+    ~init:env.symbols_cache
+    ~f:(fun path map -> SMap.remove map (Relative_path.to_absolute path)) in
 
   (* PARSING *)
   let start_t = Unix.gettimeofday () in
@@ -242,14 +232,13 @@ let type_check genv env =
 
   (* UPDATE FILE INFO *)
   let old_env = env in
-  let updates = old_env.failed_parsing in
   let files_info = update_file_info env fast_parsed in
   HackEventLogger.updating_deps_end t;
   let t = Hh_logger.log_duration "Updating deps" t in
 
   (* BUILDING AUTOLOADMAP *)
   Option.iter !hook_after_parsing begin fun f ->
-    f genv old_env { env with files_info } updates
+    f genv { env with files_info }
   end;
   HackEventLogger.parsing_hook_end t;
   let t = Hh_logger.log_duration "Parsing Hook" t in
@@ -320,6 +309,9 @@ let type_check genv env =
   in
   let errorl = Errors.merge errorl' errorl in
 
+  let diag_subscribe = Option.map old_env.diag_subscribe
+    ~f:(fun x -> Diagnostic_subscription.update x errorl) in
+
   let total_rechecked_count = Relative_path.Map.cardinal fast in
   HackEventLogger.type_check_end total_rechecked_count t;
   let t = Hh_logger.log_duration "Type-check" t in
@@ -335,10 +327,11 @@ let type_check genv env =
     failed_parsing = Relative_path.Set.union failed_naming failed_parsing;
     failed_decl = Relative_path.Set.union failed_decl lazy_decl_failed;
     failed_check = failed_check;
-    persistent_client_fd = old_env.persistent_client_fd;
+    persistent_client = old_env.persistent_client;
+    last_command_time = old_env.last_command_time;
     edited_files = old_env.edited_files;
-    files_to_check = SSet.empty;
-    diag_subscribe = old_env.diag_subscribe;
+    files_to_check = Relative_path.Set.empty;
+    diag_subscribe;
     symbols_cache;
   } in
   new_env, total_rechecked_count

@@ -87,9 +87,6 @@ bool canDCE(IRInstruction* inst) {
   case ConvKeysetToVec:
   case ConvVecToDict:
   case ConvKeysetToDict:
-  case ConvArrToKeyset:
-  case ConvVecToKeyset:
-  case ConvDictToKeyset:
   case ConvClsToCctx:
   case NewColFromArray:
   case GtInt:
@@ -148,6 +145,7 @@ bool canDCE(IRInstruction* inst) {
   case CmpRes:
   case EqCls:
   case EqFunc:
+  case EqStrPtr:
   case InstanceOf:
   case InstanceOfIface:
   case InstanceOfIfaceVtable:
@@ -318,6 +316,9 @@ bool canDCE(IRInstruction* inst) {
   case ConvArrToDict:
   case ConvObjToVec:
   case ConvObjToDict:
+  case ConvArrToKeyset:
+  case ConvVecToKeyset:
+  case ConvDictToKeyset:
   case ConvObjToKeyset:
   case GtObj:
   case GteObj:
@@ -443,6 +444,7 @@ bool canDCE(IRInstruction* inst) {
   case RaiseError:
   case RaiseWarning:
   case RaiseMissingThis:
+  case FatalMissingThis:
   case RaiseNotice:
   case RaiseArrayIndexNotice:
   case RaiseArrayKeyNotice:
@@ -634,6 +636,7 @@ bool canDCE(IRInstruction* inst) {
   case LdStaticLoc:
   case LdClsMethodFCacheFunc:
   case LdClsMethodCacheFunc:
+  case ProfileInstanceCheck:
     return false;
   }
   not_reached();

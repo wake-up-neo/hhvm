@@ -9,53 +9,10 @@
  *)
 
 open Core
+open Reordered_argument_collections
 open ServerEnv
 open File_content
-
-(* The following datatypes can be interpreted as follows:
- * MESSAGE_TAG : Argument type (sent from client to server) -> return type t *)
-type _ t =
-  | STATUS : Pos.absolute Errors.error_ list t
-  | INFER_TYPE : ServerUtils.file_input * int * int -> ServerInferType.result t
-  | COVERAGE_LEVELS : ServerUtils.file_input -> ServerColorFile.result t
-  | AUTOCOMPLETE : string -> AutocompleteService.result t
-  | IDENTIFY_FUNCTION : string * int * int -> ServerIdentifyFunction.result t
-  | OUTLINE : string -> FileOutline.outline t
-  | GET_DEFINITION_BY_ID : string -> string SymbolDefinition.t option t
-  | METHOD_JUMP : (string * bool) -> MethodJumps.result list t
-  | FIND_DEPENDENT_FILES: string list -> string list t
-  | FIND_REFS : FindRefsService.action -> FindRefsService.result t
-  | IDE_FIND_REFS : string * int * int -> FindRefsService.result t
-  | IDE_HIGHLIGHT_REFS : string * int * int -> ServerHighlightRefs.result t
-  | REFACTOR : ServerRefactor.action -> ServerRefactor.patch list t
-  | DUMP_SYMBOL_INFO : string list -> SymbolInfoService.result t
-  | DUMP_AI_INFO : string list -> Ai.InfoService.result t
-  | REMOVE_DEAD_FIXMES : int list -> ServerRefactor.patch list t
-  | ARGUMENT_INFO : string * int * int -> ServerArgumentInfo.result t
-  | SEARCH : string * string -> ServerSearch.result t
-  | COVERAGE_COUNTS : string -> ServerCoverageMetric.result t
-  | LINT : string list -> ServerLint.result t
-  | LINT_ALL : int -> ServerLint.result t
-  | CREATE_CHECKPOINT : string -> unit t
-  | RETRIEVE_CHECKPOINT : string -> string list option t
-  | DELETE_CHECKPOINT : string -> bool t
-  | STATS : Stats.t t
-  | KILL : unit t
-  | FIND_LVAR_REFS : string * int * int -> ServerFindLocals.result t
-  | FORMAT : string * int * int -> string Format_hack.return t
-  | TRACE_AI : Ai.TraceService.action -> string t
-  | AI_QUERY : string -> string t
-  | ECHO_FOR_TEST : string -> string t
-  | OPEN_FILE : string -> unit t
-  | CLOSE_FILE : string -> unit t
-  | EDIT_FILE : string * (code_edit list) -> unit t
-  | IDE_AUTOCOMPLETE : string * content_pos -> AutocompleteService.result t
-  | IDE_HIGHLIGHT_REF : string * content_pos -> ServerHighlightRefs.result t
-  | IDE_IDENTIFY_FUNCTION : string * content_pos ->
-      ServerIdentifyFunction.result t
-  | DISCONNECT : unit t
-  | SUBSCRIBE_DIAGNOSTIC : int -> unit t
-  | UNSUBSCRIBE_DIAGNOSTIC : int -> unit t
+open ServerCommandTypes
 
 let handle : type a. genv -> env -> a t -> env * a =
   fun genv env -> function
@@ -123,57 +80,69 @@ let handle : type a. genv -> env -> a t -> env * a =
     | ECHO_FOR_TEST msg ->
         env, msg
     | OPEN_FILE path ->
-        let path = Relative_path.path_of_prefix Relative_path.Root ^ path in
+        let path = Relative_path.(concat Root path) in
         let content =
-          try Sys_utils.cat path with _ -> "" in
+          try Sys_utils.cat (Relative_path.to_absolute path) with _ -> "" in
         let fc = of_content ~content in
-        let edited_files_ = (SMap.add path fc env.edited_files) in
-        let files_to_check_ = (SSet.add path env.files_to_check) in
-        let new_env = {env with edited_files = edited_files_;
-          files_to_check = files_to_check_} in
+        let edited_files = Relative_path.Map.add env.edited_files path fc in
+        let files_to_check = Relative_path.Set.add env.files_to_check path in
+        let last_command_time = Unix.gettimeofday () in
+        let new_env = { env with
+          edited_files; files_to_check; last_command_time;
+        } in
         new_env, ()
     | CLOSE_FILE path ->
-        let path = Relative_path.path_of_prefix Relative_path.Root ^ path in
-        let edited_files_ = SMap.remove path env.edited_files in
-        let files_to_check_ = (SSet.remove path env.files_to_check) in
-        let new_env = {env with edited_files = edited_files_;
-          files_to_check = files_to_check_} in
+        let path = Relative_path.(concat Root path) in
+        let edited_files = Relative_path.Map.remove env.edited_files path in
+        let files_to_check =
+          Relative_path.Set.remove env.files_to_check path in
+        let last_command_time = Unix.gettimeofday () in
+        let new_env = { env with
+          edited_files; files_to_check; last_command_time
+        } in
         new_env, ()
     | EDIT_FILE (path, edits) ->
-        let path = Relative_path.path_of_prefix Relative_path.Root ^ path in
-        let fc = try SMap.find_unsafe path env.edited_files
+        let path = Relative_path.(concat Root path) in
+        let fc = try Relative_path.Map.find_unsafe env.edited_files path
         with Not_found ->
-          let content = try Sys_utils.cat path with _ -> "" in
+          let content =
+            try Sys_utils.cat (Relative_path.to_absolute path) with _ -> "" in
           of_content ~content in
         let edited_fc = edit_file fc edits in
-        let edited_files_ = (SMap.add path edited_fc env.edited_files) in
-        let files_to_check_ = (SSet.add path env.files_to_check) in
-        let new_env = {env with edited_files = edited_files_;
-          files_to_check = files_to_check_} in
+        let edited_files =
+          Relative_path.Map.add env.edited_files path edited_fc in
+        let files_to_check =
+          Relative_path.Set.add env.files_to_check path in
+        let last_command_time = Unix.gettimeofday () in
+        let new_env = { env with
+          edited_files; files_to_check; last_command_time
+        } in
         new_env, ()
     | IDE_AUTOCOMPLETE (path, pos) ->
-        let path = Relative_path.path_of_prefix Relative_path.Root ^ path in
+        let path = Relative_path.(concat Root path) in
         let fc = try
-        SMap.find_unsafe path env.edited_files
+        Relative_path.Map.find_unsafe env.edited_files path
         with Not_found ->
-        let content = try Sys_utils.cat path with _ -> "" in
+        let content =
+          try Sys_utils.cat (Relative_path.to_absolute path) with _ -> "" in
         of_content content in
         let edits = [{range = Some {st = pos; ed = pos}; text = "AUTO332"}] in
         let edited_fc = edit_file fc edits in
         let content = get_content edited_fc in
         env, ServerAutoComplete.auto_complete env.tcopt content
     | IDE_HIGHLIGHT_REF (path, {line; column}) ->
+        let relative_path = Relative_path.(concat Root path) in
         let path = Relative_path.path_of_prefix Relative_path.Root ^ path in
-        begin match SMap.exists (fun p _ -> p = path) env.edited_files with
+        begin match Relative_path.Map.mem env.edited_files relative_path with
         | true ->
-          begin match SMap.exists (fun p _ -> p = path) env.symbols_cache with
+          begin match SMap.exists env.symbols_cache (fun p _ -> p = path) with
           | true ->
             env, ServerHighlightRefs.go_from_file (path, line, column) env
           | false ->
-            let content = File_content.get_content @@ SMap.find_unsafe path
-              env.edited_files in
+            let content = File_content.get_content @@
+              Relative_path.Map.find_unsafe env.edited_files relative_path in
             let res = ServerIdentifyFunction.get_full_occurrence_pair content in
-            let symbols_cache_ = SMap.add path res env.symbols_cache in
+            let symbols_cache_ = SMap.add env.symbols_cache path res in
             let env = {env with symbols_cache = symbols_cache_} in
             env, ServerHighlightRefs.go_from_file (path, line, column) env
           end
@@ -182,17 +151,18 @@ let handle : type a. genv -> env -> a t -> env * a =
           env, ServerHighlightRefs.go (content, line, column) env.tcopt
         end
     | IDE_IDENTIFY_FUNCTION (path, {line; column}) ->
+        let relative_path = Relative_path.(concat Root path) in
         let path = Relative_path.path_of_prefix Relative_path.Root ^ path in
-        begin match SMap.exists (fun p _ -> p = path) env.edited_files with
+        begin match Relative_path.Map.mem env.edited_files relative_path with
         | true ->
-          begin match SMap.exists (fun p _ -> p = path) env.symbols_cache with
+          begin match SMap.exists env.symbols_cache (fun p _ -> p = path) with
           | true ->
             env, ServerIdentifyFunction.go_from_file (path, line, column) env
           | false ->
-            let content = File_content.get_content @@ SMap.find_unsafe path
-              env.edited_files in
+            let content = File_content.get_content @@
+              Relative_path.Map.find_unsafe env.edited_files relative_path in
             let res = ServerIdentifyFunction.get_full_occurrence_pair content in
-            let symbols_cache_ = SMap.add path res env.symbols_cache in
+            let symbols_cache_ = SMap.add env.symbols_cache path res in
             let env = {env with symbols_cache = symbols_cache_} in
             env, ServerIdentifyFunction.go_from_file (path, line, column) env
           end
@@ -202,18 +172,22 @@ let handle : type a. genv -> env -> a t -> env * a =
         end
     | DISCONNECT ->
         let new_env = {env with
-        persistent_client_fd = None;
-        edited_files = SMap.empty;
-        diag_subscribe = Diagnostic_subscription.empty;
+        persistent_client = None;
+        edited_files = Relative_path.Map.empty;
+        diag_subscribe = None;
         symbols_cache = SMap.empty} in
         new_env, ()
     | SUBSCRIBE_DIAGNOSTIC id ->
-        let new_env =
-          {env with diag_subscribe = Diagnostic_subscription.of_id id} in
+        let new_env = { env with
+          diag_subscribe = Some (Diagnostic_subscription.of_id id)
+        } in
         new_env, ()
     | UNSUBSCRIBE_DIAGNOSTIC id ->
-        let new_env = {env with diag_subscribe =
-            Diagnostic_subscription.unsubscribe env.diag_subscribe id} in
+        let diag_subscribe = match env.diag_subscribe with
+          | Some x when Diagnostic_subscription.get_id x = id -> None
+          | x -> x
+        in
+        let new_env = { env with diag_subscribe } in
         new_env, ()
 
 let to_string : type a. a t -> _ = function

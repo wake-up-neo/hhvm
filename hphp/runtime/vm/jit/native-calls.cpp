@@ -19,6 +19,7 @@
 #include "hphp/runtime/base/comparisons.h"
 #include "hphp/runtime/base/exceptions.h"
 #include "hphp/runtime/base/packed-array.h"
+#include "hphp/runtime/base/set-array.h"
 #include "hphp/runtime/base/rds.h"
 #include "hphp/runtime/base/stats.h"
 #include "hphp/runtime/base/tv-conversions.h"
@@ -297,6 +298,8 @@ static CallMap s_callMap {
     {RaiseWarning,       raiseWarning, DNone, SSync, {{SSA, 0}}},
     {RaiseMissingThis,   raise_missing_this, DNone,
                            SSync, {{SSA, 0}}},
+    {FatalMissingThis,   raise_missing_this, DNone,
+                           SSync, {{SSA, 0}}},
     {RaiseNotice,        raiseNotice, DNone, SSync, {{SSA, 0}}},
     {RaiseArrayIndexNotice,
                          raiseArrayIndexNotice, DNone, SSync, {{SSA, 0}}},
@@ -414,9 +417,9 @@ static CallMap s_callMap {
                           {{SSA, 0}, {SSA, 1}}},
     {NSameDict,          MixedArray::DictNotSame, DSSA, SSync,
                           {{SSA, 0}, {SSA, 1}}},
-    {EqKeyset,           MixedArray::KeysetEqual, DSSA, SSync,
+    {EqKeyset,           SetArray::Equal, DSSA, SSync,
                           {{SSA, 0}, {SSA, 1}}},
-    {NeqKeyset,          MixedArray::KeysetNotEqual, DSSA, SSync,
+    {NeqKeyset,          SetArray::NotEqual, DSSA, SSync,
                           {{SSA, 0}, {SSA, 1}}},
     {GtRes,              static_cast<ResCmpFn>(more), DSSA, SSync,
                           {{SSA, 0}, {SSA, 1}}},
@@ -503,7 +506,7 @@ static CallMap s_callMap {
                  {{SSA, 0}, {TV, 1}}},
 
     /* instanceof checks */
-    {InstanceOf, &Class::classof, DSSA, SNone, {{SSA, 0}, {SSA, 1}}},
+    {ProfileInstanceCheck, &InstanceBits::profile, DNone, SNone, {{SSA, 0}}},
     {InstanceOfIface, &Class::ifaceofDirect, DSSA,
                       SNone, {{SSA, 0}, {SSA, 1}}},
     {InterfaceSupportsArr, IFaceSupportFn{interface_supports_array},

@@ -12,7 +12,7 @@
  * to the underlying file descriptor -- but we have to declare some type for
  * these phantom types because OCaml doesn't allow polymorphic values that
  * are not functions. *)
-val entry: (ServerGlobalState.t * SharedMem.handle * ServerArgs.options, unit, unit) Daemon.entry
+val entry: (ServerGlobalState.t * ServerArgs.options, unit, unit) Daemon.entry
 
 val run_once: ServerArgs.options -> SharedMem.handle -> 'a
 
@@ -20,6 +20,7 @@ val run_once: ServerArgs.options -> SharedMem.handle -> 'a
 type main_loop_stats
 
 val empty_stats: unit -> main_loop_stats
+val get_rechecked_count: main_loop_stats -> int
 
 val serve_one_iteration:
   ServerEnv.genv ->

@@ -36,6 +36,7 @@
 #include "hphp/runtime/base/proxy-array.h"
 #include "hphp/runtime/base/thread-info.h"
 #include "hphp/runtime/base/mixed-array.h"
+#include "hphp/runtime/base/set-array.h"
 #include "hphp/zend/zend-string.h"
 
 namespace HPHP {
@@ -88,7 +89,7 @@ ArrayData* ArrayData::GetScalarArray(ArrayData* arr,
   ArrayDataMap::accessor acc;
   if (s_arrayDataMap.insert(acc, key)) {
     ArrayData* ad;
-    if (arr->isVectorData() && !arr->isPackedLayout() && !arr->isDict() &&
+    if (arr->isVectorData() && !arr->hasPackedLayout() && !arr->isDict() &&
         !arr->isKeyset()) {
       ad = PackedArray::ConvertStatic(arr);
     } else {
@@ -129,7 +130,7 @@ static_assert(ArrayFunctions::NK == ArrayData::ArrayKind::kNumKinds,
     ProxyArray::entry,                          \
     MixedArray::entry##Dict,   /* Dict */       \
     PackedArray::entry##Vec,   /* Vec */        \
-    MixedArray::entry##Keyset, /* Keyset */     \
+    SetArray::entry,           /* Keyset */     \
   },
 
 /*
@@ -441,7 +442,7 @@ const ArrayFunctions g_array_funcs = {
   DISPATCH(EscalateForSort)
 
   /*
-   * void Ksort(int sort_flags, bool ascending)
+   * void Ksort(ArrayData*, int sort_flags, bool ascending)
    *
    *   Sort an array by its keys, keeping the values associated with
    *   their respective keys.
@@ -449,7 +450,7 @@ const ArrayFunctions g_array_funcs = {
   DISPATCH(Ksort)
 
   /*
-   * void Sort(int sort_flags, bool ascending)
+   * void Sort(ArrayData*, int sort_flags, bool ascending)
    *
    *   Sort an array, by values, and then assign new keys to the
    *   elements in the resulting array.
@@ -457,7 +458,7 @@ const ArrayFunctions g_array_funcs = {
   DISPATCH(Sort)
 
   /*
-   * void Asort(int sort_flags, bool ascending)
+   * void Asort(ArrayData*, int sort_flags, bool ascending)
    *
    *   Sort an array and maintain index association.  This means sort
    *   the array by values, but keep the keys associated with the
@@ -931,8 +932,7 @@ bool ArrayData::equal(const ArrayData* v2, bool strict) const {
 
   if (isKeyset()) {
     if (UNLIKELY(!v2->isKeyset())) return false;
-    return strict
-      ? MixedArray::KeysetSame(this, v2) : MixedArray::KeysetEqual(this, v2);
+    return strict ? SetArray::Same(this, v2) : SetArray::Equal(this, v2);
   }
 
   not_reached();
@@ -1204,20 +1204,6 @@ void throwInvalidAdditionException(const ArrayData* ad) {
   }();
   SystemLib::throwInvalidOperationExceptionObject(
     folly::sformat("{} do not support the + operator", type)
-  );
-}
-
-void throwInvalidMergeException(const ArrayData* ad) {
-  assertx(ad->isHackArray());
-  std::pair<const char*, const char*> type_str = [&]{
-    if (ad->isVecArray()) return std::make_pair("Vecs", "vecs");
-    if (ad->isDict()) return std::make_pair("Dicts", "dicts");
-    if (ad->isKeyset()) return std::make_pair("Keysets", "keysets");
-    not_reached();
-  }();
-  SystemLib::throwInvalidOperationExceptionObject(
-    folly::sformat("{} can only be merged with other {}",
-                   type_str.first, type_str.second)
   );
 }
 

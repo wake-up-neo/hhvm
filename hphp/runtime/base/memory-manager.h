@@ -372,12 +372,6 @@ struct NativeNode {
   HeaderWord<> hdr;
 };
 
-// header for Resumable objects. See layout comment in resumable.h
-struct ResumableNode {
-  size_t framesize;
-  HeaderWord<> hdr;
-};
-
 // POD type for tracking arbitrary memory ranges
 struct MemBlock {
   void* ptr;
@@ -635,7 +629,7 @@ struct MemoryManager {
    *            call this directly to avoid unnecessary initFree()s.
    * forEachHeader(): Like iterate(), but with an eager initFree().
    * forEachObject(): Iterate just the ObjectDatas, including the kinds with
-   *                  prefixes (NativeData and ResumableFrame).
+   *                  prefixes (NativeData and AsyncFuncFrame).
    */
   void initFree();
   template<class Fn> void iterate(Fn fn);

@@ -23,7 +23,6 @@
 #include "hphp/runtime/vm/jit/ir-instruction.h"
 #include "hphp/runtime/vm/jit/ir-opcode.h"
 #include "hphp/runtime/vm/jit/ir-unit.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/state-vector.h"
 #include "hphp/runtime/vm/jit/phys-reg.h"
 #include "hphp/runtime/vm/jit/reg-alloc.h"
@@ -517,6 +516,7 @@ bool checkOperandTypes(const IRInstruction* inst, const IRUnit* unit) {
 #define DCol
 #define DThis
 #define DCtx
+#define DCtxCls
 #define DCns
 
 #define O(opcode, dstinfo, srcinfo, flags) \
@@ -559,6 +559,7 @@ bool checkOperandTypes(const IRInstruction* inst, const IRUnit* unit) {
 #undef DCol
 #undef DThis
 #undef DCtx
+#undef DCtxCls
 #undef DCns
 
   return true;

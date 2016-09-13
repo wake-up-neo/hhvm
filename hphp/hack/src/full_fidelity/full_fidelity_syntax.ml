@@ -138,11 +138,21 @@ module WithToken(Token: TokenType) = struct
     }
     and namespace_use_declaration = {
       namespace_use : t;
-      namespace_use_keywordopt : t;
+      namespace_use_kind : t;
       namespace_use_clauses : t;
       namespace_use_semicolon : t
     }
+    and namespace_group_use_declaration = {
+      namespace_group_use : t;
+      namespace_group_use_kind : t;
+      namespace_group_use_prefix : t;
+      namespace_group_use_left_brace : t;
+      namespace_group_use_clauses : t;
+      namespace_group_use_right_brace : t;
+      namespace_group_use_semicolon : t
+    }
     and namespace_use_clause = {
+      namespace_use_clause_kind : t;
       namespace_use_name : t;
       namespace_use_as : t;
       namespace_use_alias : t
@@ -365,10 +375,12 @@ module WithToken(Token: TokenType) = struct
     }
     and break_statement = {
       break_keyword: t;
+      break_level: t;
       break_semicolon: t
     }
     and continue_statement = {
       continue_keyword: t;
+      continue_level: t;
       continue_semicolon: t
     }
     and function_static_statement = {
@@ -424,6 +436,16 @@ module WithToken(Token: TokenType) = struct
       cast_type : t;
       cast_right_paren : t;
       cast_operand : t
+    }
+    and scope_resolution_expression = {
+      scope_resolution_qualifier : t;
+      scope_resolution_operator : t;
+      scope_resolution_name : t
+    }
+    and member_selection_expression = {
+      member_object : t;
+      member_operator : t;
+      member_name : t
     }
     and yield_expression = {
       yield_token : t;
@@ -509,6 +531,27 @@ module WithToken(Token: TokenType) = struct
     and awaitable_creation_expression = {
       awaitable_async : t;
       awaitable_compound_statement : t;
+    }
+    and xhp_enum_type = {
+      xhp_enum_token : t;
+      xhp_enum_left_brace : t;
+      xhp_enum_values : t;
+      xhp_enum_right_brace : t
+    }
+    and xhp_required = {
+      xhp_required_at : t;
+      xhp_required : t
+    }
+    and xhp_class_attribute_declaration = {
+      xhp_attr_token : t;
+      xhp_attr_list : t;
+      xhp_attr_semicolon : t
+    }
+    and xhp_class_attribute = {
+      xhp_attr_decl_type : t;
+      xhp_attr_decl_name : t;
+      xhp_attr_decl_init : t;
+      xhp_attr_decl_required : t
     }
     and xhp_attribute = {
       xhp_attr_name : t;
@@ -603,6 +646,11 @@ module WithToken(Token: TokenType) = struct
       type_arguments : t;
       type_arguments_right_angle : t
     }
+    and type_parameters = {
+      type_parameters_left_angle : t;
+      type_parameters : t;
+      type_parameters_right_angle : t
+    }
     and tuple_type_specifier = {
       tuple_left_paren : t;
       tuple_types : t;
@@ -623,6 +671,7 @@ module WithToken(Token: TokenType) = struct
 
     | NamespaceDeclaration of namespace_declaration
     | NamespaceBody of namespace_body
+    | NamespaceGroupUseDeclaration of namespace_group_use_declaration
     | NamespaceUseDeclaration of namespace_use_declaration
     | NamespaceUseClause of namespace_use_clause
     | FunctionDeclaration of function_declaration
@@ -630,6 +679,10 @@ module WithToken(Token: TokenType) = struct
     | MethodishDeclaration of methodish_declaration
     | ClassishDeclaration of classish_declaration
     | ClassishBody of classish_body
+    | XHPEnumType of xhp_enum_type
+    | XHPRequired of xhp_required
+    | XHPClassAttributeDeclaration of xhp_class_attribute_declaration
+    | XHPClassAttribute of xhp_class_attribute
     | TraitUse of trait_use
     | RequireClause of require_clause
     | ConstDeclaration of const_declaration
@@ -669,6 +722,9 @@ module WithToken(Token: TokenType) = struct
     | StaticDeclarator of static_declarator
     | EchoStatement of echo_statement
 
+    | MemberSelectionExpression of member_selection_expression
+    | SafeMemberSelectionExpression of member_selection_expression
+    | ScopeResolutionExpression of scope_resolution_expression
     | YieldExpression of yield_expression
     | PrintExpression of print_expression
     | CastExpression of cast_expression
@@ -709,6 +765,7 @@ module WithToken(Token: TokenType) = struct
     | TypeConstant of type_constant
     | GenericTypeSpecifier of generic_type
     | TypeArguments of type_arguments
+    | TypeParameters of type_parameters
     | TupleTypeSpecifier of tuple_type_specifier
     | VectorTypeSpecifier of vector_type_specifier
     | MapTypeSpecifier of map_type_specifier
@@ -732,6 +789,10 @@ module WithToken(Token: TokenType) = struct
       match syntax with
       | Missing -> SyntaxKind.Missing
       | Token _  -> SyntaxKind.Token
+      | MemberSelectionExpression _ -> SyntaxKind.MemberSelectionExpression
+      | SafeMemberSelectionExpression _ ->
+        SyntaxKind.SafeMemberSelectionExpression
+      | ScopeResolutionExpression _ -> SyntaxKind.ScopeResolutionExpression
       | YieldExpression _ -> SyntaxKind.YieldExpression
       | PrintExpression _ -> SyntaxKind.PrintExpression
       | CastExpression _ -> SyntaxKind.CastExpression
@@ -755,6 +816,8 @@ module WithToken(Token: TokenType) = struct
       | PropertyDeclarator _ -> SyntaxKind.PropertyDeclarator
       | NamespaceDeclaration _ -> SyntaxKind.NamespaceDeclaration
       | NamespaceBody _ -> SyntaxKind.NamespaceBody
+      | NamespaceGroupUseDeclaration _ ->
+        SyntaxKind.NamespaceGroupUseDeclaration
       | NamespaceUseDeclaration _ -> SyntaxKind.NamespaceUseDeclaration
       | NamespaceUseClause _ -> SyntaxKind.NamespaceUseClause
       | FunctionDeclaration _ -> SyntaxKind.FunctionDeclaration
@@ -762,6 +825,11 @@ module WithToken(Token: TokenType) = struct
       | MethodishDeclaration _ -> SyntaxKind.MethodishDeclaration
       | ClassishDeclaration _ -> SyntaxKind.ClassishDeclaration
       | ClassishBody _ -> SyntaxKind.ClassishBody
+      | XHPEnumType _ -> SyntaxKind.XHPEnumType
+      | XHPRequired _ -> SyntaxKind.XHPRequired
+      | XHPClassAttributeDeclaration _ ->
+        SyntaxKind.XHPClassAttributeDeclaration
+      | XHPClassAttribute _ -> SyntaxKind.XHPClassAttribute
       | TraitUse _ -> SyntaxKind.TraitUse
       | RequireClause _ -> SyntaxKind.RequireClause
       | ConstDeclaration _ -> SyntaxKind.ConstDeclaration
@@ -823,6 +891,7 @@ module WithToken(Token: TokenType) = struct
       | NullableTypeSpecifier _ -> SyntaxKind.NullableTypeSpecifier
       | GenericTypeSpecifier _ -> SyntaxKind.GenericTypeSpecifier
       | TypeArguments _ -> SyntaxKind.TypeArguments
+      | TypeParameters _ -> SyntaxKind.TypeParameters
       | TupleTypeSpecifier _ -> SyntaxKind.TupleTypeSpecifier
       | VectorTypeSpecifier _ -> SyntaxKind.VectorTypeSpecifier
       | MapTypeSpecifier _ -> SyntaxKind.MapTypeSpecifier
@@ -836,6 +905,12 @@ module WithToken(Token: TokenType) = struct
 
     let is_missing node = kind node = SyntaxKind.Missing
     let is_token node = kind node = SyntaxKind.Token
+    let is_scope_resolution_expression node =
+      kind node = SyntaxKind.ScopeResolutionExpression
+    let is_member_selection_expression node =
+      kind node = SyntaxKind.MemberSelectionExpression
+    let is_safe_member_selection_expression node =
+      kind node = SyntaxKind.SafeMemberSelectionExpression
     let is_yield_expression node = kind node = SyntaxKind.YieldExpression
     let is_print_expression node = kind node = SyntaxKind.PrintExpression
     let is_cast_expression node = kind node = SyntaxKind.CastExpression
@@ -864,6 +939,8 @@ module WithToken(Token: TokenType) = struct
       kind node = SyntaxKind.PropertyDeclarator
     let is_namespace node = kind node = SyntaxKind.NamespaceDeclaration
     let is_namespace_body node = kind node = SyntaxKind.NamespaceBody
+    let is_namespace_group_use node =
+      kind node = SyntaxKind.NamespaceGroupUseDeclaration
     let is_namespace_use node = kind node = SyntaxKind.NamespaceUseDeclaration
     let is_namespace_use_clause node = kind node = SyntaxKind.NamespaceUseClause
     let is_function node = kind node = SyntaxKind.FunctionDeclaration
@@ -929,6 +1006,8 @@ module WithToken(Token: TokenType) = struct
     let is_element_initializer node = kind node = SyntaxKind.ElementInitializer
     let is_subscript_expression node =
       kind node = SyntaxKind.SubscriptExpression
+    let is_xhp_enum_type node = kind node = SyntaxKind.XHPEnumType
+    let is_xhp_required node = kind node = SyntaxKind.XHPRequired
     let is_xhp_expression node = kind node = SyntaxKind.XHPExpression
     let is_xhp_open node = kind node = SyntaxKind.XHPOpen
     let is_xhp_attribute node = kind node = SyntaxKind.XHPAttribute
@@ -938,6 +1017,7 @@ module WithToken(Token: TokenType) = struct
     let is_nullable_type_specifier node =
       kind node = SyntaxKind.NullableTypeSpecifier
     let is_type_arguments node = kind node = SyntaxKind.TypeArguments
+    let is_type_parameters node = kind node = SyntaxKind.TypeParameters
     let is_tuple_type node = kind node = SyntaxKind.TupleTypeSpecifier
     let is_vector_type_specifier node =
       kind node = SyntaxKind.VectorTypeSpecifier
@@ -998,6 +1078,17 @@ module WithToken(Token: TokenType) = struct
       | PipeVariableExpression x -> [x]
       | Error x -> x
       | SyntaxList x -> x
+      | ScopeResolutionExpression
+        { scope_resolution_qualifier; scope_resolution_operator;
+          scope_resolution_name } ->
+        [ scope_resolution_qualifier; scope_resolution_operator;
+          scope_resolution_name ]
+      | MemberSelectionExpression
+        { member_object; member_operator; member_name } ->
+        [ member_object; member_operator; member_name ]
+      | SafeMemberSelectionExpression
+        { member_object; member_operator; member_name } ->
+        [ member_object; member_operator; member_name ]
       | YieldExpression
         { yield_token; yield_operand } ->
         [ yield_token; yield_operand ]
@@ -1065,18 +1156,25 @@ module WithToken(Token: TokenType) = struct
           namespace_right_brace } ->
         [ namespace_left_brace; namespace_declarations;
           namespace_right_brace ]
+      | NamespaceGroupUseDeclaration
+        { namespace_group_use; namespace_group_use_kind;
+          namespace_group_use_prefix; namespace_group_use_left_brace;
+          namespace_group_use_clauses; namespace_group_use_right_brace;
+          namespace_group_use_semicolon } ->
+        [ namespace_group_use; namespace_group_use_kind;
+          namespace_group_use_prefix; namespace_group_use_left_brace;
+          namespace_group_use_clauses; namespace_group_use_right_brace;
+          namespace_group_use_semicolon ]
       | NamespaceUseDeclaration
-        { namespace_use;
-          namespace_use_keywordopt;
-          namespace_use_clauses;
+        { namespace_use; namespace_use_kind; namespace_use_clauses;
           namespace_use_semicolon } ->
-          [ namespace_use;
-            namespace_use_keywordopt;
-            namespace_use_clauses;
-            namespace_use_semicolon ]
+        [ namespace_use; namespace_use_kind; namespace_use_clauses;
+          namespace_use_semicolon ]
       | NamespaceUseClause
-        { namespace_use_name; namespace_use_as; namespace_use_alias } ->
-        [ namespace_use_name; namespace_use_as; namespace_use_alias ]
+        { namespace_use_clause_kind; namespace_use_name;
+          namespace_use_as; namespace_use_alias } ->
+        [ namespace_use_clause_kind; namespace_use_name;
+          namespace_use_as; namespace_use_alias ]
       | FunctionDeclaration
         { function_attribute_spec; function_declaration_header; function_body}
         ->
@@ -1107,6 +1205,22 @@ module WithToken(Token: TokenType) = struct
           classish_body_right_brace } ->
         [ classish_body_left_brace; classish_body_elements;
           classish_body_right_brace ]
+      | XHPEnumType
+        { xhp_enum_token; xhp_enum_left_brace; xhp_enum_values;
+          xhp_enum_right_brace } ->
+        [ xhp_enum_token; xhp_enum_left_brace; xhp_enum_values;
+          xhp_enum_right_brace ]
+      | XHPRequired
+        { xhp_required_at; xhp_required } ->
+        [ xhp_required_at; xhp_required ]
+      | XHPClassAttributeDeclaration
+        { xhp_attr_token; xhp_attr_list; xhp_attr_semicolon } ->
+        [ xhp_attr_token; xhp_attr_list; xhp_attr_semicolon ]
+      | XHPClassAttribute
+        { xhp_attr_decl_type; xhp_attr_decl_name; xhp_attr_decl_init;
+          xhp_attr_decl_required } ->
+        [ xhp_attr_decl_type; xhp_attr_decl_name; xhp_attr_decl_init;
+          xhp_attr_decl_required ]
       | TraitUse
         { trait_use_token; trait_use_name_list; trait_use_semicolon; } ->
         [ trait_use_token; trait_use_name_list; trait_use_semicolon; ]
@@ -1221,11 +1335,11 @@ module WithToken(Token: TokenType) = struct
         { throw_keyword; throw_expr; throw_semicolon } ->
         [ throw_keyword; throw_expr; throw_semicolon ]
       | BreakStatement
-        { break_keyword; break_semicolon } ->
-        [ break_keyword; break_semicolon ]
+        { break_keyword; break_level; break_semicolon } ->
+        [ break_keyword; break_level; break_semicolon ]
       | ContinueStatement
-        { continue_keyword; continue_semicolon } ->
-        [ continue_keyword; continue_semicolon ]
+        { continue_keyword; continue_level; continue_semicolon } ->
+        [ continue_keyword; continue_level; continue_semicolon ]
       | FunctionStaticStatement
         { static_static; static_declarations; static_semicolon } ->
         [ static_static; static_declarations; static_semicolon ]
@@ -1342,6 +1456,11 @@ module WithToken(Token: TokenType) = struct
           type_arguments_right_angle } ->
         [ type_arguments_left_angle; type_arguments;
           type_arguments_right_angle ]
+      | TypeParameters
+        { type_parameters_left_angle; type_parameters;
+          type_parameters_right_angle } ->
+        [ type_parameters_left_angle; type_parameters;
+          type_parameters_right_angle ]
       | TupleTypeSpecifier
         { tuple_left_paren; tuple_types; tuple_right_paren } ->
         [ tuple_left_paren; tuple_types; tuple_right_paren ]
@@ -1384,6 +1503,17 @@ module WithToken(Token: TokenType) = struct
       | PipeVariableExpression _ -> ["pipe_variable_expression"]
       | Error _ -> []
       | SyntaxList _ -> []
+      | MemberSelectionExpression
+        { member_object; member_operator; member_name } ->
+        [ "member_object"; "member_operator"; "member_name" ]
+      | SafeMemberSelectionExpression
+        { member_object; member_operator; member_name } ->
+        [ "member_object"; "member_operator"; "member_name" ]
+      | ScopeResolutionExpression
+        { scope_resolution_qualifier; scope_resolution_operator;
+          scope_resolution_name } ->
+        [ "scope_resolution_qualifier"; "scope_resolution_operator";
+          "scope_resolution_name" ]
       | YieldExpression
         { yield_token; yield_operand } ->
         [ "yield_token"; "yield_operand" ]
@@ -1451,18 +1581,25 @@ module WithToken(Token: TokenType) = struct
           namespace_right_brace } ->
         [ "namespace_left_brace"; "namespace_declarations";
           "namespace_right_brace" ]
+      | NamespaceGroupUseDeclaration
+        { namespace_group_use; namespace_group_use_kind;
+          namespace_group_use_prefix; namespace_group_use_left_brace;
+          namespace_group_use_clauses; namespace_group_use_right_brace;
+          namespace_group_use_semicolon } ->
+        [ "namespace_group_use"; "namespace_group_use_kind";
+          "namespace_group_use_prefix"; "namespace_group_use_left_brace";
+          "namespace_group_use_clauses"; "namespace_group_use_right_brace";
+          "namespace_group_use_semicolon" ]
       | NamespaceUseDeclaration
-        { namespace_use;
-          namespace_use_keywordopt;
-          namespace_use_clauses;
+        { namespace_use; namespace_use_kind; namespace_use_clauses;
           namespace_use_semicolon } ->
-            [ "namespace_use";
-              "namespace_use_keywordopt";
-              "namespace_use_clauses";
-              "namespace_use_semicolon" ]
+        [ "namespace_use"; "namespace_use_kind"; "namespace_use_clauses";
+          "namespace_use_semicolon" ]
       | NamespaceUseClause
-        { namespace_use_name; namespace_use_as; namespace_use_alias } ->
-        [ "namespace_use_name"; "namespace_use_as"; "namespace_use_alias" ]
+        { namespace_use_clause_kind; namespace_use_name;
+          namespace_use_as; namespace_use_alias } ->
+        [ "namespace_use_clause_kind"; "namespace_use_name";
+          "namespace_use_as"; "namespace_use_alias" ]
       | FunctionDeclaration
         { function_attribute_spec; function_declaration_header; function_body }
         -> [ "function_attribute_spec"; "function_declaration_header";
@@ -1494,6 +1631,22 @@ module WithToken(Token: TokenType) = struct
           classish_body_right_brace } ->
         [ "classish_body_left_brace"; "classish_body_elements";
           "classish_body_right_brace" ]
+      | XHPEnumType
+        { xhp_enum_token; xhp_enum_left_brace; xhp_enum_values;
+          xhp_enum_right_brace } ->
+        [ "xhp_enum_token"; "xhp_enum_left_brace"; "xhp_enum_values";
+          "xhp_enum_right_brace" ]
+      | XHPRequired
+        { xhp_required_at; xhp_required } ->
+        [ "xhp_required_at"; "xhp_required" ]
+      | XHPClassAttributeDeclaration
+        { xhp_attr_token; xhp_attr_list; xhp_attr_semicolon } ->
+        [ "xhp_attr_token"; "xhp_attr_list"; "xhp_attr_semicolon" ]
+      | XHPClassAttribute
+        { xhp_attr_decl_type; xhp_attr_decl_name; xhp_attr_decl_init;
+          xhp_attr_decl_required } ->
+        [ "xhp_attr_decl_type"; "xhp_attr_decl_name"; "xhp_attr_decl_init";
+          "xhp_attr_decl_required" ]
       | TraitUse
         { trait_use_token; trait_use_name_list; trait_use_semicolon; } ->
         [ "trait_use_token"; "trait_use_name_list"; "trait_use_semicolon"; ]
@@ -1612,11 +1765,11 @@ module WithToken(Token: TokenType) = struct
         { throw_keyword; throw_expr; throw_semicolon } ->
         [ "throw_keyword"; "throw_expr"; "throw_semicolon" ]
       | BreakStatement
-        { break_keyword; break_semicolon } ->
-        [ "break_keyword"; "break_semicolon" ]
+        { break_keyword; break_level; break_semicolon } ->
+        [ "break_keyword"; "break_level"; "break_semicolon" ]
       | ContinueStatement
-        { continue_keyword; continue_semicolon } ->
-        [ "continue_keyword"; "continue_semicolon" ]
+        { continue_keyword; continue_level; continue_semicolon } ->
+        [ "continue_keyword"; "continue_level"; "continue_semicolon" ]
       | FunctionStaticStatement
         { static_static; static_declarations; static_semicolon } ->
         [ "static_static"; "static_declarations"; "static_semicolon" ]
@@ -1735,6 +1888,11 @@ module WithToken(Token: TokenType) = struct
           type_arguments_right_angle } ->
         [ "type_arguments_left_angle"; "type_arguments";
           "type_arguments_right_angle" ]
+      | TypeParameters
+        { type_parameters_left_angle; type_parameters;
+          type_parameters_right_angle } ->
+        [ "type_parameters_left_angle"; "type_parameters";
+          "type_parameters_right_angle" ]
       | TupleTypeSpecifier
         { tuple_left_paren; tuple_types; tuple_right_paren } ->
         [ "tuple_left_paren"; "tuple_types"; "tuple_right_paren" ]
@@ -1919,10 +2077,6 @@ module WithToken(Token: TokenType) = struct
     let throw_keyword x = x.throw_keyword
     let throw_expr x = x.throw_expr
     let throw_semicolon x = x.throw_semicolon
-    let break_keyword x = x.break_keyword
-    let break_semicolon x = x.break_semicolon
-    let continue_keyword x = x.continue_keyword
-    let continue_semicolon x = x.continue_semicolon
     let echo_token x = x.echo_token
     let echo_expression_list x = x.echo_expression_list
     let echo_semicolon x = x.echo_semicolon
@@ -2034,6 +2188,20 @@ module WithToken(Token: TokenType) = struct
       match kind, ts with
       | (SyntaxKind.Missing, []) -> Missing
       | (SyntaxKind.SyntaxList, x) -> SyntaxList x
+      | (SyntaxKind.MemberSelectionExpression,
+        [ member_object; member_operator; member_name ]) ->
+        MemberSelectionExpression
+        { member_object; member_operator; member_name }
+      | (SyntaxKind.SafeMemberSelectionExpression,
+        [ member_object; member_operator; member_name ]) ->
+        SafeMemberSelectionExpression
+        { member_object; member_operator; member_name }
+      | (SyntaxKind.ScopeResolutionExpression,
+        [ scope_resolution_qualifier; scope_resolution_operator;
+          scope_resolution_name ]) ->
+        ScopeResolutionExpression
+        { scope_resolution_qualifier; scope_resolution_operator;
+          scope_resolution_name }
       | (SyntaxKind.YieldExpression,
         [ yield_token; yield_operand ]) ->
         YieldExpression
@@ -2118,20 +2286,28 @@ module WithToken(Token: TokenType) = struct
         NamespaceBody
         { namespace_left_brace; namespace_declarations;
           namespace_right_brace }
+      | (SyntaxKind.NamespaceGroupUseDeclaration,
+        [ namespace_group_use; namespace_group_use_kind;
+          namespace_group_use_prefix; namespace_group_use_left_brace;
+          namespace_group_use_clauses; namespace_group_use_right_brace;
+          namespace_group_use_semicolon ]) ->
+        NamespaceGroupUseDeclaration
+        { namespace_group_use; namespace_group_use_kind;
+          namespace_group_use_prefix; namespace_group_use_left_brace;
+          namespace_group_use_clauses; namespace_group_use_right_brace;
+          namespace_group_use_semicolon }
       | (SyntaxKind.NamespaceUseDeclaration,
-        [ namespace_use;
-          namespace_use_keywordopt;
-          namespace_use_clauses;
+        [ namespace_use; namespace_use_kind; namespace_use_clauses;
           namespace_use_semicolon ]) ->
         NamespaceUseDeclaration
-        { namespace_use;
-          namespace_use_keywordopt;
-          namespace_use_clauses;
+        { namespace_use; namespace_use_kind; namespace_use_clauses;
           namespace_use_semicolon }
       | (SyntaxKind.NamespaceUseClause,
-        [ namespace_use_name; namespace_use_as; namespace_use_alias ]) ->
+        [ namespace_use_clause_kind; namespace_use_name;
+          namespace_use_as; namespace_use_alias ]) ->
         NamespaceUseClause
-        { namespace_use_name; namespace_use_as; namespace_use_alias }
+        { namespace_use_clause_kind; namespace_use_name;
+          namespace_use_as; namespace_use_alias }
       | (SyntaxKind.FunctionDeclaration,
         [ function_attribute_spec; function_declaration_header; function_body ])
         -> FunctionDeclaration
@@ -2166,6 +2342,26 @@ module WithToken(Token: TokenType) = struct
         ClassishBody {
           classish_body_left_brace; classish_body_elements;
           classish_body_right_brace }
+      | (SyntaxKind.XHPEnumType,
+        [ xhp_enum_token; xhp_enum_left_brace; xhp_enum_values;
+          xhp_enum_right_brace ]) ->
+        XHPEnumType
+        { xhp_enum_token; xhp_enum_left_brace; xhp_enum_values;
+          xhp_enum_right_brace }
+      | (SyntaxKind.XHPRequired,
+        [ xhp_required_at; xhp_required ]) ->
+        XHPRequired
+        { xhp_required_at; xhp_required }
+      | (SyntaxKind.XHPClassAttributeDeclaration,
+        [ xhp_attr_token; xhp_attr_list; xhp_attr_semicolon ]) ->
+        XHPClassAttributeDeclaration
+        { xhp_attr_token; xhp_attr_list; xhp_attr_semicolon }
+      | (SyntaxKind.XHPClassAttribute,
+        [ xhp_attr_decl_type; xhp_attr_decl_name; xhp_attr_decl_init;
+          xhp_attr_decl_required ]) ->
+        XHPClassAttribute
+        { xhp_attr_decl_type; xhp_attr_decl_name; xhp_attr_decl_init;
+          xhp_attr_decl_required }
       | (SyntaxKind.TraitUse,
         [ trait_use_token; trait_use_name_list; trait_use_semicolon; ]) ->
         TraitUse { trait_use_token; trait_use_name_list; trait_use_semicolon; }
@@ -2284,11 +2480,14 @@ module WithToken(Token: TokenType) = struct
       | (SyntaxKind.ThrowStatement, [ throw_keyword;
         throw_expr; throw_semicolon ]) ->
         ThrowStatement { throw_keyword; throw_expr; throw_semicolon }
-      | (SyntaxKind.BreakStatement, [ break_keyword; break_semicolon ]) ->
-        BreakStatement { break_keyword; break_semicolon }
+      | (SyntaxKind.BreakStatement,
+        [ break_keyword; break_level; break_semicolon ]) ->
+        BreakStatement
+        { break_keyword; break_level; break_semicolon }
       | (SyntaxKind.ContinueStatement,
-          [ continue_keyword; continue_semicolon ]) ->
-        ContinueStatement { continue_keyword; continue_semicolon }
+        [ continue_keyword; continue_level; continue_semicolon ]) ->
+        ContinueStatement
+        { continue_keyword; continue_level; continue_semicolon }
       | (SyntaxKind.FunctionStaticStatement,
         [ static_static; static_declarations; static_semicolon ]) ->
         FunctionStaticStatement
@@ -2409,6 +2608,12 @@ module WithToken(Token: TokenType) = struct
           type_arguments; type_arguments_right_angle ]) ->
         TypeArguments { type_arguments_left_angle;
             type_arguments; type_arguments_right_angle }
+      | (SyntaxKind.TypeParameters,
+        [ type_parameters_left_angle; type_parameters;
+          type_parameters_right_angle ]) ->
+        TypeParameters
+        { type_parameters_left_angle; type_parameters;
+          type_parameters_right_angle }
       | (SyntaxKind.TypeParameter, [ type_variance_opt;
           type_name; type_constraint_list_opt  ]) ->
         TypeParameter { type_variance_opt;
@@ -2515,6 +2720,16 @@ module WithToken(Token: TokenType) = struct
         from_children SyntaxKind.FunctionCallExpression
           [ function_call_receiver; function_call_lparen;
             function_call_arguments; function_call_rparen ]
+
+      let make_member_selection_expression ob op name =
+        from_children SyntaxKind.MemberSelectionExpression [ ob; op; name ]
+
+      let make_safe_member_selection_expression ob op name =
+        from_children SyntaxKind.SafeMemberSelectionExpression [ ob; op; name ]
+
+      let make_scope_resolution_expression qualifier op name =
+        from_children SyntaxKind.ScopeResolutionExpression
+          [ qualifier; op; name ]
 
       let make_yield_expression token operand =
         from_children SyntaxKind.YieldExpression [ token; operand ]
@@ -2671,12 +2886,17 @@ module WithToken(Token: TokenType) = struct
         from_children SyntaxKind.NamespaceBody
           [ left; decls; right ]
 
-      let make_namespace_use use keyword_opt clauses semi =
-        from_children SyntaxKind.NamespaceUseDeclaration
-          [ use; keyword_opt; clauses; semi ]
+      let make_namespace_group_use token kind prefix left clauses right semi =
+        from_children SyntaxKind.NamespaceGroupUseDeclaration
+        [ token; kind; prefix; left; clauses; right; semi ]
 
-      let make_namespace_use_clause name as_token alias =
-        from_children SyntaxKind.NamespaceUseClause [ name; as_token; alias ]
+      let make_namespace_use use use_kind clauses semi =
+        from_children SyntaxKind.NamespaceUseDeclaration
+          [ use; use_kind; clauses; semi ]
+
+      let make_namespace_use_clause use_kind name as_token alias =
+        from_children SyntaxKind.NamespaceUseClause
+          [ use_kind; name; as_token; alias ]
 
       let make_function function_attribute_spec function_declaration_header
         function_body =
@@ -2714,6 +2934,21 @@ module WithToken(Token: TokenType) = struct
         from_children SyntaxKind.ClassishBody [
           classish_body_left_brace; classish_body_elements;
           classish_body_right_brace ]
+
+      let make_xhp_enum_type token left items right =
+        from_children SyntaxKind.XHPEnumType
+        [ token; left; items; right ]
+
+      let make_xhp_required at req =
+        from_children SyntaxKind.XHPRequired [ at; req ]
+
+      let make_xhp_class_attribute_declaration attr attrs semi =
+        from_children SyntaxKind.XHPClassAttributeDeclaration
+          [ attr; attrs; semi ]
+
+      let make_xhp_class_attribute attr_type name init required =
+        from_children SyntaxKind.XHPClassAttribute
+          [ attr_type; name; init; required ]
 
       let make_trait_use trait_use_token trait_use_name_list
         trait_use_semicolon =
@@ -2862,13 +3097,13 @@ module WithToken(Token: TokenType) = struct
         from_children SyntaxKind.ThrowStatement
           [ throw_keyword; throw_expr; throw_semicolon ]
 
-      let make_break_statement break_keyword break_semicolon =
+      let make_break_statement keyword level semi =
         from_children SyntaxKind.BreakStatement
-          [ break_keyword; break_semicolon ]
+          [ keyword; level; semi ]
 
-      let make_continue_statement continue_keyword continue_semicolon =
+      let make_continue_statement keyword level semi =
         from_children SyntaxKind.ContinueStatement
-          [ continue_keyword; continue_semicolon ]
+          [ keyword; level; semi ]
 
       let make_function_static_statement static decls semi =
         from_children SyntaxKind.FunctionStaticStatement [ static; decls; semi ]
@@ -2911,6 +3146,9 @@ module WithToken(Token: TokenType) = struct
 
       let make_type_arguments left items right =
         from_children SyntaxKind.TypeArguments [ left; items; right ]
+
+      let make_type_parameters left items right =
+        from_children SyntaxKind.TypeParameters [ left; items; right ]
 
       let make_tuple_type_specifier left types right =
         from_children SyntaxKind.TupleTypeSpecifier [ left; types; right ]

@@ -32,10 +32,10 @@
 #include "hphp/runtime/base/thread-info.h"
 #include "hphp/runtime/ext/server/ext_server.h"
 #include "hphp/runtime/vm/func.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/write-lease.h"
 #include "hphp/runtime/vm/treadmill.h"
 #include "hphp/runtime/vm/jit/relocation.h"
+#include "hphp/runtime/vm/jit/tc.h"
 
 #include "hphp/util/atomic-vector.h"
 #include "hphp/util/boot_timer.h"
@@ -46,9 +46,6 @@ namespace HPHP {
 TRACE_SET_MOD(typeProfile);
 
 //////////////////////////////////////////////////////////////////////
-
-void profileInit() {
-}
 
 /*
  * Warmup/profiling.
@@ -84,6 +81,7 @@ const std::vector<int64_t> rfhBuckets = {
   360, 420, 480, 540, 600,                                   // every 1m, to 10m
   900, 1200, 1500, 1800, 2100, 2400, 2700, 3000, 3300, 3600, // every 5m, to 1h
   4500, 5400, 6300, 7200,                                    // every 15m, to 2h
+  3 * 3600, 4 * 3600, 5 * 3600, 6 * 3600,                    // every 1h, to 6h
 };
 std::atomic<size_t> nextRFH{0};
 
@@ -94,7 +92,10 @@ void setRelocateRequests(int32_t n) {
 }
 
 namespace {
-AtomicVector<uint32_t> s_func_counters{kFuncCountHint, 0};
+AtomicVector<uint32_t> s_func_counters{0, 0};
+AtomicVectorInit s_func_counters_init{
+  s_func_counters, RuntimeOption::EvalFuncCountHint
+};
 }
 
 void profileWarmupStart() {
@@ -241,7 +242,7 @@ void profileRequestStart() {
   }
 
   if (standardRequest && relocateRequests > 0 && !--relocateRequests) {
-    jit::liveRelocate(true);
+    jit::tc::liveRelocate(true);
   }
 }
 

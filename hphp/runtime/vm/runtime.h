@@ -91,16 +91,6 @@ frame_async_generator(const ActRec* fp) {
     AsyncGenerator::resumableOff());
 }
 
-/*
- * 'Unwinding' versions of the below frame_free_locals_* functions
- * zero locals and the $this pointer.
- *
- * This is necessary during unwinding because another object being
- * destructed by the unwind may decide to do a debug_backtrace and
- * read a destructed value.
- */
-
-template<bool unwinding>
 void ALWAYS_INLINE
 frame_free_locals_helper_inl(ActRec* fp, int numLocals) {
   assert(numLocals == fp->m_func->numLocals());
@@ -117,10 +107,6 @@ frame_free_locals_helper_inl(ActRec* fp, int numLocals) {
     assert(fp->hasExtraArgs());
     ExtraArgs* ea = fp->getExtraArgs();
     int numExtra = fp->numArgs() - fp->m_func->numNonVariadicParams();
-    if (unwinding) {
-      fp->setNumArgs(fp->m_func->numParams());
-      fp->setVarEnv(nullptr);
-    }
     ExtraArgs::deallocate(ea, numExtra);
   }
   // Free locals
@@ -132,30 +118,22 @@ frame_free_locals_helper_inl(ActRec* fp, int numLocals) {
     DataType t = loc->m_type;
     if (isRefcountedType(t)) {
       uint64_t datum = loc->m_data.num;
-      if (unwinding) {
-        tvWriteUninit(loc);
-      }
       tvDecRefHelper(t, datum);
     }
   }
 }
 
-template<bool unwinding>
 void ALWAYS_INLINE
 frame_free_locals_inl_no_hook(ActRec* fp, int numLocals) {
-  frame_free_locals_helper_inl<unwinding>(fp, numLocals);
-  if (fp->hasThis()) {
-    ObjectData* this_ = fp->getThis();
-    if (unwinding) {
-      fp->setThis(nullptr);
-    }
-    decRefObj(this_);
+  frame_free_locals_helper_inl(fp, numLocals);
+  if (fp->func()->cls() && fp->hasThis()) {
+    decRefObj(fp->getThis());
   }
 }
 
 void ALWAYS_INLINE
 frame_free_locals_inl(ActRec* fp, int numLocals, TypedValue* rv) {
-  frame_free_locals_inl_no_hook<false>(fp, numLocals);
+  frame_free_locals_inl_no_hook(fp, numLocals);
   EventHook::FunctionReturn(fp, *rv);
 }
 
@@ -170,13 +148,16 @@ frame_free_inl(ActRec* fp, TypedValue* rv) { // For frames with no locals
 
 void ALWAYS_INLINE
 frame_free_locals_unwind(ActRec* fp, int numLocals, ObjectData* phpException) {
-  frame_free_locals_inl_no_hook<true>(fp, numLocals);
+  fp->setLocalsDecRefd();
+  frame_free_locals_inl_no_hook(fp, numLocals);
+  fp->trashThis();
+  fp->trashVarEnv();
   EventHook::FunctionUnwind(fp, phpException);
 }
 
 void ALWAYS_INLINE
 frame_free_locals_no_this_inl(ActRec* fp, int numLocals, TypedValue* rv) {
-  frame_free_locals_helper_inl<false>(fp, numLocals);
+  frame_free_locals_helper_inl(fp, numLocals);
   EventHook::FunctionReturn(fp, *rv);
 }
 
@@ -197,9 +178,12 @@ frame_free_args(TypedValue* args, int count) {
   }
 }
 
-Unit*
-compile_file(const char* s, size_t sz, const MD5& md5, const char* fname);
-Unit* compile_string(const char* s, size_t sz, const char* fname = nullptr);
+// If set, releaseUnit will contain a pointer to any extraneous unit created due
+// to race-conditions while compiling
+Unit* compile_file(const char* s, size_t sz, const MD5& md5, const char* fname,
+                   Unit** releaseUnit = nullptr);
+Unit* compile_string(const char* s, size_t sz, const char* fname = nullptr,
+                     Unit** releaseUnit = nullptr);
 Unit* compile_systemlib_string(const char* s, size_t sz, const char* fname);
 Unit* build_native_func_unit(const HhbcExtFuncInfo* builtinFuncs,
                                  ssize_t numBuiltinFuncs);
@@ -235,7 +219,8 @@ RefData* lookupStaticFromClosure(ObjectData* closure,
  * be set up before you use those parts of the runtime.
  */
 
-typedef Unit* (*CompileStringFn)(const char*, int, const MD5&, const char*);
+typedef Unit* (*CompileStringFn)(const char*, int, const MD5&, const char*,
+                                 Unit**);
 typedef Unit* (*BuildNativeFuncUnitFn)(const HhbcExtFuncInfo*, ssize_t);
 typedef Unit* (*BuildNativeClassUnitFn)(const HhbcExtClassInfo*, ssize_t);
 

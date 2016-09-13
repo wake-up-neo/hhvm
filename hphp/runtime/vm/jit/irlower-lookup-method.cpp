@@ -141,9 +141,11 @@ void lookupClsMethodHelper(Class* cls, StringData* meth,
                            ActRec* ar, ActRec* fp) {
   try {
     const Func* f;
-    auto const obj = fp->hasThis() ? fp->getThis() : nullptr;
     auto const ctx = fp->m_func->cls();
+    auto const obj = ctx && fp->hasThis() ? fp->getThis() : nullptr;
     auto const res = g_context->lookupClsMethod(f, cls, meth, obj, ctx, true);
+
+    ar->m_func = f;
 
     if (res == LookupResult::MethodFoundNoThis ||
         res == LookupResult::MagicCallStaticFound) {
@@ -158,8 +160,6 @@ void lookupClsMethodHelper(Class* cls, StringData* meth,
       obj->incRefCount();
       ar->setThis(obj);
     }
-
-    ar->m_func = f;
 
     if (res == LookupResult::MagicCallFound ||
         res == LookupResult::MagicCallStaticFound) {
@@ -346,8 +346,7 @@ void cgFwdCtxStaticCall(IRLS& env, const IRInstruction* inst) {
 
   auto ctx_from_this =  [] (Vout& v, Vreg rthis, Vreg dst) {
     // Load (this->m_cls | 0x1) into `dst'.
-    auto const cls = v.makeReg();
-    emitLdObjClass(v, rthis, cls);
+    auto const cls = emitLdObjClass(v, rthis, v.makeReg());
     v << orqi{ActRec::kHasClassBit, cls, dst, v.makeReg()};
     return dst;
   };
@@ -360,10 +359,10 @@ void cgFwdCtxStaticCall(IRLS& env, const IRInstruction* inst) {
     // If we don't know whether we have a $this, we need to check dynamically.
     auto const sf = v.makeReg();
     v << testqi{ActRec::kHasClassBit, srcCtx, sf};
-    cond(v, CC_Z, sf, dstCtx,
-         [&] (Vout& v) { return ctx_from_this(v, srcCtx, v.makeReg()); },
-         [&] (Vout& v) { return srcCtx; }
-    );
+    unlikelyCond(v, vcold(env), CC_NZ, sf, dstCtx,
+         [&] (Vout& v) { return srcCtx; },
+         [&] (Vout& v) { return ctx_from_this(v, srcCtx, v.makeReg()); }
+        );
   }
 }
 

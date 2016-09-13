@@ -458,11 +458,11 @@ To dict conversions:
 
 To keyset conversions:
 
-| ConvArrToKeyset,              D(Keyset), S(Arr),                   PRc|CRc
+| ConvArrToKeyset,              D(Keyset), S(Arr),                Er|PRc|CRc
 
-| ConvVecToKeyset,              D(Keyset), S(Vec),                   PRc|CRc
+| ConvVecToKeyset,              D(Keyset), S(Vec),                Er|PRc|CRc
 
-| ConvDictToKeyset,             D(Keyset), S(Dict),                  PRc|CRc
+| ConvDictToKeyset,             D(Keyset), S(Dict),               Er|PRc|CRc
 
 | ConvObjToKeyset,              D(Keyset), S(Obj),                Er|PRc|CRc
 
@@ -757,6 +757,15 @@ To string conversions:
 
   Checks if two Func values are equal.
 
+| EqStrPtr,                    D(Bool), S(Str) S(Str),                    NF
+
+  Checks if two string values represent the same underlying string. That is,
+  that they point at the same underlying storage.
+
+| ProfileInstanceCheck, ND, C(StaticStr), NF
+
+  Profile that S0 has been used as the RHS of an instance check.
+
 | InstanceOf, D(Bool), S(Cls) S(Cls|Nullptr), NF
 
   Sets D based on whether S0 is a descendant of the class, interface, or trait
@@ -1032,12 +1041,12 @@ To string conversions:
   Convert a Ctx known to contain a $this pointer to a specific object type,
   based on the marker func for this instruction.
 
-| LdClsCtx, D(Cls), S(Ctx), NF
+| LdClsCtx, DCtxCls, S(Ctx), NF
 
   Loads into D the class representing the current context. Extracts the class
   from S0, which can be either the this pointer or the context class.
 
-| LdClsCctx, D(Cls), S(Cctx), NF
+| LdClsCctx, DCtxCls, S(Cctx), NF
 
   Loads into D the class representing the current context. Extracts the class
   from the S0, which is a context class.
@@ -1251,10 +1260,12 @@ To string conversions:
 
   Load the name of the Class* in S0.
 
-| LdFunc, D(Func), S(Str), CRc|Er
+| LdFunc<offset>, ND, S(Str) S(StkPtr) S(FramePtr), Er
 
-  Loads the Func whose name is S0. Fatal if the named function is not defined,
-  and the function autoloader fails to define it.
+  Loads the Func whose name is S0 into the partially constructed ActRec pointed
+  to by S1 + `offset` (in cells). Also populate the m_this/m_cls field if
+  necessary.  Fatal if the named function is not defined, and the autoloader
+  fails to define it.
 
 | LdFuncCached<funcName>, D(Func), NA, Er
 
@@ -1845,6 +1856,10 @@ To string conversions:
   Raises an appropriate notice or fatal to indicate that Func was
   called with null $this. In most cases its a notice, but for
   builtins and special class methods its a fatal.
+
+| FatalMissingThis, ND, S(Func), T|Er
+
+  Similar to RaiseMissingThis, but for cases where we know it will fatal.
 
 | InitClosureStaticLoc, ND, S(BoxedCell) S(Cell), NF
 

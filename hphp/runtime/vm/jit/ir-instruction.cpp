@@ -45,6 +45,7 @@ namespace HPHP { namespace jit {
 IRInstruction::IRInstruction(Arena& arena, const IRInstruction* inst, Id id)
   : m_typeParam(inst->m_typeParam)
   , m_op(inst->m_op)
+  , m_iroff(inst->m_iroff)
   , m_numSrcs(inst->m_numSrcs)
   , m_numDsts(inst->m_numDsts)
   , m_hasTypeParam{inst->m_hasTypeParam}
@@ -52,7 +53,6 @@ IRInstruction::IRInstruction(Arena& arena, const IRInstruction* inst, Id id)
   , m_id(id)
   , m_srcs(m_numSrcs ? new (arena) SSATmp*[m_numSrcs] : nullptr)
   , m_dest(nullptr)
-  , m_block(nullptr)
   , m_extra(inst->m_extra ? cloneExtra(op(), inst->m_extra, arena)
                           : nullptr)
 {
@@ -79,7 +79,7 @@ std::string IRInstruction::toString() const {
 
 void IRInstruction::convertToNop() {
   if (hasEdges()) clearEdges();
-  IRInstruction nop(Nop, marker());
+  IRInstruction nop(Nop, bcctx());
   m_op           = nop.m_op;
   m_typeParam    = nop.m_typeParam;
   m_numSrcs      = nop.m_numSrcs;
@@ -334,6 +334,9 @@ Type thisReturn(const IRInstruction* inst) {
 Type ctxReturn(const IRInstruction* inst) {
   auto const func = inst->func();
   if (!func) return TCtx;
+  if (func->requiresThisInBody()) {
+    return thisReturn(inst);
+  }
   if (func->hasForeignThis()) {
     return func->isStatic() ? TCctx : TCtx;
   }
@@ -345,6 +348,12 @@ Type ctxReturn(const IRInstruction* inst) {
     return TCctx;
   }
   return thisReturn(inst) | TCctx;
+}
+
+Type ctxClsReturn(const IRInstruction* inst) {
+  auto const func = inst->func();
+  if (!func || func->hasForeignThis()) return TCls;
+  return Type::SubCls(inst->ctx());
 }
 
 Type setElemReturn(const IRInstruction* inst) {
@@ -421,6 +430,7 @@ Type outputType(const IRInstruction* inst, int dstId) {
 #define DCol            return newColReturn(inst);
 #define DThis           return thisReturn(inst);
 #define DCtx            return ctxReturn(inst);
+#define DCtxCls         return ctxClsReturn(inst);
 #define DMulti          return TBottom;
 #define DSetElem        return setElemReturn(inst);
 #define DBuiltin        return builtinReturn(inst);
@@ -456,6 +466,7 @@ Type outputType(const IRInstruction* inst, int dstId) {
 #undef DCol
 #undef DThis
 #undef DCtx
+#undef DCtxCls
 #undef DMulti
 #undef DSetElem
 #undef DBuiltin

@@ -37,14 +37,17 @@
 #include "hphp/runtime/vm/jit/code-gen-cf.h"
 #include "hphp/runtime/vm/jit/code-gen-helpers.h"
 #include "hphp/runtime/vm/jit/code-gen-tls.h"
+#include "hphp/runtime/vm/jit/debugger.h"
 #include "hphp/runtime/vm/jit/fixup.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/mcgen.h"
 #include "hphp/runtime/vm/jit/phys-reg.h"
 #include "hphp/runtime/vm/jit/phys-reg-saver.h"
+#include "hphp/runtime/vm/jit/service-request-handlers.h"
 #include "hphp/runtime/vm/jit/service-requests.h"
 #include "hphp/runtime/vm/jit/smashable-instr.h"
 #include "hphp/runtime/vm/jit/stack-offsets.h"
 #include "hphp/runtime/vm/jit/stack-overflow.h"
+#include "hphp/runtime/vm/jit/tc.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/unique-stubs-arm.h"
 #include "hphp/runtime/vm/jit/unique-stubs-ppc64.h"
@@ -123,12 +126,6 @@ void storeReturnRegs(Vout& v) {
   v << store{rret_type(), rvmsp()[TVOFF(m_type)]};
 }
 
-void loadMCG(Vout& v, Vreg d) {
-  // TODO(#8060678): Why does this need to be RIP-relative?
-  auto const imcg = reinterpret_cast<uintptr_t>(&mcg);
-  v << loadqp{reg::rip[imcg], d};
-}
-
 /*
  * Convenience wrapper around a simple vcall to `helper', with a single `arg'
  * and a return value in `d'.
@@ -152,8 +149,8 @@ template<class GenFn>
 void emitStubCatch(Vout& v, const UniqueStubs& us, GenFn gen) {
   always_assert(us.endCatchHelper);
   v << landingpad{};
-  v << stubunwind{};
   gen(v);
+  v << stubunwind{};
   v << jmpi{us.endCatchHelper};
 }
 
@@ -174,7 +171,7 @@ TCA fcallHelper(ActRec* ar) {
   assertx(!ar->resumed());
 
   if (LIKELY(!RuntimeOption::EvalFailJitPrologs)) {
-    auto const tca = mcg->getFuncPrologue(
+    auto const tca = mcgen::getFuncPrologue(
       const_cast<Func*>(ar->func()),
       ar->numArgs(),
       ar
@@ -190,7 +187,7 @@ TCA fcallHelper(ActRec* ar) {
   try {
     VMRegAnchor _(ar);
     if (doFCall(ar, vmpc())) {
-      return mcg->ustubs().resumeHelperRet;
+      return tc::ustubs().resumeHelperRet;
     }
     // We've been asked to skip the function body (fb_intercept).  The vmregs
     // have already been fixed; indicate this with a nullptr return.
@@ -235,9 +232,9 @@ TCA funcBodyHelper(ActRec* fp) {
   tl_regState = VMRegState::CLEAN;
 
   auto const func = const_cast<Func*>(fp->m_func);
-  auto tca = mcg->getFuncBody(func);
+  auto tca = mcgen::getFuncBody(func);
   if (!tca) {
-    tca = mcg->ustubs().resumeHelper;
+    tca = tc::ustubs().resumeHelper;
   }
 
   tl_regState = VMRegState::DIRTY;
@@ -382,11 +379,32 @@ TCA emitFunctionEnterHelper(CodeBlock& main, CodeBlock& cold,
 
     v << copy2{ar, v.cns(EventHook::NormalFunc), rarg(0), rarg(1)};
 
+    auto const done = v.makeBlock();
+    auto const ctch = vc.makeBlock();
+    auto const should_continue = v.makeReg();
     bool (*hook)(const ActRec*, int) = &EventHook::onFunctionCall;
-    v << call{TCA(hook), arg_regs(0), &us.functionEnterHelperReturn};
+
+    v << vinvoke{
+      CallSpec::direct(hook),
+      v.makeVcallArgs({{ar, v.cns(EventHook::NormalFunc)}}),
+      v.makeTuple({should_continue}),
+      {done, ctch},
+      Fixup{},
+      DestType::SSA
+    };
+
+    vc = ctch;
+    emitStubCatch(vc, us, [] (Vout& v) {
+      // Skip past the stuff we saved for the intercept case.
+      v << lea{rsp()[16], rsp()};
+      // Undo our stub frame, so that rvmfp() points to the parent VM frame.
+      v << load{rsp()[AROFF(m_sfp)], rvmfp()};
+    });
+
+    v = done;
 
     auto const sf = v.makeReg();
-    v << testb{rret(), rret(), sf};
+    v << testb{should_continue, should_continue, sf};
 
     unlikelyIfThen(v, vc, CC_Z, sf, [&] (Vout& v) {
       auto const saved_rip = v.makeReg();
@@ -435,7 +453,7 @@ TCA emitFunctionSurprisedOrStackOverflow(CodeBlock& main,
     v << stublogue{};
 
     auto const done = v.makeBlock();
-    auto const ctch = v.makeBlock();
+    auto const ctch = vc.makeBlock();
 
     v << vinvoke{CallSpec::direct(handlePossibleStackOverflow),
                  v.makeVcallArgs({{rvmfp()}}), v.makeTuple({}),
@@ -462,7 +480,7 @@ void loadGenFrame(Vout& v, Vreg d) {
 
   // We have to get the Generator object from the current frame's $this, then
   // load the embedded frame.
-  v << load{rvmfp()[AROFF(m_this)], gen};
+  v << load{rvmfp()[AROFF(m_thisUnsafe)], gen};
   v << lea{gen[arOff], d};
 }
 
@@ -813,26 +831,21 @@ TCA emitBindCallStub(CodeBlock& cb, DataBlock& data) {
   return vwrap(cb, data, [] (Vout& v) {
     v << phplogue{rvmfp()};
 
-    auto args = VregList { v.makeReg(), v.makeReg(),
-                           v.makeReg(), v.makeReg() };
-    loadMCG(v, args[0]);
+    auto args = VregList { v.makeReg(), v.makeReg(), v.makeReg() };
 
     // Reconstruct the address of the call from the saved RIP.
     auto const savedRIP = v.makeReg();
     auto const callLen = safe_cast<int>(smashableCallLen());
     v << load{rvmfp()[AROFF(m_savedRip)], savedRIP};
-    v << subqi{callLen, savedRIP, args[1], v.makeReg()};
+    v << subqi{callLen, savedRIP, args[0], v.makeReg()};
 
-    v << copy{rvmfp(), args[2]};
-    v << movb{v.cns(immutable), args[3]};
+    v << copy{rvmfp(), args[1]};
+    v << movb{v.cns(immutable), args[2]};
 
-    auto const handler = reinterpret_cast<void (*)()>(
-      getMethodPtr(&MCGenerator::handleBindCall)
-    );
     auto const ret = v.makeReg();
 
     v << vcall{
-      CallSpec::direct(handler),
+      CallSpec::direct(svcreq::handleBindCall),
       v.makeVcallArgs({args}),
       v.makeTuple({ret}),
       Fixup{},
@@ -886,7 +899,7 @@ TCA emitFCallArrayHelper(CodeBlock& main, CodeBlock& cold,
     v << loadstubret{retAddr};
 
     auto const done = v.makeBlock();
-    auto const ctch = v.makeBlock();
+    auto const ctch = vc.makeBlock();
     auto const should_continue = v.makeReg();
     bool (*helper)(PC, int32_t, void*) = &doFCallArrayTC;
 
@@ -899,7 +912,7 @@ TCA emitFCallArrayHelper(CodeBlock& main, CodeBlock& cold,
       DestType::SSA
     };
     vc = ctch;
-    emitStubCatch(vc, us, [] (Vout& vc) { loadVMRegs(vc); });
+    emitStubCatch(vc, us, [] (Vout& v) { loadVMRegs(v); });
 
     v = done;
 
@@ -954,16 +967,13 @@ ResumeHelperEntryPoints emitResumeHelpers(CodeBlock& cb, DataBlock& data) {
     v << phplogue{rvmfp()};
   });
   rh.resumeHelper = vwrap(cb, data, [] (Vout& v) {
-    v << ldimmb{0, rarg(1)};
+    v << ldimmb{0, rarg(0)};
   });
 
   rh.handleResume = vwrap(cb, data, [] (Vout& v) {
     v << load{rvmtl()[rds::kVmfpOff], rvmfp()};
-    loadMCG(v, rarg(0));
 
-    auto const handler = reinterpret_cast<TCA>(
-      getMethodPtr(&MCGenerator::handleResume)
-    );
+    auto const handler = reinterpret_cast<TCA>(svcreq::handleResume);
     v << call{handler, arg_regs(2)};
   });
 
@@ -995,17 +1005,14 @@ TCA emitResumeInterpHelpers(CodeBlock& cb, DataBlock& data, UniqueStubs& us,
   });
   us.interpHelperSyncedPC = vwrap(cb, data, [&] (Vout& v) {
     storeVMRegs(v);
-    v << ldimmb{1, rarg(1)};
-    v << jmpi{rh.handleResume, RegSet(rarg(1))};
+    v << ldimmb{1, rarg(0)};
+    v << jmpi{rh.handleResume, RegSet(rarg(0))};
   });
 
   us.fcallAwaitSuspendHelper = vwrap(cb, data, [&] (Vout& v) {
     v << load{rvmtl()[rds::kVmfpOff], rvmfp()};
-    loadMCG(v, rarg(0));
 
-    auto const handler = reinterpret_cast<TCA>(
-      getMethodPtr(&MCGenerator::handleFCallAwaitSuspend)
-    );
+    auto const handler = reinterpret_cast<TCA>(svcreq::handleFCallAwaitSuspend);
     v << call{handler, arg_regs(2)};
     v << jmpi{rh.reenterTC, RegSet()};
   });
@@ -1229,16 +1236,14 @@ TCA emitHandleSRHelper(CodeBlock& cb, DataBlock& data) {
     }
 
     // Call mcg->handleServiceRequest(rsp()).
-    auto const args = VregList { v.makeReg(), v.makeReg() };
-    loadMCG(v, args[0]);
-    v << copy{rsp(), args[1]};
+    auto const sp = v.makeReg();
+    v << copy{rsp(), sp};
 
-    auto const meth = &MCGenerator::handleServiceRequest;
     auto const ret = v.makeReg();
 
     v << vcall{
-      CallSpec::method(meth),
-      v.makeVcallArgs({args}),
+      CallSpec::direct(svcreq::handleServiceRequest),
+      v.makeVcallArgs({{sp}}),
       v.makeTuple({ret}),
       Fixup{},
       DestType::SSA
@@ -1297,7 +1302,7 @@ TCA emitEndCatchHelper(CodeBlock& cb, DataBlock& data, UniqueStubs& us) {
     // the catch trace (or null) in the first return register, and the new vmfp
     // in the second.
     v << copy{rvmfp(), rarg(0)};
-    v << call{TCA(tc_unwind_resume)};
+    v << call{TCA(tc_unwind_resume), arg_regs(1)};
     v << copy{rret(1), rvmfp()};
 
     auto const done2 = v.makeBlock();
@@ -1324,12 +1329,7 @@ TCA emitThrowSwitchMode(CodeBlock& cb, DataBlock& data) {
 
 }
 
-///////////////////////////////////////////////////////////////////////////////
-
 void UniqueStubs::emitAll(CodeCache& code, Debug::DebugInfo& dbg) {
-  auto codeLock = mcg->lockCode();
-  auto metaLock = mcg->lockMetadata();
-
   auto view = code.view();
   auto& main = view.main();
   auto& cold = view.cold();
@@ -1471,7 +1471,7 @@ void emitInterpReq(Vout& v, SrcKey sk, FPInvOffset spOff) {
     v << lea{rvmfp()[-cellsToBytes(spOff.offset)], rvmsp()};
   }
   v << copy{v.cns(sk.pc()), rarg(0)};
-  v << jmpi{mcg->ustubs().interpHelper, arg_regs(1)};
+  v << jmpi{tc::ustubs().interpHelper, arg_regs(1)};
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1481,7 +1481,7 @@ void enterTCImpl(TCA start, ActRec* stashedAR) {
   // register (aside from rvmfp()), since enterTCHelper does not save them.
   CALLEE_SAVED_BARRIER();
   auto& regs = vmRegsUnsafe();
-  mcg->ustubs().enterTCHelper(regs.stack.top(), regs.fp, start,
+  tc::ustubs().enterTCHelper(regs.stack.top(), regs.fp, start,
                               vmFirstAR(), rds::tl_base, stashedAR);
   CALLEE_SAVED_BARRIER();
 }

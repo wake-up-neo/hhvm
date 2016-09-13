@@ -14,14 +14,14 @@ module SyntaxKind = Full_fidelity_syntax_kind
 module TokenKind = Full_fidelity_token_kind
 module SourceText = Full_fidelity_source_text
 module SyntaxError = Full_fidelity_syntax_error
-module TypeParser = Full_fidelity_type_parser
 module SimpleParser = Full_fidelity_simple_parser.WithLexer(Full_fidelity_lexer)
 
 open TokenKind
 open Syntax
 
-module WithExpressionParser
-  (ExpressionParser : Full_fidelity_expression_parser_type.ExpressionParserType) :
+module WithExpressionAndTypeParser
+  (ExpressionParser : Full_fidelity_expression_parser_type.ExpressionParserType)
+  (TypeParser : Full_fidelity_type_parser_type.TypeParserType) :
   Full_fidelity_statement_parser_type.StatementParserType = struct
 
   include SimpleParser
@@ -286,16 +286,40 @@ module WithExpressionParser
     (parser, syntax)
 
   and parse_break_statement parser =
+    (* SPEC
+    break-statement:
+      break  ;
+
+    However, PHP allows an optional expression; though Hack does not have
+    this feature, we allow it at parse time and produce an error later.
+    TODO: Implement that error. *)
+
     (* We detect if we are not inside a switch or loop in a later pass. *)
     let (parser, break_token) = assert_token parser Break in
+    let (parser, level) =
+      if peek_token_kind parser = Semicolon then (parser, (make_missing()))
+      else parse_expression parser in
     let (parser, semi_token) = expect_semicolon parser in
-    (parser, make_break_statement break_token semi_token)
+    let result = make_break_statement break_token level semi_token in
+    (parser, result)
 
   and parse_continue_statement parser =
+    (* SPEC
+    continue-statement:
+      continue  ;
+
+    However, PHP allows an optional expression; though Hack does not have
+    this feature, we allow it at parse time and produce an error later.
+    TODO: Implement that error. *)
+
     (* We detect if we are not inside a loop in a later pass. *)
     let (parser, continue_token) = assert_token parser Continue in
+    let (parser, level) =
+      if peek_token_kind parser = Semicolon then (parser, (make_missing()))
+      else parse_expression parser in
     let (parser, semi_token) = expect_semicolon parser in
-    (parser, make_continue_statement continue_token semi_token)
+    let result = make_continue_statement continue_token level semi_token in
+    (parser, result)
 
   and parse_return_statement parser =
     let (parser, return_token) = assert_token parser Return in

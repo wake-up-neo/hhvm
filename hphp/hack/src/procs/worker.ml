@@ -145,7 +145,9 @@ let slave_main ic oc =
   | e ->
       let e_str = Printexc.to_string e in
       Printf.printf "Exception: %s\n" e_str;
-      EventLogger.worker_exception e_str;
+      EventLogger.log_if_initialized (fun () ->
+        EventLogger.worker_exception e_str
+      );
       print_endline "Potential backtrace:";
       Printexc.print_backtrace stdout;
       exit 2
@@ -177,11 +179,7 @@ let unix_worker_main restore state (ic, oc) =
           | Unix.WEXITED code ->
               Printf.printf "Worker exited (code: %d)\n" code;
               flush stdout;
-
-              (* Propagate out of memory exit codes *)
-              if code = Exit_status.(exit_code Out_of_shared_memory)
-              then Exit_status.(exit Out_of_shared_memory)
-              else raise End_of_file
+              Pervasives.exit code
           | Unix.WSIGNALED x ->
               let sig_str = PrintSignal.string_of_signal x in
               Printf.printf "Worker interrupted with signal: %s\n" sig_str;
@@ -267,7 +265,8 @@ let call w (type a) (type b) (f : a -> b) (x : a) : b handle =
     | _, Unix.WEXITED i when i = Exit_status.(exit_code Out_of_shared_memory) ->
         raise SharedMem.Out_of_shared_memory
     | _, Unix.WEXITED i ->
-        Printf.ksprintf failwith "Subprocess(%d): fail %d" slave_pid i
+        Printf.eprintf "Subprocess(%d): fail %d" slave_pid i;
+        Pervasives.exit i
     | _, Unix.WSTOPPED i ->
         Printf.ksprintf failwith "Subprocess(%d): stopped %d" slave_pid i
     | _, Unix.WSIGNALED i ->

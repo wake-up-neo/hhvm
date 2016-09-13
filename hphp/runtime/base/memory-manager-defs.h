@@ -21,12 +21,14 @@
 #include "hphp/runtime/base/mixed-array-defs.h"
 #include "hphp/runtime/base/packed-array-defs.h"
 #include "hphp/runtime/base/proxy-array.h"
+#include "hphp/runtime/base/set-array.h"
 #include "hphp/runtime/vm/globals-array.h"
 #include "hphp/runtime/vm/native-data.h"
 #include "hphp/runtime/vm/resumable.h"
 
 #include "hphp/runtime/ext/asio/ext_asio.h"
 #include "hphp/runtime/ext/asio/ext_await-all-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_async-function-wait-handle.h"
 #include "hphp/runtime/ext/collections/ext_collections-pair.h"
 #include "hphp/runtime/ext/collections/ext_collections-vector.h"
 #include "hphp/runtime/ext/collections/hash-collection.h"
@@ -58,29 +60,31 @@ struct Header {
   }
 
   const Resumable* resumable() const {
-    assert(kind() == HeaderKind::ResumableFrame);
+    assert(kind() == HeaderKind::AsyncFuncFrame);
     return reinterpret_cast<const Resumable*>(
-      (char*)this + sizeof(ResumableNode) + resumable_.framesize
+      (const char*)this + native_.obj_offset - sizeof(Resumable)
     );
   }
   Resumable* resumable() {
-    assert(kind() == HeaderKind::ResumableFrame);
+    assert(kind() == HeaderKind::AsyncFuncFrame);
     return reinterpret_cast<Resumable*>(
-      (char*)this + sizeof(ResumableNode) + resumable_.framesize
+      (char*)this + native_.obj_offset - sizeof(Resumable)
     );
   }
-  const ObjectData* resumableObj() const {
-    DEBUG_ONLY auto const func = resumable()->actRec()->func();
-    assert(func->isAsyncFunction());
-    auto obj = reinterpret_cast<const ObjectData*>(resumable() + 1);
-    assert(obj->headerKind() == HeaderKind::ResumableObj);
+  const ObjectData* asyncFuncWH() const {
+    assert(resumable()->actRec()->func()->isAsyncFunction());
+    auto obj = reinterpret_cast<const ObjectData*>(
+      (const char*)this + native_.obj_offset
+    );
+    assert(obj->headerKind() == HeaderKind::AsyncFuncWH);
     return obj;
   }
-  ObjectData* resumableObj() {
-    DEBUG_ONLY auto const func = resumable()->actRec()->func();
-    assert(func->isAsyncFunction());
-    auto obj = reinterpret_cast<ObjectData*>(resumable() + 1);
-    assert(obj->headerKind() == HeaderKind::ResumableObj);
+  ObjectData* asyncFuncWH() {
+    assert(resumable()->actRec()->func()->isAsyncFunction());
+    auto obj = reinterpret_cast<ObjectData*>(
+      (char*)this + native_.obj_offset
+    );
+    assert(obj->headerKind() == HeaderKind::AsyncFuncWH);
     return obj;
   }
   const ObjectData* nativeObj() const {
@@ -100,7 +104,7 @@ struct Header {
   // return the (possibly inner ptr) ObjectData*
   const ObjectData* obj() const {
     return isObjectKind(kind()) ? &obj_ :
-           kind() == HeaderKind::ResumableFrame ? resumableObj() :
+           kind() == HeaderKind::AsyncFuncFrame ? asyncFuncWH() :
            kind() == HeaderKind::NativeData ? nativeObj() :
            nullptr;
   }
@@ -114,6 +118,7 @@ public:
     StringData str_;
     ArrayData arr_;
     MixedArray mixed_;
+    SetArray set_;
     APCLocalArray apc_;
     ProxyArray proxy_;
     GlobalsArray globals_;
@@ -125,7 +130,6 @@ public:
     RefData ref_;
     MallocNode malloc_;
     FreeNode free_;
-    ResumableNode resumable_;
     NativeNode native_;
     c_AwaitAllWaitHandle awaitall_;
   };
@@ -138,8 +142,9 @@ inline size_t Header::size() const {
       return PackedArray::heapSize(&arr_);
     case HeaderKind::Mixed:
     case HeaderKind::Dict:
-    case HeaderKind::Keyset:
       return mixed_.heapSize();
+    case HeaderKind::Keyset:
+      return set_.heapSize();
     case HeaderKind::Empty:
       return sizeof(ArrayData);
     case HeaderKind::Apc:
@@ -151,7 +156,7 @@ inline size_t Header::size() const {
     case HeaderKind::String:
       return str_.heapSize();
     case HeaderKind::Object:
-    case HeaderKind::ResumableObj:
+    case HeaderKind::AsyncFuncWH:
       // [ObjectData][subclass][props]
       return obj_.heapSize();
     case HeaderKind::Vector:
@@ -178,10 +183,9 @@ inline size_t Header::size() const {
     case HeaderKind::BigMalloc:   // [MallocNode][bytes...]
     case HeaderKind::BigObj:      // [MallocNode][Header...]
       return malloc_.nbytes;
-    case HeaderKind::ResumableFrame:
-      // Async functions -
-      // [ResumableNode][locals][Resumable][ObjectData<WaitHandle>]
-      return resumable()->size();
+    case HeaderKind::AsyncFuncFrame:
+      // [NativeNode][locals][Resumable][c_AsyncFunctionWaitHandle]
+      return native_.obj_offset + sizeof(c_AsyncFunctionWaitHandle);
     case HeaderKind::NativeData:
       // [NativeNode][NativeData][ObjectData][props] is one allocation.
       // Generators -
@@ -268,7 +272,7 @@ template<class Fn> void MemoryManager::forEachObject(Fn fn) {
     switch (h->kind()) {
       case HeaderKind::Object:
       case HeaderKind::WaitHandle:
-      case HeaderKind::ResumableObj:
+      case HeaderKind::AsyncFuncWH:
       case HeaderKind::AwaitAllWH:
       case HeaderKind::Vector:
       case HeaderKind::Map:
@@ -279,8 +283,8 @@ template<class Fn> void MemoryManager::forEachObject(Fn fn) {
       case HeaderKind::ImmSet:
         ptrs.push_back(&h->obj_);
         break;
-      case HeaderKind::ResumableFrame:
-        ptrs.push_back(h->resumableObj());
+      case HeaderKind::AsyncFuncFrame:
+        ptrs.push_back(h->asyncFuncWH());
         break;
       case HeaderKind::NativeData:
         ptrs.push_back(h->nativeObj());

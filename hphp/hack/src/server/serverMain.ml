@@ -18,8 +18,6 @@ type recheck_loop_stats = {
   rechecked_count : int;
   (* includes dependencies *)
   total_rechecked_count : int;
-  reparsed_files : Relative_path.Set.t;
-  check_later : SSet.t;
 }
 
 type main_loop_stats = recheck_loop_stats ref * string ref
@@ -28,9 +26,9 @@ let empty_recheck_loop_stats = {
   rechecked_batches = 0;
   rechecked_count = 0;
   total_rechecked_count = 0;
-  reparsed_files = Relative_path.Set.empty;
-  check_later = SSet.empty;
 }
+
+let get_rechecked_count (stats_ref, _) = !stats_ref.rechecked_count
 
 (*****************************************************************************)
 (* Main initialization *)
@@ -65,6 +63,7 @@ module Program =
          be 'restored' in the workers, because they are not 'forked'
          anymore. See `ServerWorker.{save/restore}_state`. *)
       HackSearchService.attach_hooks ();
+
       Sys_utils.set_signal Sys.sigusr1
         (Sys.Signal_handle Typing.debug_print_last_pos);
       Sys_utils.set_signal Sys.sigusr2
@@ -92,7 +91,25 @@ module Program =
       (* Because of symlinks, we can have updates from files that aren't in
        * the .hhconfig directory *)
       let updates = SSet.filter updates (fun p -> string_starts_with p root) in
-      Relative_path.(relativize_set Root updates)
+      let updates = Relative_path.(relativize_set Root updates) in
+      let to_recheck =
+        Relative_path.Set.filter updates begin fun update ->
+          ServerEnv.file_filter (Relative_path.suffix update)
+        end in
+      let config_in_updates =
+        Relative_path.Set.mem updates ServerConfig.filename in
+      if config_in_updates then begin
+        let new_config, _ = ServerConfig.(load filename genv.options) in
+        if not (ServerConfig.is_compatible genv.config new_config) then begin
+          Hh_logger.log
+            "%s changed in an incompatible way; please restart %s.\n"
+            (Relative_path.suffix ServerConfig.filename)
+            GlobalConfig.program_name;
+           (** TODO: Notify the server monitor directly about this. *)
+           Exit_status.(exit Hhconfig_changed)
+        end;
+      end;
+      to_recheck
 
     let recheck genv old_env typecheck_updates =
       if Relative_path.Set.is_empty typecheck_updates then
@@ -104,14 +121,6 @@ module Program =
         let new_env, total_rechecked = ServerTypeCheck.check genv check_env in
         ServerStamp.touch_stamp_errors (Errors.get_error_list old_env.errorl)
                                        (Errors.get_error_list new_env.errorl);
-        if not @@ Diagnostic_subscription.is_empty new_env.diag_subscribe
-        then begin
-          let id = Diagnostic_subscription.get_id new_env.diag_subscribe in
-          let errors_json = ServerError.get_errorl_json_array new_env.errorl in
-          let res = IdeJson.Diagnostic_response (id, errors_json) in
-          let fd = ServerCommand.get_persistent_fds new_env in
-          ServerCommand.send_response_to_client fd res;
-        end;
         new_env, total_rechecked
       end
 
@@ -126,7 +135,7 @@ let handle_connection_ genv env client =
   try
     match ClientProvider.read_connection_type client with
     | Persistent ->
-      (match env.persistent_client_fd with
+      (match env.persistent_client with
       | Some _ ->
         ClientProvider.send_response_to_client client
           Persistent_client_alredy_exists;
@@ -134,9 +143,8 @@ let handle_connection_ genv env client =
       | None ->
         ClientProvider.send_response_to_client client
           Persistent_client_connected;
-        let ic, _ = ClientProvider.get_channels client in
-        { env with persistent_client_fd =
-          Some (Timeout.descr_of_in_channel ic)})
+        { env with persistent_client =
+            Some (ClientProvider.make_persistent client)})
     | Non_persistent ->
       ServerCommand.handle genv env client
   with
@@ -158,9 +166,9 @@ let handle_persistent_connection_ genv env client =
    | Sys_error("Broken pipe") | ServerCommandTypes.Read_command_timeout ->
      ClientProvider.shutdown_client client;
      {env with
-     persistent_client_fd = None;
-     edited_files = SMap.empty;
-     diag_subscribe = Diagnostic_subscription.empty;
+     persistent_client = None;
+     edited_files = Relative_path.Map.empty;
+     diag_subscribe = None;
      symbols_cache = SMap.empty}
    | e ->
      let msg = Printexc.to_string e in
@@ -169,9 +177,9 @@ let handle_persistent_connection_ genv env client =
      Printexc.print_backtrace stderr;
      ClientProvider.shutdown_client client;
      {env with
-     persistent_client_fd = None;
-     edited_files = SMap.empty;
-     diag_subscribe = Diagnostic_subscription.empty;
+     persistent_client = None;
+     edited_files = Relative_path.Map.empty;
+     diag_subscribe = None;
      symbols_cache = SMap.empty}
 
 let handle_connection genv env client is_persistent =
@@ -191,26 +199,8 @@ let handle_connection genv env client is_persistent =
      flush stderr;
      env
 
-let recheck genv old_env updates =
-  let to_recheck =
-    Relative_path.Set.filter updates begin fun update ->
-      ServerEnv.file_filter (Relative_path.suffix update)
-    end in
-  let config_in_updates =
-    Relative_path.Set.mem updates ServerConfig.filename in
-  if config_in_updates then begin
-    let new_config = ServerConfig.(load filename genv.options) in
-    if not (ServerConfig.is_compatible genv.config new_config) then begin
-      Hh_logger.log
-        "%s changed in an incompatible way; please restart %s.\n"
-        (Relative_path.suffix ServerConfig.filename)
-        GlobalConfig.program_name;
-       (** TODO: Notify the server monitor directly about this. *)
-       Exit_status.(exit Hhconfig_changed)
-    end;
-  end;
+let recheck genv old_env to_recheck =
   let env, total_rechecked = Program.recheck genv old_env to_recheck in
-  BuildMain.incremental_update genv old_env env updates;
   env, to_recheck, total_rechecked
 
 (* When a rebase occurs, dfind takes a while to give us the full list of
@@ -222,26 +212,24 @@ let recheck genv old_env updates =
 let rec recheck_loop acc genv env =
   let t = Unix.gettimeofday () in
   let raw_updates = genv.notifier () in
-  let check_later, raw_updates = match acc.rechecked_batches with
-  | 0 ->
-    let check_later, check_now = SSet.partition (fun s ->
-      File_content.being_edited @@ SMap.find_unsafe s env.edited_files)
-      env.files_to_check in
-    check_later, SSet.union raw_updates check_now
-  | _ -> acc.check_later, raw_updates in
-  if SSet.is_empty raw_updates then
-    acc, { env with files_to_check = check_later }
+
+  let is_idle = t -. env.last_command_time > 0.5 in
+
+  let disk_recheck = not (SSet.is_empty raw_updates) in
+  let ide_recheck =
+    (not @@ Relative_path.Set.is_empty env.files_to_check) && is_idle in
+  if (not disk_recheck) && (not ide_recheck) then
+    acc, env
   else begin
     HackEventLogger.notifier_returned t (SSet.cardinal raw_updates);
     let updates = Program.process_updates genv env raw_updates in
+    let updates = Relative_path.Set.union updates env.files_to_check in
     let env, rechecked, total_rechecked = recheck genv env updates in
     let acc = {
       rechecked_batches = acc.rechecked_batches + 1;
       rechecked_count =
         acc.rechecked_count + Relative_path.Set.cardinal rechecked;
       total_rechecked_count = acc.total_rechecked_count + total_rechecked;
-      reparsed_files = Relative_path.Set.union updates acc.reparsed_files;
-      check_later;
     } in
     recheck_loop acc genv env
   end
@@ -251,9 +239,8 @@ let recheck_loop = recheck_loop empty_recheck_loop_stats
 let serve_one_iteration genv env client_provider stats_refs =
   let last_stats, recheck_id = stats_refs in
   ServerMonitorUtils.exit_if_parent_dead ();
-  let per_fd = env.persistent_client_fd in
   let has_client, has_persistent =
-    ClientProvider.sleep_and_check client_provider per_fd in
+    ClientProvider.sleep_and_check client_provider env.persistent_client in
   let has_parsing_hook = !ServerTypeCheck.hook_after_parsing <> None in
   if not has_persistent && not has_client && not has_parsing_hook
   then begin
@@ -279,6 +266,21 @@ let serve_one_iteration genv env client_provider stats_refs =
       stats.total_rechecked_count;
     Hh_logger.log "Recheck id: %s" !recheck_id;
   end;
+
+  Option.iter env.diag_subscribe ~f:begin fun sub ->
+    let id = Diagnostic_subscription.get_id sub in
+    let errors = Diagnostic_subscription.get_absolute_errors sub in
+    if not @@ SMap.is_empty errors then begin
+      let res = ServerCommandTypes.DIAGNOSTIC (id, errors) in
+      let client = Utils.unsafe_opt env.persistent_client in
+      ClientProvider.send_push_message_to_client client res
+    end
+  end;
+
+  let env = { env with diag_subscribe =
+    Option.map env.diag_subscribe ~f:Diagnostic_subscription.clear }
+  in
+
   last_stats := stats;
   let env = if has_client then
     (try
@@ -301,10 +303,7 @@ let serve_one_iteration genv env client_provider stats_refs =
       env)
   else env in
   if has_persistent then
-    let fd = ServerCommand.get_persistent_fds env in
-    let ic, oc =
-      Timeout.in_channel_of_descr fd, Unix.out_channel_of_descr fd in
-    let client = ClientProvider.client_from_channel_pair (ic, oc) in
+    let client = Utils.unsafe_opt env.persistent_client in
     HackEventLogger.got_persistent_client_channels start_t;
     (try
       let env = handle_connection genv env client true in
@@ -361,16 +360,17 @@ let setup_server options handle =
    * overhead *)
   let gc_control = Gc.get () in
   Gc.set {gc_control with Gc.max_overhead = 200};
-  let config = ServerConfig.(load filename options) in
+  let config, local_config = ServerConfig.(load filename options) in
   let {ServerLocalConfig.
     cpu_priority;
     io_priority;
     enable_on_nfs;
+    lazy_decl;
     _
-  } as local_config = ServerLocalConfig.load () in
+  } as local_config = local_config in
   if Sys_utils.is_test_mode ()
   then EventLogger.init (Daemon.devnull ()) 0.0
-  else HackEventLogger.init root (Unix.gettimeofday ());
+  else HackEventLogger.init root (Unix.gettimeofday ()) lazy_decl;
   let root_s = Path.to_string root in
   if Sys_utils.is_nfs root_s && not enable_on_nfs then begin
     Hh_logger.log "Refusing to run on %s: root is on NFS!" root_s;
@@ -403,9 +403,12 @@ let run_once options handle =
  * The server monitor will pass client connections to this process
  * via ic.
  *)
-let daemon_main_exn (handle, options) (ic, oc) =
+let daemon_main_exn options (ic, oc) =
   let in_fd = Daemon.descr_of_in_channel ic in
   let out_fd = Daemon.descr_of_out_channel oc in
+  let config, _ = ServerConfig.(load filename options) in
+  let handle = SharedMem.init (ServerConfig.sharedmem_config config) in
+  SharedMem.connect handle ~is_master:true;
 
   let genv = setup_server options handle in
   if ServerArgs.check_mode genv.options then
@@ -414,12 +417,10 @@ let daemon_main_exn (handle, options) (ic, oc) =
   let env = MainInit.go options (fun () -> program_init genv) in
   serve genv env in_fd out_fd
 
-let daemon_main (state, handle, options) (ic, oc) =
-  (* Even though the server monitor set up the shared memory, the server daemon
-   * is master here *)
-  SharedMem.connect handle ~is_master:true;
+let daemon_main (state, options) (ic, oc) =
+  (* Restore the root directory and other global states from monitor *)
   ServerGlobalState.restore state;
-  try daemon_main_exn (handle, options) (ic, oc)
+  try daemon_main_exn options (ic, oc)
   with
   | SharedMem.Out_of_shared_memory ->
     ServerInit.print_hash_stats ();

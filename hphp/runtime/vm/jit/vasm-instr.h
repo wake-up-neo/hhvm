@@ -35,7 +35,10 @@
 #include "hphp/util/data-block.h"
 #include "hphp/util/immed.h"
 
+#include <limits>
+
 namespace HPHP { namespace jit {
+
 ///////////////////////////////////////////////////////////////////////////////
 
 struct IRInstruction;
@@ -191,7 +194,7 @@ struct Vunit;
   O(cmpbim, I(s0), U(s1), D(sf))\
   O(cmpbm, Inone, U(s0) U(s1), D(sf))\
   O(cmpwim, I(s0), U(s1), D(sf))\
-  O(cmpwm, Inone, U(s0) U(s1), D(sf))           \
+  O(cmpwm, Inone, U(s0) U(s1), D(sf))\
   O(cmpl, Inone, U(s0) U(s1), D(sf))\
   O(cmpli, I(s0), U(s1), D(sf))\
   O(cmplm, Inone, U(s0) U(s1), D(sf))\
@@ -292,6 +295,7 @@ struct Vunit;
   O(cmplims, I(s0), U(s1), D(sf))\
   O(cmpsds, I(pred), UA(s0) U(s1), D(d))\
   O(fabs, Inone, U(s), D(d))\
+  O(fcvtzs, Inone, U(s), D(d))\
   O(lslwi, I(s0), UH(s1,d), DH(d,s1))\
   O(lslwis, I(s0), U(s1) U(d), D(df) D(sf))\
   O(lslxi, I(s0), UH(s1,d), DH(d,s1))\
@@ -1126,6 +1130,7 @@ struct bln {};
 struct cmplims { Immed s0; Vptr s1; VregSF sf; };
 struct cmpsds { ComparisonPred pred; VregDbl s0, s1, d; VregSF sf; };
 struct fabs { VregDbl s, d; };
+struct fcvtzs { VregDbl s; Vreg64 d;};
 struct lslwi { Immed s0; Vreg32 s1, d; };
 struct lslwis { Immed s0; Vreg32 s1, d, df; VregSF sf; };
 struct lslxi { Immed s0; Vreg64 s1, d; };
@@ -1171,15 +1176,34 @@ struct Vinstr {
   enum Opcode : uint8_t { VASM_OPCODES };
 #undef O
 
+  /*
+   * Helper struct for transferring the IR context of a Vinstr during
+   * optimization passes.
+   */
+  struct ir_context {
+    const IRInstruction* origin;
+    uint8_t voff;
+  };
+
+  static constexpr auto kInvalidVoff = std::numeric_limits<uint8_t>::max();
+
+  /////////////////////////////////////////////////////////////////////////////
+
   Vinstr() : op(ud2) {}
 
-#define O(name, imms, uses, defs)               \
-  /* implicit */ Vinstr(jit::name i) : op(name), name##_(i) {}
+#define O(name, imms, uses, defs) \
+  /* implicit */ Vinstr(jit::name i, ir_context ctx = ir_context{}) \
+    : op(name)                    \
+    , voff(ctx.voff)              \
+    , origin(ctx.origin)          \
+    , name##_(i)                  \
+  {}
   VASM_OPCODES
 #undef O
 
   /*
-   * Define an operator= for all instructions to preserve origin and pos.
+   * Define an assignment operator for all instructions that preserves origin,
+   * voff, and pos.
    */
 #define O(name, ...)                            \
   Vinstr& operator=(const jit::name& i) {       \
@@ -1213,10 +1237,28 @@ struct Vinstr {
     return op_matcher<op>::get(*this);
   }
 
+  /*
+   * Get and set the IR "context" members.
+   */
+  ir_context irctx() const {
+    return ir_context { origin, voff };
+  }
+  void set_irctx(ir_context ctx) {
+    origin = ctx.origin;
+    voff = ctx.voff;
+  }
+
   /////////////////////////////////////////////////////////////////////////////
   // Data members.
 
   Opcode op;
+
+  /*
+   * The index of this instruction within the code for `origin'.
+   */
+  uint8_t voff;
+
+  // 2-byte hole here.
 
   /*
    * Instruction position, currently used only in vasm-xls.
@@ -1288,6 +1330,7 @@ bool isBlockEnd(const Vinstr& inst);
 Width width(Vinstr::Opcode op);
 
 ///////////////////////////////////////////////////////////////////////////////
+
 }}
 
 #endif

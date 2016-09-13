@@ -16,12 +16,54 @@
 
 #include "hphp/runtime/vm/jit/cg-meta.h"
 
-#include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/debug/debug.h"
+#include "hphp/runtime/vm/jit/code-cache.h"
+#include "hphp/runtime/vm/jit/fixup.h"
 #include "hphp/runtime/vm/jit/prof-data.h"
+#include "hphp/runtime/vm/jit/tc.h"
+#include "hphp/runtime/vm/tread-hash-map.h"
 
 namespace HPHP { namespace jit {
 
 TRACE_SET_MOD(mcg);
+
+namespace {
+// Map from integral literals to their location in the TC data section.
+using LiteralMap = TreadHashMap<uint64_t,const uint64_t*,std::hash<uint64_t>>;
+LiteralMap s_literals{128};
+
+// Landingpads for TC catch traces; used by the unwinder.
+using CatchTraceMap = TreadHashMap<uint32_t, uint32_t, std::hash<uint32_t>>;
+CatchTraceMap s_catchTraceMap{128};
+
+constexpr uint32_t kInvalidCatchTrace = 0x0;
+}
+
+const uint64_t* addrForLiteral(uint64_t val) {
+  if (auto it = s_literals.find(val)) {
+    assertx(**it == val);
+    return *it;
+  }
+  return nullptr;
+}
+
+size_t numCatchTraces() {
+  return s_catchTraceMap.size();
+}
+
+void eraseCatchTrace(CTCA addr) {
+  if (auto ct = s_catchTraceMap.find(tc::addrToOffset(addr))) {
+    *ct = kInvalidCatchTrace;
+  }
+}
+
+folly::Optional<TCA> getCatchTrace(CTCA ip) {
+  auto const found = s_catchTraceMap.find(tc::addrToOffset(ip));
+  if (found && *found != kInvalidCatchTrace) return tc::offsetToAddr(*found);
+  return folly::none;
+}
+
+////////////////////////////////////////////////////////////////////////////////
 
 void CGMeta::setJmpTransID(TCA jmp, TransID transID, TransKind kind) {
   if (kind != TransKind::Profile) return;
@@ -40,22 +82,21 @@ void CGMeta::process(
 void CGMeta::process_only(
   GrowableVector<IncomingBranch>* inProgressTailBranches
 ) {
-  mcg->assertOwnsMetadataLock();
+  tc::assertOwnsMetadataLock();
 
   for (auto const& pair : fixups) {
-    assertx(mcg->code().isValidCodeAddress(pair.first));
-    mcg->fixupMap().recordFixup(pair.first, pair.second);
+    assertx(tc::isValidCodeAddress(pair.first));
+    FixupMap::recordFixup(pair.first, pair.second);
   }
   fixups.clear();
 
-  auto& ctm = mcg->catchTraceMap();
   for (auto const& pair : catches) {
-    auto const key = mcg->code().toOffset(pair.first);
-    auto const val = mcg->code().toOffset(pair.second);
-    if (auto pos = ctm.find(key)) {
+    auto const key = tc::addrToOffset(pair.first);
+    auto const val = tc::addrToOffset(pair.second);
+    if (auto pos = s_catchTraceMap.find(key)) {
       *pos = val;
     } else {
-      ctm.insert(key, val);
+      s_catchTraceMap.insert(key, val);
     }
   }
   catches.clear();
@@ -68,8 +109,8 @@ void CGMeta::process_only(
   jmpTransIDs.clear();
 
   for (auto& pair : literals) {
-    if (mcg->literals().find(pair.first)) continue;
-    mcg->literals().insert(pair.first, pair.second);
+    if (s_literals.find(pair.first)) continue;
+    s_literals.insert(pair.first, pair.second);
   }
   literals.clear();
 
@@ -79,7 +120,7 @@ void CGMeta::process_only(
   assertx(inProgressTailJumps.empty());
 
   for (auto& stub : reusedStubs) {
-    mcg->debugInfo()->recordRelocMap(stub, nullptr, "NewStub");
+    Debug::DebugInfo::Get()->recordRelocMap(stub, nullptr, "NewStub");
   }
   reusedStubs.clear();
 }

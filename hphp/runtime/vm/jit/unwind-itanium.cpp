@@ -23,10 +23,13 @@
 #include "hphp/runtime/vm/member-operations.h"
 #include "hphp/runtime/vm/vm-regs.h"
 
+#include "hphp/runtime/vm/jit/cg-meta.h"
+#include "hphp/runtime/vm/jit/code-cache.h"
+#include "hphp/runtime/vm/jit/debugger.h"
 #include "hphp/runtime/vm/jit/fixup.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/service-requests.h"
 #include "hphp/runtime/vm/jit/smashable-instr.h"
+#include "hphp/runtime/vm/jit/tc.h"
 #include "hphp/runtime/vm/jit/unique-stubs.h"
 
 #include "hphp/util/abi-cxx.h"
@@ -81,7 +84,7 @@ void sync_regstate(_Unwind_Context* context) {
   fakeAR.m_savedRip = ip;
 
   Stats::inc(Stats::TC_SyncUnwind);
-  mcg->fixupMap().fixupWork(g_context.getNoCheck(), &fakeAR);
+  FixupMap::fixupWork(g_context.getNoCheck(), &fakeAR);
   tl_regState = VMRegState::CLEAN;
   FTRACE(2, "synced vmfp {}, vmsp {}, vmpc {}\n", vmfp(), vmsp(), vmpc());
 }
@@ -95,7 +98,7 @@ void sync_regstate(_Unwind_Context* context) {
  * is very bad---and we abort in this case.
  */
 TCA lookup_catch_trace(TCA rip, _Unwind_Exception* exn) {
-  if (auto catchTraceOpt = mcg->getCatchTrace(rip)) {
+  if (auto catchTraceOpt = getCatchTrace(rip)) {
     if (auto catchTrace = *catchTraceOpt) return catchTrace;
 
     // FIXME: This assumes that smashable calls and regular calls look the
@@ -254,13 +257,9 @@ tc_unwind_personality(int version,
 
     assert(g_unwind_rds.isInit());
 
-    auto& stubs = mcg->ustubs();
+    auto& stubs = tc::ustubs();
     if (ip == stubs.endCatchHelperPast) {
       FTRACE(1, "rip == endCatchHelperPast, continuing unwind\n");
-      return _URC_CONTINUE_UNWIND;
-    }
-    if (ip == stubs.functionEnterHelperReturn) {
-      FTRACE(1, "rip == functionEnterHelperReturn, continuing unwind\n");
       return _URC_CONTINUE_UNWIND;
     }
 
@@ -278,43 +277,53 @@ tc_unwind_personality(int version,
 
 TCUnwindInfo tc_unwind_resume(ActRec* fp) {
   while (true) {
-    auto const newFp = fp->m_sfp;
+    auto const sfp = fp->m_sfp;
+
     ITRACE(1, "tc_unwind_resume: fp {}, saved rip {:#x}, saved fp {}\n",
-           fp, fp->m_savedRip, newFp);
+           fp, fp->m_savedRip, sfp);
     Trace::Indent indent;
+
+    // We should only ever be unwinding VM or unique stub frames.
     always_assert_flog(isVMFrame(fp),
                        "Unwinder got non-VM frame {} with saved rip {:#x}\n",
                        fp, fp->m_savedRip);
+    auto savedRip = reinterpret_cast<TCA>(fp->m_savedRip);
+
+    if (savedRip == tc::ustubs().callToExit) {
+      // If we're the top VM frame, there's nothing we need to do; we can just
+      // let the native C++ unwinder take over.
+      ITRACE(1, "top VM frame, passing back to _Unwind_Resume\n");
+      return {nullptr, sfp};
+    }
 
     // When we're unwinding through a TC frame (as opposed to stopping at a
-    // handler frame), we need to make sure that if we later return from this
-    // VM frame in translated code, we don't resume after the PHP call that may
-    // be expecting things to still live in its spill space. If the return
-    // address is in functionEnterHelper or callToExit, rvmfp() won't contain a
-    // real VM frame, so we skip those.
-    auto savedRip = reinterpret_cast<TCA>(fp->m_savedRip);
-    if (savedRip == mcg->ustubs().callToExit) {
-      ITRACE(1, "top VM frame, passing back to _Unwind_Resume\n");
-      return {nullptr, newFp};
-    }
+    // handler frame, or unwinding through a stub frame), we need to make sure
+    // that if we later return from this VM frame in translated code, we don't
+    // resume after the PHP call that may be expecting things to still live in
+    // its spill space.
+    //
+    // (Note that we can't do this if we're in the top VM frame, since it's not
+    // actually an ActRec, so it's actually required that we skip it above).
+    unwindPreventReturnToTC(fp);
 
     assert(g_unwind_rds.isInit());
     auto catchTrace = lookup_catch_trace(savedRip, g_unwind_rds->exn);
+
     if (isDebuggerReturnHelper(savedRip)) {
       // If this frame had its return address smashed by the debugger, the real
       // catch trace is saved in a side table.
       assertx(catchTrace == nullptr);
       catchTrace = unstashDebuggerCatch(fp);
     }
-    unwindPreventReturnToTC(fp);
+
     if (fp->m_savedRip != reinterpret_cast<uint64_t>(savedRip)) {
       ITRACE(1, "Smashed m_savedRip of fp {} from {} to {:#x}\n",
              fp, savedRip, fp->m_savedRip);
     }
 
-    fp = newFp;
+    fp = sfp;
 
-    // If there's a catch trace for this block, return it. Otherwise, keep
+    // If there's a catch trace for this block, return it.  Otherwise, keep
     // going up the VM stack for this nesting level.
     if (catchTrace) {
       ITRACE(1, "tc_unwind_resume returning catch trace {} with fp: {}\n",
@@ -323,12 +332,20 @@ TCUnwindInfo tc_unwind_resume(ActRec* fp) {
     }
 
     ITRACE(1, "No catch trace entry for {}; continuing\n",
-           mcg->ustubs().describe(savedRip));
+           tc::ustubs().describe(savedRip));
   }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
+namespace {
+/*
+ * Write a CIE for the TC using `ehfw'.
+ *
+ * This sets tc_unwind_personality() as the personality routine, and includes
+ * basic instructions to the unwinder for rematerializing the call frame
+ * registers.
+ */
 void write_tc_cie(EHFrameWriter& ehfw) {
   ehfw.begin_cie(dw_reg::IP,
                  reinterpret_cast<const void*>(tc_unwind_personality));
@@ -355,6 +372,19 @@ void write_tc_cie(EHFrameWriter& ehfw) {
   ehfw.same_value(dw_reg::SP);
 
   ehfw.end_cie();
+}
+
+// Handles to registered .eh_frame sections.
+std::vector<EHFrameDesc> s_ehFrames;
+}
+
+void initUnwinder(TCA base, size_t size) {
+  EHFrameWriter ehfw;
+  write_tc_cie(ehfw);
+  ehfw.begin_fde(base);
+  ehfw.end_fde(size);
+  ehfw.null_fde();
+  s_ehFrames.push_back(ehfw.register_and_release());
 }
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -514,8 +514,9 @@ end = struct
     with Not_found ->
       Hashtbl.replace tbl x p
 
-  let bind_class_const (genv, _env) x =
-    bind_class_member genv.class_consts x
+  let bind_class_const (genv, _env) (p, x) =
+    if String.lowercase x = "class" then Errors.illegal_member_variable_class p;
+    bind_class_member genv.class_consts (p, x)
 
   let bind_prop (genv, _env) x =
     bind_class_member genv.class_props x
@@ -1711,11 +1712,13 @@ module Make (GetLocals : GetLocals) = struct
       let p, cn = Namespaces.elaborate_id ((fst env).namespace) NSClass id in
       match cn with
         | x when N.is_vc_kind
-          (TypecheckerOptions.experimental_features (fst env).tcopt) p x ->
+            (TypecheckerOptions.experimental_feature_enabled (fst env).tcopt
+               TypecheckerOptions.experimental_dict) p x ->
           N.ValCollection ((N.get_vc_kind cn),
             (List.map l (afield_value env cn)))
         | x when N.is_kvc_kind
-          (TypecheckerOptions.experimental_features (fst env).tcopt) p x ->
+            (TypecheckerOptions.experimental_feature_enabled (fst env).tcopt
+               TypecheckerOptions.experimental_dict) p x ->
           N.KeyValCollection ((N.get_kvc_kind cn),
             (List.map l (afield_kvalue env cn)))
         | x when x = SN.Collections.cPair ->

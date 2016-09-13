@@ -29,10 +29,12 @@ enum class PerfEvent { Load, Store };
  * Raw data from a sampled perf event.
  */
 struct perf_event_sample {
-  uintptr_t ip;   // address of the sampled instruction
-  uint32_t pid;   // process in which the event occurred
-  uint32_t tid;   // thread in which the event occurred
-  uintptr_t addr; // memory address corresponding to the event, if applicable
+  uintptr_t ip;     // address of the sampled instruction
+  uint32_t pid;     // process in which the event occurred
+  uint32_t tid;     // thread in which the event occurred
+  uintptr_t addr;   // memory address corresponding to the event, if applicable
+  uint64_t nr;      // number of addresses in the callchain
+  uintptr_t ips[];  // instruction pointers in the callchain for the event
 };
 
 using perf_event_signal_fn_t = void (*)(PerfEvent);
@@ -45,8 +47,8 @@ using perf_event_consume_fn_t = void (*)(PerfEvent, const perf_event_sample*);
  * loads and stores sampled separately).  On each sampled event, `signal_fn'
  * will be invoked in the context of the calling thread, via signal handler.
  *
- * Behavior is undefined if the SIGIO handler is reset after calling this
- * function.
+ * Behavior is undefined if the SIGIO handler is reset, or if SIGIO is masked,
+ * after calling this function.
  *
  * Returns true if sampling was successfully enabled, else false (both if
  * sampling has already been enabled, or if an error occurs).
@@ -71,6 +73,18 @@ void perf_event_disable();
  * Each sampled event is passed to `consume' exactly once.
  */
 void perf_event_consume(perf_event_consume_fn_t consume);
+
+/*
+ * Pause or resume sampling for an event.
+ *
+ * Can be used instead of perf_event_{enable,disable}() for an event that has
+ * already been opened, but which should be briefly turned off.
+ *
+ * This should likely be called in whatever routine is used to consume events,
+ * to avoid reentrant sampling.
+ */
+void perf_event_pause();
+void perf_event_resume();
 
 ///////////////////////////////////////////////////////////////////////////////
 

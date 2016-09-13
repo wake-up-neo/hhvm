@@ -29,10 +29,10 @@
 #include "hphp/runtime/vm/jit/code-gen-helpers.h"
 #include "hphp/runtime/vm/jit/code-gen-tls.h"
 #include "hphp/runtime/vm/jit/fixup.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/phys-reg.h"
 #include "hphp/runtime/vm/jit/service-requests.h"
 #include "hphp/runtime/vm/jit/smashable-instr-ppc64.h"
+#include "hphp/runtime/vm/jit/tc.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/unique-stubs.h"
 #include "hphp/runtime/vm/jit/unwind-itanium.h"
@@ -213,7 +213,7 @@ void assert_tc_saved_rip(void* saved_lr_pointer) {
   auto const branch_block = saved_lr; // next instruction after resumetc's callr
   auto const jccLen = smashableJccLen() - ppc64_asm::instr_size_in_bytes;
   auto const branch_instr = branch_block + jccLen;
-  auto const exittc = mcg->ustubs().enterTCExit;
+  auto const exittc = tc::ustubs().enterTCExit;
 
   ppc64_asm::DecodedInstruction di(branch_instr);
   if (di.isJmp()) {
@@ -262,7 +262,7 @@ TCA emitCallToExit(CodeBlock& cb, DataBlock& data, const UniqueStubs& us) {
 
   // Emulate a ret to enterTCExit without actually doing one to avoid
   // unbalancing the return stack buffer.
-  a.branchAuto(TCA(mcg->ustubs().enterTCExit));
+  a.branchAuto(TCA(tc::ustubs().enterTCExit));
   return start;
 }
 

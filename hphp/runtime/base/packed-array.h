@@ -113,12 +113,13 @@ struct PackedArray final: type_scan::MarkCountable<PackedArray> {
   static ArrayData* ToPHPArray(ArrayData*, bool);
   static ArrayData* ToDict(ArrayData*, bool);
   static ArrayData* ToVec(ArrayData*, bool);
-  static ArrayData* ToKeyset(ArrayData*, bool);
   static void Renumber(ArrayData*) {}
   static void OnSetEvalScalar(ArrayData*);
   static ArrayData* Escalate(const ArrayData* ad) {
     return const_cast<ArrayData*>(ad);
   }
+
+  static constexpr auto ToKeyset = &ArrayCommon::ToKeyset;
 
   static const TypedValue* NvTryGetIntVec(const ArrayData*, int64_t);
   static const TypedValue* NvTryGetStrVec(const ArrayData*, const StringData*);
@@ -135,11 +136,11 @@ struct PackedArray final: type_scan::MarkCountable<PackedArray> {
   static ArrayData* AppendRefVec(ArrayData*, Variant&, bool);
   static ArrayData* AppendWithRefVec(ArrayData*, const Variant&, bool);
   static ArrayData* PlusEqVec(ArrayData*, const ArrayData*);
-  static ArrayData* MergeVec(ArrayData*, const ArrayData*);
   static ArrayData* ToPHPArrayVec(ArrayData*, bool);
   static ArrayData* ToDictVec(ArrayData*, bool);
   static ArrayData* ToVecVec(ArrayData*, bool);
 
+  static constexpr auto MergeVec = &Merge;
   static constexpr auto ReleaseVec = &Release;
   static constexpr auto NvGetIntVec = &NvGetInt;
   static constexpr auto NvGetStrVec = &NvGetStr;
@@ -175,7 +176,7 @@ struct PackedArray final: type_scan::MarkCountable<PackedArray> {
   static constexpr auto RenumberVec = &Renumber;
   static constexpr auto OnSetEvalScalarVec = &OnSetEvalScalar;
   static constexpr auto EscalateVec = &Escalate;
-  static constexpr auto ToKeysetVec = &ToKeyset;
+  static constexpr auto ToKeysetVec = &ArrayCommon::ToKeyset;
 
   //////////////////////////////////////////////////////////////////////
 

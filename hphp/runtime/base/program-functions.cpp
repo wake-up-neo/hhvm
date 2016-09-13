@@ -66,7 +66,8 @@
 #include "hphp/runtime/server/xbox-server.h"
 #include "hphp/runtime/vm/debug/debug.h"
 #include "hphp/runtime/vm/jit/code-cache.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/tc.h"
+#include "hphp/runtime/vm/jit/mcgen.h"
 #include "hphp/runtime/vm/jit/translator.h"
 #include "hphp/runtime/vm/repo.h"
 #include "hphp/runtime/vm/runtime.h"
@@ -700,7 +701,7 @@ void execute_command_line_end(int xhprof, bool coverage, const char *program) {
   if (RuntimeOption::EvalDumpTC ||
       RuntimeOption::EvalDumpIR ||
       RuntimeOption::EvalDumpRegion) {
-    if (jit::mcg) jit::mcg->dumpTC();
+    jit::tc::dump();
   }
   if (xhprof) {
     Variant profileData = HHVM_FN(xhprof_disable)();
@@ -2188,7 +2189,6 @@ void hphp_session_init() {
   assert(!s_sessionInitialized);
   g_context.getCheck();
   AsioSession::Init();
-  InitFiniNode::RequestInit();
   Socket::clearLastError();
   TI().onSessionInit();
   MM().resetExternalStats();
@@ -2362,7 +2362,7 @@ void hphp_session_exit() {
 
   // The treadmill must be flushed before profData is reset as the data may
   // be read during cleanup if EvalEnableReuseTC = true
-  jit::mcg->requestExit();
+  jit::tc::requestExit();
 
   TI().onSessionExit();
 
@@ -2391,8 +2391,6 @@ void hphp_process_exit() {
   LightProcess::Close();
 #endif
   InitFiniNode::ProcessFini();
-  delete jit::mcg;
-  jit::mcg = nullptr;
   folly::SingletonVault::singleton()->destroyInstances();
 }
 

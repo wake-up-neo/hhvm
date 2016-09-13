@@ -585,9 +585,9 @@ void MemoryManager::flush() {
 const char* header_names[] = {
   "PackedArray", "MixedArray", "EmptyArray", "ApcArray",
   "GlobalsArray", "ProxyArray", "DictArray", "VecArray", "KeysetArray",
-  "String", "Resource", "Ref", "Object", "WaitHandle", "ResumableObj",
+  "String", "Resource", "Ref", "Object", "WaitHandle", "AsyncFuncWH",
   "AwaitAllWH", "Vector", "Map", "Set", "Pair", "ImmVector", "ImmMap", "ImmSet",
-  "ResumableFrame", "NativeData", "SmallMalloc", "BigMalloc", "BigObj",
+  "AsyncFuncFrame", "NativeData", "SmallMalloc", "BigMalloc", "BigObj",
   "Free", "Hole"
 };
 static_assert(sizeof(header_names)/sizeof(*header_names) == NumHeaderKinds, "");
@@ -672,7 +672,7 @@ void MemoryManager::checkHeap(const char* phase) {
       case HeaderKind::Proxy:
       case HeaderKind::Object:
       case HeaderKind::WaitHandle:
-      case HeaderKind::ResumableObj:
+      case HeaderKind::AsyncFuncWH:
       case HeaderKind::AwaitAllWH:
       case HeaderKind::Vector:
       case HeaderKind::Map:
@@ -683,7 +683,7 @@ void MemoryManager::checkHeap(const char* phase) {
       case HeaderKind::ImmSet:
       case HeaderKind::Resource:
       case HeaderKind::Ref:
-      case HeaderKind::ResumableFrame:
+      case HeaderKind::AsyncFuncFrame:
       case HeaderKind::NativeData:
       case HeaderKind::SmallMalloc:
       case HeaderKind::BigMalloc:
@@ -1286,18 +1286,21 @@ Header* BigHeap::find(const void* p) {
   auto const big = std::lower_bound(
     std::begin(m_bigs), std::end(m_bigs), p,
     [] (const MallocNode* big, const void* p) {
-      auto const h = reinterpret_cast<const Header*>(big + 1);
-      return reinterpret_cast<const char*>(big) + h->size() <= p;
+      return reinterpret_cast<const char*>(big) + big->nbytes <= p;
     }
   );
 
   if (big != std::end(m_bigs) && *big <= p) {
-    if (p < *big + 1) {
+    auto const hdr = reinterpret_cast<Header*>(*big);
+    if (hdr->kind() != HeaderKind::BigObj) {
       // `p' is part of the MallocNode.
-      return reinterpret_cast<Header*>(*big);
+      return hdr;
     } else {
-      // `p' is part of the allocated object.
-      return reinterpret_cast<Header*>(*big + 1);
+      auto const sub = reinterpret_cast<Header*>(*big + 1);
+      auto const start = reinterpret_cast<const char*>(sub);
+      return start <= p && p < start + sub->size()
+        ? sub   // `p' is part of the allocated object.
+        : hdr;  // `p' is part of the MallocNode.
     }
   }
   return nullptr;

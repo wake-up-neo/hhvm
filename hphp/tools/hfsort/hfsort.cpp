@@ -112,6 +112,7 @@ void readPerfData(CallGraph& cg, gzFile file, bool computeArcWeight) {
       auto& arc = *cg.arcs.find(Arc(src, f));
       arc.normalizedWeight = arc.weight / func.samples;
       arc.avgCallOffset = arc.avgCallOffset / arc.weight;
+      assert(arc.avgCallOffset < cg.targets[src].size);
     }
   }
 }
@@ -241,7 +242,7 @@ void print(CallGraph& cg, const char* filename,
     }
   }
   fclose(outfile);
-  printf("Output saved in hotfuncs.txt\n");
+  printf("Output saved in file %s\n", filename);
   printf("  Number of hot functions: %u\n  Number of clusters: %lu\n",
          hotfuncs, clusters.size());
   printf("  Final average call distance = %.1lf (%.0lf / %.0lf)\n",

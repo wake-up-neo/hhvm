@@ -33,8 +33,8 @@
 #include "hphp/runtime/ext/std/ext_std_options.h"
 #include "hphp/runtime/server/server-stats.h"
 
-#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/perf-counters.h"
+#include "hphp/runtime/vm/jit/tc.h"
 #include "hphp/runtime/vm/jit/timer.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/translator.h"
@@ -66,12 +66,12 @@ const int64_t k_CONNECTION_ABORTED = 1;
 const int64_t k_CONNECTION_TIMEOUT = 2;
 
 static String HHVM_FUNCTION(server_warmup_status) {
-  // Fail if we jitted more than 25kb of code.
+  // Fail if we jitted at least Eval.JitWarmupStatusBytes of code.
   size_t begin, end;
-  jit::codeEmittedThisRequest(begin, end);
+  jit::tc::codeEmittedThisRequest(begin, end);
   auto const diff = end - begin;
-  auto constexpr kMaxTCBytes = 25 << 10;
-  if (diff > kMaxTCBytes) {
+  if (diff >= RuntimeOption::EvalJitWarmupStatusBytes) {
+    // TODO(13274666) Mismatch between 'to' and 'begin' below.
     return folly::format("Translation cache grew by {} bytes to {} bytes.",
                          diff, begin).str();
   }
@@ -343,10 +343,10 @@ static Class* getClassByName(const char* name, int len) {
     }
   } else if (len == 6 && !memcmp(name, "static", 6)) {
     auto const ar = GetCallerFrame();
-    if (ar) {
+    if (ar && ar->func()->cls()) {
       if (ar->hasThis()) {
         cls = ar->getThis()->getVMClass();
-      } else if (ar->hasClass()) {
+      } else {
         cls = ar->getClass();
       }
     }

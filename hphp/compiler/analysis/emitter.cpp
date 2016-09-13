@@ -17,6 +17,7 @@
 #include "hphp/compiler/analysis/emitter.h"
 
 #include <algorithm>
+#include <atomic>
 #include <deque>
 #include <exception>
 #include <fstream>
@@ -117,6 +118,7 @@
 #include "hphp/runtime/vm/repo-global-data.h"
 #include "hphp/runtime/vm/as.h"
 #include "hphp/runtime/base/packed-array.h"
+#include "hphp/runtime/base/set-array.h"
 #include "hphp/runtime/base/stats.h"
 #include "hphp/runtime/base/static-string-table.h"
 #include "hphp/runtime/base/runtime-option.h"
@@ -7846,7 +7848,9 @@ static Attr buildMethodAttrs(MethodStatementPtr meth, FuncEmitter* fe,
         attrs = attrs | AttrPersistent;
       }
     }
-    if (meth->getClassScope() && !funcScope->hasOverride()) {
+    if (meth->getClassScope() &&
+        !funcScope->hasOverride() &&
+        !meth->getClassScope()->isRedeclaring()) {
       attrs = attrs | AttrNoOverride;
     }
     if (funcScope->isSystem()) {
@@ -10191,7 +10195,7 @@ void EmitterVisitor::initScalar(TypedValue& tvVal, ExpressionPtr val,
     } else if (k == HeaderKind::VecArray) {
       m_staticArrays.push_back(Array::attach(PackedArray::MakeReserveVec(0)));
     } else if (k == HeaderKind::Keyset) {
-      m_staticArrays.push_back(Array::attach(MixedArray::MakeReserveKeyset(0)));
+      m_staticArrays.push_back(Array::attach(SetArray::MakeReserveSet(0)));
     } else {
       m_staticArrays.push_back(Array::attach(PackedArray::MakeReserve(0)));
     }
@@ -10872,8 +10876,16 @@ int32_t EmitterVisitor::emitNativeOpCodeImpl(MethodStatementPtr meth,
     "OpCodeImpl attribute is not applicable to %s", funcName);
 }
 
+namespace {
+
+std::atomic<uint64_t> lastHHBCUnitIndex;
+
+}
+
 static UnitEmitter* emitHHBCVisitor(AnalysisResultPtr ar, FileScopeRawPtr fsp) {
-  auto md5 = fsp->getMd5();
+  // If we're in whole program mode, we can just assign each Unit an increasing
+  // counter, guaranteeing uniqueness.
+  auto md5 = Option::WholeProgram ? MD5{++lastHHBCUnitIndex} : fsp->getMd5();
 
   if (!Option::WholeProgram) {
     // The passed-in ar is only useful in whole-program mode, so create a
@@ -11212,7 +11224,7 @@ extern "C" {
  */
 
 Unit* hphp_compiler_parse(const char* code, int codeLen, const MD5& md5,
-                          const char* filename) {
+                          const char* filename, Unit** releaseUnit) {
   if (UNLIKELY(!code)) {
     // Do initialization when code is null; see above.
     Option::EnableHipHopSyntax = RuntimeOption::EnableHipHopSyntax;
@@ -11234,6 +11246,10 @@ Unit* hphp_compiler_parse(const char* code, int codeLen, const MD5& md5,
   }
 
   SCOPE_ASSERT_DETAIL("hphp_compiler_parse") { return filename; };
+  std::unique_ptr<Unit> unit;
+  SCOPE_EXIT {
+    if (unit && releaseUnit) *releaseUnit = unit.release();
+  };
 
   try {
     UnitOrigin unitOrigin = UnitOrigin::File;
@@ -11290,7 +11306,7 @@ Unit* hphp_compiler_parse(const char* code, int codeLen, const MD5& md5,
     // NOTE: Repo errors are ignored!
     Repo::get().commitUnit(ue.get(), unitOrigin);
 
-    auto unit = ue->create();
+    unit = ue->create();
     ue.reset();
 
     if (unit->sn() == -1) {

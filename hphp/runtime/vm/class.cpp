@@ -26,7 +26,6 @@
 #include "hphp/runtime/vm/instance-bits.h"
 #include "hphp/runtime/vm/native-data.h"
 #include "hphp/runtime/vm/native-prop-handler.h"
-#include "hphp/runtime/vm/reverse-data-map.h"
 #include "hphp/runtime/vm/vm-regs.h"
 #include "hphp/runtime/vm/treadmill.h"
 
@@ -291,10 +290,6 @@ Class* Class::rescope(Class* ctx, Attr attrs /* = AttrNone */) {
   { // Return the cached clone if we have one.
     ReadLock l(s_scope_cache_mutex);
 
-    // This assertion only holds under lock, since setting m_scoped and
-    // m_invoke->cls() are independent atomic operations.
-    assert(template_cls->m_scoped == (invoke->cls() != template_cls));
-
     // If this succeeds, someone raced us to scoping the template.  We may have
     // unnecessarily allocated an ExtraData, but whatever.
     if (auto cls = try_template()) return cls;
@@ -386,10 +381,6 @@ void Class::destroy() {
 void Class::atomicRelease() {
   assert(!m_cachedClass.bound());
   assert(!getCount());
-
-  if (RuntimeOption::EvalEnableReverseDataMap) {
-    data_map::deregister(this);
-  }
   this->~Class();
   low_free_data(mallocPtr());
 }

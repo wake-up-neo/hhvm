@@ -19,7 +19,6 @@
 #include "hphp/runtime/base/stats.h"
 
 #include "hphp/runtime/vm/jit/abi.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/print.h"
 #include "hphp/runtime/vm/jit/punt.h"
 #include "hphp/runtime/vm/jit/reg-algorithms.h"
@@ -595,11 +594,11 @@ Vlabel blockFor(const VxlsContext& ctx, unsigned pos) {
  */
 void insertCodeAt(jit::vector<Vinstr>& dst, unsigned& j,
                   const jit::vector<Vinstr>& src, unsigned pos) {
-  auto const origin = dst[j].origin;
+  auto const irctx = dst[j].irctx();
   dst.insert(dst.begin() + j, src.size(), ud2{});
   for (auto const& inst : src) {
     dst[j] = inst;
-    dst[j].origin = origin;
+    dst[j].set_irctx(irctx);
     dst[j++].pos = pos;
   }
 }
@@ -626,9 +625,8 @@ jit::vector<LiveRange> computePositions(Vunit& unit,
       front_uses = true;
     });
     if (front_uses) {
-      auto origin = code.front().origin;
-      code.insert(code.begin(), nop{});
-      code.front().origin = origin;
+      auto irctx = code.front().irctx();
+      code.emplace(code.begin(), nop{}, irctx);
     }
     auto const start = pos;
 
@@ -649,8 +647,10 @@ jit::vector<LiveRange> computePositions(Vunit& unit,
 int spEffect(const Vunit& unit, const Vinstr& inst, PhysReg sp) {
   switch (inst.op) {
     case Vinstr::push:
+    case Vinstr::pushm:
       return -8;
     case Vinstr::pop:
+    case Vinstr::popm:
       return 8;
     case Vinstr::lea: {
       auto& i = inst.lea_;
@@ -2404,6 +2404,14 @@ void optimize(Vunit& unit, lea& inst, Vlabel b, size_t i, F sf_live) {
   }
 }
 
+template <typename F>
+void optimize(Vunit& unit, andqi& inst, Vlabel b, size_t i, F sf_live) {
+  if (!sf_live() && inst.s0.q() == 0xff) {
+    Vreg8 src = Reg8(inst.s1);
+    unit.blocks[b].code[i] = movzbq{src, inst.d};
+  }
+}
+
 /*
  * Perform optimizations on instructions in `unit' at which no flags registers
  * are live.
@@ -2424,10 +2432,19 @@ void optimizeSFLiveness(Vunit& unit, const VxlsContext& ctx,
     for (size_t i = 0; i < code.size(); ++i) {
       auto& inst = code[i];
 
+      /*
+       * An instruction that defines sf, where sf is not subsequently
+       * read, will have a live range going from inst.pos to inst.pos
+       * + 1. Its ok to replace such an instruction with one that
+       * doesn't modify the flags (or that modifies them in different
+       * ways), so check for a range that covers pos-1 or pos+1 to
+       * determine true liveness.
+       */
       auto const sf_live = [&] {
         return sf_ivl &&
           !sf_ivl->ranges.empty() &&
-          sf_ivl->covers(inst.pos);
+          ((inst.pos && sf_ivl->covers(inst.pos - 1)) ||
+           sf_ivl->covers(inst.pos + 1));
       };
 
       switch (inst.op) {
@@ -2796,7 +2813,7 @@ void processSpillExits(Vunit& unit, Vlabel label, SpillState state,
     code = &unit.blocks[label].code;
 
     auto& targetCode = unit.blocks[target].code;
-    free.origin = inst.origin;
+    free.set_irctx(inst.irctx());
     ConditionCode cc;
     Vreg sf;
     if (inst.op == Vinstr::fallbackcc) {
@@ -2820,7 +2837,7 @@ void processSpillExits(Vunit& unit, Vlabel label, SpillState state,
       cc = jcc_i.cc;
       sf = jcc_i.sf;
     }
-    targetCode.back().origin = inst.origin;
+    targetCode.back().set_irctx(inst.irctx());
 
     // Next is set to an invalid block that will be fixed up once we're done
     // iterating through the original block.
@@ -2949,7 +2966,7 @@ void allocateSpillSpace(Vunit& unit, const VxlsContext& ctx,
         state = instrInState(unit, *it, state, ctx.sp);
         if (state == NeedSpill) {
           FTRACE(3, "alloc spill before {}: {}\n", label, show(unit, *it));
-          alloc.origin = it->origin;
+          alloc.set_irctx(it->irctx());
           block.code.insert(it, alloc);
           break;
         }
@@ -2964,7 +2981,7 @@ void allocateSpillSpace(Vunit& unit, const VxlsContext& ctx,
         if (states[s].in == NeedSpill) {
           FTRACE(3, "alloc spill on edge from {} -> {}\n", label, s);
           auto it = std::prev(block.code.end());
-          alloc.origin = it->origin;
+          alloc.set_irctx(it->irctx());
           block.code.insert(it, alloc);
         }
       }
@@ -2977,7 +2994,7 @@ void allocateSpillSpace(Vunit& unit, const VxlsContext& ctx,
         block.code.back().op != Vinstr::ud2) {
       auto it = std::prev(block.code.end());
       FTRACE(3, "free spill before {}: {}\n", label, show(unit, (*it)));
-      free.origin = it->origin;
+      free.set_irctx(it->irctx());
       block.code.insert(it, free);
     }
 

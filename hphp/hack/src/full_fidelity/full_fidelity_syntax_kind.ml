@@ -20,6 +20,7 @@ type t =
 | Script
 | NamespaceDeclaration
 | NamespaceBody
+| NamespaceGroupUseDeclaration
 | NamespaceUseDeclaration
 | NamespaceUseClause
 | FunctionDeclaration
@@ -69,6 +70,9 @@ type t =
 | SimpleInitializer
 
 (* Expressions *)
+| MemberSelectionExpression
+| SafeMemberSelectionExpression
+| ScopeResolutionExpression
 | YieldExpression
 | PrintExpression
 | CastExpression
@@ -101,6 +105,10 @@ type t =
 | XHPOpen
 | XHPAttribute
 | XHPClose
+| XHPClassAttributeDeclaration
+| XHPClassAttribute
+| XHPEnumType
+| XHPRequired
 
 (* Types *)
 | SimpleTypeSpecifier
@@ -110,6 +118,7 @@ type t =
 | TypeConstant
 | GenericTypeSpecifier
 | TypeArguments
+| TypeParameters
 | TupleTypeSpecifier
 | VectorTypeSpecifier
 | MapTypeSpecifier
@@ -122,6 +131,9 @@ let to_string kind =
   match kind with
   | Missing -> "missing"
   | Token -> "token"
+  | MemberSelectionExpression -> "member_selection_expression"
+  | SafeMemberSelectionExpression -> "safe_member_selection_expression"
+  | ScopeResolutionExpression -> "scope_resolution_expression"
   | YieldExpression -> "yield_expression"
   | PrintExpression -> "print_expression"
   | CastExpression -> "cast_expression"
@@ -140,6 +152,7 @@ let to_string kind =
   | Script -> "script"
   | NamespaceDeclaration -> "namespace_declaration"
   | NamespaceBody -> "namespace_body"
+  | NamespaceGroupUseDeclaration -> "namespace_group_use_declaration"
   | NamespaceUseDeclaration -> "namespace_use_declaration"
   | NamespaceUseClause -> "namespace_use_clause"
   | FunctionDeclaration -> "function_declaration"
@@ -209,6 +222,7 @@ let to_string kind =
   | ShapeTypeSpecifier -> "shape_type_specifier"
   | FieldSpecifier -> "field_specifier"
   | TypeArguments -> "type_arguments"
+  | TypeParameters -> "type_parameters"
   | InclusionDirective -> "inclusion_directive"
   | EnumDeclaration -> "enum_declaration"
   | Enumerator -> "enumerator"
@@ -220,3 +234,7 @@ let to_string kind =
   | XHPOpen -> "xhp_open"
   | XHPAttribute -> "xhp_attribute"
   | XHPClose -> "xhp_close"
+  | XHPClassAttributeDeclaration -> "xhp_class_attribute_declaration"
+  | XHPClassAttribute -> "xhp_class_attribute"
+  | XHPEnumType -> "xhp_enum_type"
+  | XHPRequired -> "xhp_required"

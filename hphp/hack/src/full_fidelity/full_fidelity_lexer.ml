@@ -133,15 +133,23 @@ let skip_end_of_line lexer =
   | ('\n', _) -> advance lexer 1
   | _ -> lexer
 
+(* A qualified name which ends with a backslash is a namespace prefix; this is
+   only legal in a "group use" declaration.
+   TODO: Consider detecting usages of namespace prefixes in places where names
+   and qualified names are expected; give a more meaningful error. *)
 let rec scan_qualified_name lexer =
   assert ((peek_char lexer 0) = '\\');
   let lexer = advance lexer 1 in
   if is_name_nondigit (peek_char lexer 0) then
-    let (lexer, _) = scan_name_or_qualified_name lexer in
-    (lexer, TokenKind.QualifiedName)
+    begin
+      let (lexer, token) = scan_name_or_qualified_name lexer in
+      if token = TokenKind.Name then
+        (lexer, TokenKind.QualifiedName)
+      else
+        (lexer, token)
+    end
   else
-    let lexer = with_error lexer SyntaxError.error0008 in
-    (lexer, TokenKind.QualifiedName)
+    (lexer, TokenKind.NamespacePrefix)
 and scan_name_or_qualified_name lexer =
   if (peek_char lexer 0) = '\\' then
     scan_qualified_name lexer
@@ -274,6 +282,25 @@ let scan_decimal_or_float lexer =
 
 let scan_single_quote_string_literal lexer =
   (* TODO: What about newlines embedded? *)
+  (* SPEC:
+  single-quoted-string-literal::
+    b-opt  ' sq-char-sequence-opt  '
+
+    TODO: What is this b-opt?  We don't lex an optional 'b' before a literal.
+
+  sq-char-sequence::
+    sq-char
+    sq-char-sequence   sq-char
+
+  sq-char::
+    sq-escape-sequence
+    \opt   any character except single-quote (') or backslash (\)
+
+  sq-escape-sequence:: one of
+    \'  \\
+
+  *)
+
   let rec aux lexer =
     let ch0 = peek_char lexer 0 in
     let ch1 = peek_char lexer 1 in
@@ -285,11 +312,10 @@ let scan_single_quote_string_literal lexer =
       else
         let lexer = with_error lexer SyntaxError.error0006 in
         aux (advance lexer 1)
-    | ('\\', '\\')
-    | ('\\', '\'') -> aux (advance lexer 2)
-    | ('\\', _) ->
-      let lexer = with_error lexer SyntaxError.error0005 in
-      aux (advance lexer 1)
+    | ('\\', _) -> aux (advance lexer 2)
+      (* Note that an "invalid" escape sequence in a single-quoted string
+      literal is not an error. It's just the \ character followed by the
+      next character. So no matter what, we can simply skip two chars. *)
     | ('\'', _) -> (advance lexer 1, TokenKind.SingleQuotedStringLiteral)
     | _ -> aux (advance lexer 1) in
   aux (advance lexer 1)
@@ -462,20 +488,32 @@ let scan_xhp_label lexer =
 
 let rec scan_xhp_element_name lexer =
   (* An XHP element name is a sequence of one or more XHP labels each separated
-     by a single : or -. *)
+  by a single : or -.  Note that it is possible for an XHP element name to be
+  followed immediately by a : or - that is the next token, so if we find
+  a : or - not followed by a label, we need to terminate the token. *)
   let lexer = scan_xhp_label lexer in
   let ch0 = peek_char lexer 0 in
   let ch1 = peek_char lexer 1 in
-  if ch0 = ':' || ch0 = '-' then
-    begin
-      if is_name_nondigit ch1 then
-        scan_xhp_element_name (advance lexer 1)
-      else
-        let lexer = with_error lexer SyntaxError.error0008 in
-        (advance lexer 1, TokenKind.Error)
-    end
+  if (ch0 = ':' || ch0 = '-') && (is_name_nondigit ch1) then
+    scan_xhp_element_name (advance lexer 1)
   else
     (lexer, TokenKind.XHPElementName)
+
+(* Is the next token we're going to lex a possible xhp class name? *)
+let is_xhp_class_name lexer =
+  (peek_char lexer 0 = ':') && (is_name_nondigit (peek_char lexer 1))
+
+let is_next_name lexer =
+  is_name_nondigit (peek_char lexer 0)
+
+let scan_xhp_class_name lexer =
+  (* An XHP class name is a colon followed by an xhp name. *)
+  if is_xhp_class_name lexer then
+    let (lexer, _) = scan_xhp_element_name (advance lexer 1) in
+    (lexer, TokenKind.XHPClassName)
+  else
+    let lexer = with_error lexer SyntaxError.error0008 in
+    (advance lexer 1, TokenKind.Error)
 
 let scan_xhp_string_literal lexer =
   (* XHP string literals are just straight up "find the closing quote"
@@ -762,6 +800,10 @@ let scan_trailing_trivia lexer =
   let (lexer, trivia_list) = aux lexer [] in
   (lexer, List.rev trivia_list)
 
+let is_next_xhp_class_name lexer =
+  let (lexer, _) = scan_leading_trivia lexer in
+  is_xhp_class_name lexer
+
 let as_keyword kind lexer =
   if kind = TokenKind.Name then
     let text = current_text lexer in
@@ -855,3 +897,9 @@ let next_xhp_body_token lexer =
     let w = width lexer in
     (lexer, Token.make kind w [] []) in
   scan_assert_progress scanner lexer
+
+let next_xhp_class_name lexer =
+  scan_token_and_trivia scan_xhp_class_name false lexer
+
+let next_xhp_name lexer =
+  scan_token_and_trivia scan_xhp_element_name false lexer

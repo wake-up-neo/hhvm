@@ -260,6 +260,27 @@ let rec get_doc node =
     let right = get_doc (classish_body_right_brace x) in
     let body = get_doc (classish_body_elements x) in
     indent_block_no_space left body right indt
+  | XHPRequired x ->
+    let a = get_doc x.xhp_required_at in
+    let r = get_doc x.xhp_required in
+    a ^^^ r
+  | XHPEnumType x ->
+    let e = get_doc x.xhp_enum_token in
+    let l = get_doc x.xhp_enum_left_brace in
+    let v = get_doc x.xhp_enum_values in
+    let r = get_doc x.xhp_enum_right_brace in
+    group_doc (e ^| l ^| v ^| r)
+  | XHPClassAttributeDeclaration x ->
+    let attr = get_doc x.xhp_attr_token in
+    let attrs = get_doc x.xhp_attr_list in
+    let semi = get_doc x.xhp_attr_semicolon in
+    group_doc (attr ^| attrs ^^^ semi)
+  | XHPClassAttribute x ->
+    let t = get_doc x.xhp_attr_decl_type in
+    let n = get_doc x.xhp_attr_decl_name in
+    let i = get_doc x.xhp_attr_decl_init in
+    let r = get_doc x.xhp_attr_decl_required in
+    group_doc (t ^| n ^| i ^| r)
   | TraitUse x ->
     let use = get_doc (trait_use_token x) in
     let name_list = get_doc (trait_use_name_list x) in
@@ -345,15 +366,25 @@ let rec get_doc node =
     indent_block_no_space left body right indt |> add_break
   | NamespaceUseDeclaration x ->
     let u = get_doc x.namespace_use in
-    let k = get_doc x.namespace_use_keywordopt in
+    let k = get_doc x.namespace_use_kind in
     let c = get_doc x.namespace_use_clauses in
     let s = get_doc x.namespace_use_semicolon in
     u ^| k ^| c ^^^ s
   | NamespaceUseClause x ->
+    let k = get_doc x.namespace_use_clause_kind in
     let n = get_doc x.namespace_use_name in
     let a = get_doc x.namespace_use_as in
     let l = get_doc x.namespace_use_alias in
-    n ^| a ^| l
+    k ^| n ^| a ^| l
+  | NamespaceGroupUseDeclaration x ->
+    let u = get_doc x.namespace_group_use in
+    let k = get_doc x.namespace_group_use_kind in
+    let p = get_doc x.namespace_group_use_prefix in
+    let l = get_doc x.namespace_group_use_left_brace in
+    let c = get_doc x.namespace_group_use_clauses in
+    let r = get_doc x.namespace_group_use_right_brace in
+    let s = get_doc x.namespace_group_use_semicolon in
+    u ^| k ^| p ^| l ^| c ^| r ^^^ s
   | FunctionDeclaration x ->
       let attr = get_doc (function_attribute_spec x) in
       let header = get_doc (function_declaration_header x) in
@@ -565,6 +596,17 @@ let rec get_doc node =
     let start_block = indent_block_no_space left_part expr right indt in
     handle_switch start_block x
     (* group_doc (start_block ^| statement) *)
+  | ScopeResolutionExpression x ->
+    let q = get_doc x.scope_resolution_qualifier in
+    let o = get_doc x.scope_resolution_operator in
+    let n = get_doc x.scope_resolution_name in
+    group_doc (q ^^^ o ^^^ n)
+  | MemberSelectionExpression x
+  | SafeMemberSelectionExpression x ->
+    let ob = get_doc x.member_object in
+    let op = get_doc x.member_operator in
+    let nm = get_doc x.member_name in
+    group_doc (ob ^^^ op ^^^ nm)
   | YieldExpression x ->
     let y = get_doc x.yield_token in
     let o = get_doc x.yield_operand in
@@ -801,6 +843,11 @@ let rec get_doc node =
     let right = get_doc (type_arguments_right_angle x) in
     let args = get_doc (type_arguments x) in
     indent_block_no_space left args right indt
+  | TypeParameters x ->
+    let left = get_doc x.type_parameters_left_angle in
+    let params = get_doc x.type_parameters in
+    let right = get_doc x.type_parameters_right_angle in
+    indent_block_no_space left params right indt
   | TupleTypeSpecifier x ->
     let left = get_doc x.tuple_left_paren in
     let types = get_doc x.tuple_types in
@@ -833,13 +880,17 @@ let rec get_doc node =
     let back_part = expr ^^^ semicolon in
     group_doc (indent_doc keyword back_part indt)
   | BreakStatement x ->
-    let keyword = get_doc (break_keyword x) in
-    let semicolon = get_doc (break_semicolon x) in
-    keyword ^^^ semicolon
+    let b = get_doc x.break_keyword in
+    let l = get_doc x.break_level in
+    let s = get_doc x.break_semicolon in
+    if is_missing x.break_level then group_doc (b ^^^ l ^^^ s)
+    else group_doc (b ^| l ^^^ s)
   | ContinueStatement x ->
-    let keyword = get_doc (continue_keyword x) in
-    let semicolon = get_doc (continue_semicolon x) in
-    keyword ^^^ semicolon
+    let c = get_doc x.continue_keyword in
+    let l = get_doc x.continue_level in
+    let s = get_doc x.continue_semicolon in
+    if is_missing x.continue_level then group_doc (c ^^^ l ^^^ s)
+    else group_doc (c ^| l ^^^ s)
   | FunctionStaticStatement x ->
     let st = get_doc x.static_static in
     let ds = get_doc x.static_declarations in

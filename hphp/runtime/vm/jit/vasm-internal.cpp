@@ -20,10 +20,10 @@
 #include "hphp/runtime/vm/jit/cg-meta.h"
 #include "hphp/runtime/vm/jit/containers.h"
 #include "hphp/runtime/vm/jit/ir-opcode.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/smashable-instr.h"
 #include "hphp/runtime/vm/jit/srcdb.h"
-#include "hphp/runtime/vm/jit/translator.h"
+#include "hphp/runtime/vm/jit/tc.h"
+#include "hphp/runtime/vm/jit/trans-db.h"
 #include "hphp/runtime/vm/jit/trans-rec.h"
 #include "hphp/runtime/vm/jit/unique-stubs.h"
 #include "hphp/runtime/vm/jit/vasm.h"
@@ -47,8 +47,7 @@ IRMetadataUpdater::IRMetadataUpdater(const Venv& env, AsmInfo* asm_info)
     m_area_to_blockinfos.resize(m_env.text.areas().size());
     for (auto& r : m_area_to_blockinfos) r.resize(m_env.unit.blocks.size());
   }
-  if (mcg->tx().isTransDBEnabled() ||
-      RuntimeOption::EvalJitUseVtuneAPI) {
+  if (transdb::enabled() || RuntimeOption::EvalJitUseVtuneAPI) {
     m_bcmap = &env.meta.bcMap;
   }
 }
@@ -139,14 +138,14 @@ bool is_empty_catch(const Vblock& block) {
   return block.code.size() == 2 &&
          block.code[0].op == Vinstr::landingpad &&
          block.code[1].op == Vinstr::jmpi &&
-         block.code[1].jmpi_.target == mcg->ustubs().endCatchHelper;
+         block.code[1].jmpi_.target == tc::ustubs().endCatchHelper;
 }
 
 void register_catch_block(const Venv& env, const Venv::LabelPatch& p) {
   bool const is_empty = is_empty_catch(env.unit.blocks[p.target]);
 
   auto const catch_target = is_empty
-    ? mcg->ustubs().endCatchHelper
+    ? tc::ustubs().endCatchHelper
     : env.addrs[p.target];
   assertx(catch_target);
 
@@ -250,7 +249,7 @@ void emit_svcreq_stub(Venv& env, const Venv::SvcReqPatch& p) {
       { auto const& i = p.svcreq.fallback_;
         assertx(p.jmp && !p.jcc);
 
-        auto const srcrec = mcg->srcDB().find(i.target);
+        auto const srcrec = tc::findSrcRec(i.target);
         always_assert(srcrec);
         stub = i.trflags.packed
           ? svcreq::emit_retranslate_stub(frozen, env.text.data(),
@@ -262,7 +261,7 @@ void emit_svcreq_stub(Venv& env, const Venv::SvcReqPatch& p) {
       { auto const& i = p.svcreq.fallbackcc_;
         assertx(!p.jmp && p.jcc);
 
-        auto const srcrec = mcg->srcDB().find(i.target);
+        auto const srcrec = tc::findSrcRec(i.target);
         always_assert(srcrec);
         stub = i.trflags.packed
           ? svcreq::emit_retranslate_stub(frozen, env.text.data(),
@@ -294,10 +293,7 @@ const uint64_t* alloc_literal(Venv& env, uint64_t val) {
   // ways of getting 0 in a register anyway.
   always_assert(val != 0);
 
-  if (auto it = mcg->literals().find(val)) {
-    assertx(**it == val);
-    return *it;
-  }
+  if (auto addr = addrForLiteral(val)) return addr;
 
   auto& pending = env.meta.literals;
   auto it = pending.find(val);
