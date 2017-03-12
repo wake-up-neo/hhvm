@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -82,7 +82,15 @@ struct VMSwitchMode : std::exception {
 };
 
 /*
- * Thrown for stack overflow in a jitted prolog.
+ * Similar to VMSwitchMode, but when we were in the middle of a
+ * suspendStack operation.
+ */
+struct VMSuspendStack : std::exception {
+  const char* what() const noexcept override { return "VMSuspendStack"; }
+};
+
+/*
+ * Thrown for stack overflow in a jitted prologue.
  */
 struct VMStackOverflow : std::exception {
   const char* what() const noexcept override {

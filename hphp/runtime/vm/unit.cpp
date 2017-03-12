@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -194,7 +194,9 @@ Unit::Unit()
 {}
 
 Unit::~Unit() {
-  if (RuntimeOption::EvalEnableReverseDataMap) {
+  if (RuntimeOption::EvalEnableReverseDataMap &&
+      m_mergeState != MergeState::Unmerged) {
+    // Units are registered to data_map in Unit::initialMerge().
     data_map::deregister(this);
   }
 
@@ -617,6 +619,21 @@ void Unit::loadFunc(const Func *func) {
   }
 }
 
+Func* Unit::loadDynCallFunc(const StringData* name) {
+  if (auto f = loadFunc(name)) {
+    auto wrapper = f->dynCallWrapper();
+    return LIKELY(!wrapper) ? f : wrapper;
+  }
+  return nullptr;
+}
+
+Func* Unit::lookupDynCallFunc(const StringData* name) {
+  if (auto f = lookupFunc(name)) {
+    auto wrapper = f->dynCallWrapper();
+    return LIKELY(!wrapper) ? f : wrapper;
+  }
+  return nullptr;
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -650,7 +667,7 @@ struct FrameRestore {
       tmp.initNumArgs(0);
       vmfp() = &tmp;
       vmpc() = preClass->unit()->at(preClass->getOffset());
-      pushLocalsAndIterators(tmp.m_func);
+      pushFrameSlots(tmp.m_func);
     } else {
       m_top = nullptr;
       m_fp = nullptr;
@@ -672,6 +689,30 @@ struct FrameRestore {
 
 ///////////////////////////////////////////////////////////////////////////////
 // Class lookup.
+
+namespace {
+void setupClass(Class* newClass, NamedEntity* nameList) {
+  bool const isPersistent =
+    (!SystemLib::s_inited || RuntimeOption::RepoAuthoritative) &&
+    newClass->verifyPersistent();
+  nameList->m_cachedClass.bind(
+    isPersistent ? rds::Mode::Persistent : rds::Mode::Normal);
+
+  newClass->setClassHandle(nameList->m_cachedClass);
+  newClass->incAtomicCount();
+
+  InstanceBits::ifInitElse(
+    [&] { newClass->setInstanceBits();
+          nameList->pushClass(newClass); },
+    [&] { nameList->pushClass(newClass); }
+  );
+
+  if (RuntimeOption::EvalEnableReverseDataMap) {
+    // The corresponding deregister is in NamedEntity::removeClass().
+    data_map::register_start(newClass);
+  }
+}
+}
 
 Class* Unit::defClass(const PreClass* preClass,
                       bool failIsFatal /* = true */) {
@@ -755,25 +796,7 @@ Class* Unit::defClass(const PreClass* preClass,
       continue;
     }
 
-    bool const isPersistent =
-      (!SystemLib::s_inited || RuntimeOption::RepoAuthoritative) &&
-      newClass->verifyPersistent();
-    nameList->m_cachedClass.bind(
-      isPersistent ? rds::Mode::Persistent
-                   : rds::Mode::Normal
-    );
-    newClass->setClassHandle(nameList->m_cachedClass);
-    newClass.get()->incAtomicCount();
-
-    InstanceBits::ifInitElse(
-      [&] { newClass->setInstanceBits();
-            nameList->pushClass(newClass.get()); },
-      [&] { nameList->pushClass(newClass.get()); }
-    );
-
-    if (RuntimeOption::EvalEnableReverseDataMap) {
-      data_map::register_start(newClass.get());
-    }
+    setupClass(newClass.get(), nameList);
 
     /*
      * call setCached after adding to the class list, otherwise the
@@ -784,6 +807,30 @@ Class* Unit::defClass(const PreClass* preClass,
     DEBUGGER_ATTACHED_ONLY(phpDebuggerDefClassHook(newClass.get()));
     return newClass.get();
   }
+}
+
+Class* Unit::defClosure(const PreClass* preClass) {
+  auto const nameList = preClass->namedEntity();
+
+  if (nameList->clsList()) return nameList->clsList();
+
+  auto const parent = c_Closure::classof();
+
+  assertx(preClass->parent() == parent->name());
+  // Create a new class.
+
+  ClassPtr newClass {
+    Class::newClass(const_cast<PreClass*>(preClass), parent)
+  };
+
+  Lock l(g_classesMutex);
+
+  if (UNLIKELY(nameList->clsList() != nullptr)) return nameList->clsList();
+
+  setupClass(newClass.get(), nameList);
+
+  if (classHasPersistentRDS(newClass.get())) newClass.get()->setCached();
+  return newClass.get();
 }
 
 namespace {
@@ -858,12 +905,10 @@ const Cell* Unit::lookupCns(const StringData* cnsName) {
              rds::isHandleInit(handle))) {
     auto const& tv = rds::handleToRef<TypedValue>(handle);
 
-    if (LIKELY(rds::isNormalHandle(handle) ||
-               tv.m_type != KindOfUninit)) {
+    if (LIKELY(tv.m_type != KindOfUninit)) {
       assertx(cellIsPlausible(tv));
       return &tv;
     }
-    assertx(rds::isPersistentHandle(handle));
 
     if (UNLIKELY(tv.m_data.pref != nullptr)) {
       auto callback = reinterpret_cast<SystemConstantCallback>(tv.m_data.pref);
@@ -873,6 +918,7 @@ const Cell* Unit::lookupCns(const StringData* cnsName) {
         return tvRet;
       }
     }
+    assertx(rds::isPersistentHandle(handle));
   }
   if (UNLIKELY(rds::s_constants().get() != nullptr)) {
     return rds::s_constants()->nvGet(cnsName);
@@ -1212,29 +1258,6 @@ void Unit::initialMerge() {
       PreClass* pre = (PreClass*)m_mergeInfo->mergeableObj(ix++);
       if (pre->attrs() & AttrUnique) {
         needsCompact = true;
-      }
-
-      /*
-       * Closure classes must be defined before anything else in the Unit.  The
-       * ClosureHoistable flag keeps them ahead of any other classes, but in
-       * mergeImpl we're going to define functions before we define classes, so
-       * we do them first here.
-       *
-       * If these functions are persistent, it's possible another thread could
-       * call one of those functions before we define the closures, and try to
-       * use closure classes that don't exist yet.
-       *
-       * Note that this is a special case of a more general race we have in
-       * this unit merging code right now.  For example, if a unit defines
-       * multiple persistent functions, it's possible another thread may call
-       * one of them before we've finished defining the other ones.  In
-       * practice that race is much less likely to cause problems, because the
-       * other thread will generally invoke the autoloader and then find out
-       * its defined by the time that's done.
-       */
-      if (pre->hoistability() == PreClass::ClosureHoistable) {
-        DEBUG_ONLY auto const cls = defClass(pre, false /* failIsFatal */);
-        always_assert(cls != nullptr);
       }
     }
 
@@ -1670,7 +1693,6 @@ void Unit::mergeImpl(void* tcbase, MergeInfo* mi) {
           unit->mergeImpl<debugger>(tcbase, unit->m_mergeInfo);
           if (UNLIKELY(!unit->isMergeOnly())) {
             Stats::inc(Stats::PseudoMain_Reentered);
-            TypedValue ret;
             VarEnv* ve = nullptr;
             ActRec* fp = vmfp();
             if (!fp) {
@@ -1684,10 +1706,11 @@ void Unit::mergeImpl(void* tcbase, MergeInfo* mi) {
                 // local scope.
               }
             }
-            g_context->invokeFunc(&ret, unit->getMain(nullptr),
-                                  init_null_variant,
-                                  nullptr, nullptr, ve);
-            tvRefcountedDecRef(&ret);
+            tvRefcountedDecRef(
+              g_context->invokeFunc(unit->getMain(nullptr),
+                                    init_null_variant,
+                                    nullptr, nullptr, ve)
+            );
           } else {
             Stats::inc(Stats::PseudoMain_SkipDeep);
           }
@@ -1846,6 +1869,7 @@ void Unit::prettyPrint(std::ostream& out, PrintOpts opts) const {
         out.put('\n');
         funcIt->second->prettyPrint(out);
         ++funcIt;
+        prevLineNum = -1;
       }
     }
 

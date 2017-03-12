@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -29,7 +29,30 @@ struct StandardExtension;
 
 extern const StaticString s_Closure;
 
-struct c_Closure : ObjectData {
+// native data for closures. Memory layout looks like this:
+// [ClosureHdr][ObjectData, kind=Closure][captured vars]
+struct ClosureHdr : HeapObject {
+  explicit ClosureHdr(uint32_t size) {
+    initHeader(HeaderKind::ClosureHdr, size);
+  }
+  uint32_t& size() { return m_aux32; }
+  uint32_t size() const { return m_aux32; }
+  static constexpr uintptr_t kClassBit = 0x1;
+  bool ctxIsClass() const {
+    return ctx_bits & kClassBit;
+  }
+  TYPE_SCAN_CUSTOM_FIELD(ctx) {
+    if (!ctxIsClass()) scanner.scan(ctx_this);
+  }
+ public:
+  union {
+    void* ctx;
+    uintptr_t ctx_bits;
+    ObjectData* ctx_this;
+  };
+};
+
+struct c_Closure final : ObjectData {
 
   static Class* classof() { assertx(cls_Closure); return cls_Closure; }
   static c_Closure* fromObject(ObjectData* obj) {
@@ -40,10 +63,17 @@ struct c_Closure : ObjectData {
   /* closureInstanceCtor() skips this constructor call in debug mode.
    * Update that method if this assumption changes.
    */
-  explicit c_Closure(Class* cls = classof(), uint16_t flags = 0)
-    : ObjectData(cls, flags) {
-    // m_ctx must be initialized by init() or the TC.
+  explicit c_Closure(Class* cls)
+    : ObjectData(cls, IsCppBuiltin | HasClone, HeaderKind::Closure) {
+    // hdr()->ctx must be initialized by init() or the TC.
     if (debug) setThis(reinterpret_cast<ObjectData*>(-uintptr_t(1)));
+  }
+
+  ClosureHdr* hdr() {
+    return reinterpret_cast<ClosureHdr*>(this) - 1;
+  }
+  const ClosureHdr* hdr() const {
+    return reinterpret_cast<const ClosureHdr*>(this) - 1;
   }
 
   /*
@@ -72,19 +102,13 @@ struct c_Closure : ObjectData {
    * Returns obj->propVec()
    * but with runtime generalized checks replaced with assertions
    */
-  TypedValue* getUseVars() {
-    assertx(getVMClass()->builtinODTailSize() == sizeof(void*));
+  TypedValue* getUseVars() { return propVec(); }
 
-    auto ret = reinterpret_cast<TypedValue*>(this + 1);
-    // Sanity check in dbg mode to make sure ObjectData's shape hasn't changed
-    assertx(ret == propVec());
-
-    return ret;
-  }
   TypedValue* getStaticVar(Slot s) {
     assertx(getVMClass()->numDeclProperties() > s);
     return getUseVars() + s;
   }
+
   int32_t getNumUseVars() const {
     return getVMClass()->numDeclProperties() -
            getInvokeFunc()->numStaticLocals();
@@ -94,37 +118,28 @@ struct c_Closure : ObjectData {
    * The bound context of the Closure---either a $this or a late bound class,
    * just like in the ActRec.
    */
-  void* getThisOrClass() const { return m_ctx; }
-  void setThisOrClass(void* p) { m_ctx = p; }
+  void* getThisOrClass() const { return hdr()->ctx; }
+  void setThisOrClass(void* p) { hdr()->ctx = p; }
   ObjectData* getThisUnchecked() const {
-    assertx(!ctxIsClass());
-    return reinterpret_cast<ObjectData*>(m_ctx);
+    assertx(!hdr()->ctxIsClass());
+    return hdr()->ctx_this;
   }
   ObjectData* getThis() const {
-    if (UNLIKELY(ctxIsClass())) {
-      return nullptr;
-    }
-    return getThisUnchecked();
+    return UNLIKELY(hdr()->ctxIsClass()) ? nullptr : getThisUnchecked();
   }
-  void setThis(ObjectData* od) { m_ctx = od; }
-  bool hasThis() const { return m_ctx && !ctxIsClass(); }
+  void setThis(ObjectData* od) { hdr()->ctx_this = od; }
+  bool hasThis() const { return hdr()->ctx && !hdr()->ctxIsClass(); }
 
   Class* getClass() const {
-    if (LIKELY(ctxIsClass())) {
-      return reinterpret_cast<Class*>(
-        reinterpret_cast<uintptr_t>(m_ctx) & ~kClassBit
-      );
-    } else {
-      return nullptr;
-    }
+    return LIKELY(hdr()->ctxIsClass()) ?
+      reinterpret_cast<Class*>(hdr()->ctx_bits & ~ClosureHdr::kClassBit) :
+      nullptr;
   }
   void setClass(Class* cls) {
     assertx(cls);
-    m_ctx = reinterpret_cast<void*>(
-      reinterpret_cast<uintptr_t>(cls) | kClassBit
-    );
+    hdr()->ctx_bits = reinterpret_cast<uintptr_t>(cls) | ClosureHdr::kClassBit;
   }
-  bool hasClass() const { return ctxIsClass(); }
+  bool hasClass() const { return hdr()->ctxIsClass(); }
 
   ObjectData* clone();
 
@@ -134,11 +149,7 @@ struct c_Closure : ObjectData {
    * Offsets for the JIT.
    */
   static constexpr ssize_t ctxOffset() {
-    // c_Closure must be precisely one pointer larger than ObjectData
-    // so that we use up precisely one slotted declared property slot
-    static_assert(sizeof(c_Closure) == sizeof(void*) + sizeof(ObjectData),
-                  "c_Closure size mismatch");
-    return offsetof(c_Closure, m_ctx);
+    return offsetof(ClosureHdr, ctx) - sizeof(ClosureHdr);
   }
 
 private:
@@ -147,13 +158,6 @@ private:
 
   static Class* cls_Closure;
   static void setAllocators(Class* cls);
-
-  static constexpr uintptr_t kClassBit = 0x1;
-  bool ctxIsClass() const {
-    return reinterpret_cast<uintptr_t>(m_ctx) & kClassBit;
-  }
-
-  void* m_ctx;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

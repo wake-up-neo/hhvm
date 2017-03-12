@@ -17,8 +17,9 @@ Class* c_ImmMap::s_cls;
 inline
 bool invokeAndCastToBool(const CallCtx& ctx, int argc,
                          const TypedValue* argv) {
-  Variant ret;
-  g_context->invokeFuncFew(ret.asTypedValue(), ctx, argc, argv);
+  auto ret = Variant::attach(
+      g_context->invokeFuncFew(ctx, argc, argv)
+  );
   return ret.toBoolean();
 }
 
@@ -153,7 +154,7 @@ void BaseMap::addAllPairs(const Variant& iterable) {
 }
 
 Variant BaseMap::firstKey() {
-  if (!m_size) return null_variant;
+  if (!m_size) return uninit_variant;
   auto e = firstElm();
   assert(e != elmLimit());
   if (e->hasIntKey()) {
@@ -164,14 +165,14 @@ Variant BaseMap::firstKey() {
 }
 
 Variant BaseMap::firstValue() {
-  if (!m_size) return null_variant;
+  if (!m_size) return uninit_variant;
   auto e = firstElm();
   assert(e != elmLimit());
   return tvAsCVarRef(&e->data);
 }
 
 Variant BaseMap::lastKey() {
-  if (!m_size) return null_variant;
+  if (!m_size) return uninit_variant;
   // TODO Task# 4281431: If nthElmPos(n) is optimized to
   // walk backward from the end when n > m_size/2, then
   // we could use that here instead of having to use a
@@ -189,7 +190,7 @@ Variant BaseMap::lastKey() {
 }
 
 Variant BaseMap::lastValue() {
-  if (!m_size) return null_variant;
+  if (!m_size) return uninit_variant;
   // TODO Task# 4281431: If nthElmPos(n) is optimized to
   // walk backward from the end when n > m_size/2, then
   // we could use that here instead of having to use a
@@ -262,7 +263,7 @@ void BaseMap::setImpl(int64_t k, const TypedValue* val) {
   }
   assert(val->m_type != KindOfRef);
   assert(canMutateBuffer());
-  auto h = hashint(k);
+  auto h = hash_int64(k);
 retry:
   auto p = findForInsert(k, h);
   assert(p);
@@ -406,78 +407,10 @@ void BaseMap::OffsetUnset(ObjectData* obj, const TypedValue* key) {
   throwBadKeyType();
 }
 
-bool BaseMap::Equals(EqualityFlavor eq,
-                     const ObjectData* obj1, const ObjectData* obj2) {
-
+bool BaseMap::Equals(const ObjectData* obj1, const ObjectData* obj2) {
   auto map1 = static_cast<const BaseMap*>(obj1);
   auto map2 = static_cast<const BaseMap*>(obj2);
-  auto size = map1->size();
-
-  if (size != map2->size()) { return false; }
-  if (size == 0) { return true; }
-
-  switch (eq) {
-    case EqualityFlavor::OrderIrrelevant: {
-      // obj1 and obj2 must have the exact same set of keys, and the values
-      // for each key must compare equal (==). This equality behavior
-      // matches that of == on two PHP (associative) arrays.
-      for (uint32_t i = 0; i < map1->posLimit(); ++i) {
-        if (map1->isTombstone(i)) continue;
-        const HashCollection::Elm& e = map1->data()[i];
-        TypedValue* tv2;
-        if (e.hasIntKey()) {
-          tv2 = map2->get(e.ikey);
-        } else {
-          assert(e.hasStrKey());
-          tv2 = map2->get(e.skey);
-        }
-        if (!tv2) return false;
-        if (!HPHP::equal(tvAsCVarRef(&e.data), tvAsCVarRef(tv2))) return false;
-      }
-      return true;
-    }
-    case EqualityFlavor::OrderMatters: {
-      // obj1 and obj2 must compare equal according to OrderIrrelevant;
-      // additionally, the (identical) keys of obj1 and obj2 must be in the
-      // same iteration order.
-      uint32_t compared = 0;
-      for (uint32_t ix1 = 0, ix2 = 0;
-           ix1 < map1->posLimit() && ix2 < map2->posLimit() ; ) {
-
-        auto tomb1 = map1->isTombstone(ix1);
-        auto tomb2 = map2->isTombstone(ix2);
-
-        if (tomb1 || tomb2) {
-          if (tomb1) { ++ix1; }
-          if (tomb2) { ++ix2; }
-          continue;
-        }
-
-        const HashCollection::Elm& e1 = map1->data()[ix1];
-        const HashCollection::Elm& e2 = map2->data()[ix2];
-
-        if (e1.hasIntKey()) {
-          if (!e2.hasIntKey() ||
-              e1.ikey != e2.ikey) {
-            return false;
-          }
-        } else {
-          assert(e1.hasStrKey());
-          if (!e2.hasStrKey() || !HPHP::equal(e1.skey, e2.skey)) {
-            return false;
-          }
-        }
-        if (!HPHP::equal(tvAsCVarRef(&e1.data), tvAsCVarRef(&e2.data))) {
-          return false;
-        }
-
-        ++ix1; ++ix2; ++compared;
-      }
-
-      return (compared == size);
-    }
-  }
-  not_reached();
+  return ArrayData::Equal(map1->arrayData(), map2->arrayData());
 }
 
 template<typename TMap>

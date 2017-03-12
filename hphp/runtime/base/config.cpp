@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,7 +22,6 @@
 #include <boost/filesystem.hpp>
 #include <fstream>
 
-#include "hphp/compiler/option.h"
 #include "hphp/runtime/base/ini-setting.h"
 #include "hphp/runtime/base/array-iterator.h"
 #include "hphp/util/logger.h"
@@ -92,8 +91,9 @@ std::string Config::IniName(const std::string& config,
   return out;
 }
 
-void Config::ParseIniString(const std::string &iniStr, IniSettingMap &ini) {
-  Config::SetParsedIni(ini, iniStr, "", false, true);
+void Config::ParseIniString(const std::string &iniStr, IniSettingMap &ini,
+                            const bool constants_only /* = false */ ) {
+  Config::SetParsedIni(ini, iniStr, "", constants_only, true);
 }
 
 void Config::ParseHdfString(const std::string &hdfStr, Hdf &hdf) {
@@ -334,14 +334,12 @@ CONTAINER_CONFIG_BODY(ConfigIMap, IMap)
 
 static HackStrictOption GetHackStrictOption(const IniSettingMap& ini,
                                             const Hdf& config,
-                                            const std::string& name /* = "" */
+                                            const std::string& name /* = "" */,
+                                            HackStrictOption def
                                            ) {
   auto val = Config::GetString(ini, config, name);
   if (val.empty()) {
-    if (Option::EnableHipHopSyntax || RuntimeOption::EnableHipHopSyntax) {
-      return HackStrictOption::ON;
-    }
-    return HackStrictOption::OFF;
+    return def;
   }
   if (val == "warn") {
     return HackStrictOption::WARN;
@@ -352,10 +350,11 @@ static HackStrictOption GetHackStrictOption(const IniSettingMap& ini,
 }
 
 void Config::Bind(HackStrictOption& loc, const IniSettingMap& ini,
-                  const Hdf& config, const std::string& name /* = "" */) {
+                  const Hdf& config, const std::string& name /* = "" */,
+                  HackStrictOption def) {
   // Currently this doens't bind to ini_get since it is hard to thread through
   // an enum
-  loc = GetHackStrictOption(ini, config, name);
+  loc = GetHackStrictOption(ini, config, name, def);
 }
 
 // No `ini` binding yet. Hdf still takes precedence but will be removed

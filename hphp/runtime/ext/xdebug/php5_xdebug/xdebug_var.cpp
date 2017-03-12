@@ -432,7 +432,7 @@ xdebug_xml_node* xdebug_var_export_xml_node(const char* name,
                                 0, 1);
     // Add each child
     ArrayIter iter(arr);
-    iter.setPos(start);
+    iter.advance(start);
     for (uint32_t i = start; i < end && iter; i++, ++iter) {
       xdebug_array_element_export_xml_node(*node, name,
                                            iter.first(),
@@ -486,7 +486,7 @@ xdebug_xml_node* xdebug_var_export_xml_node(const char* name,
                                 0, 1);
 
     ArrayIter iter(inst_props);
-    iter.setPos(start);
+    iter.advance(start);
     uint32_t i = start;
     for ( ; i < end && iter; i++, ++iter) {
       object_instance_property_export_xml_node(
@@ -500,7 +500,7 @@ xdebug_xml_node* xdebug_var_export_xml_node(const char* name,
     }
 
     ArrayIter iter2(static_props);
-    iter2.setPos(i - inst_props.size());
+    iter2.advance(i - inst_props.size());
     for ( ; i < end && iter2; i++, ++iter2) {
       object_static_property_export_xml_node(
         *node,
@@ -821,8 +821,7 @@ void xdebug_var_export_text_ansi(
     sb.printf("%*s}", (exporter.level * 2) - 2, "");
     break;
   }
-  case KindOfRef:
-  case KindOfClass: not_reached();
+  case KindOfRef: not_reached();
   }
 
   sb.append('\n');
@@ -1064,7 +1063,6 @@ void xdebug_var_export_fancy(
     }
     break;
   }
-  case KindOfClass:
   case KindOfResource:
   case KindOfRef:
     not_reached();

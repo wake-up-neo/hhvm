@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -26,9 +26,11 @@
 #include "hphp/runtime/vm/jit/translator.h"
 
 #include "hphp/util/arena.h"
+#include "hphp/util/struct-log.h"
 
 #include <string>
 #include <type_traits>
+#include <folly/Optional.h>
 
 namespace HPHP {
 //////////////////////////////////////////////////////////////////////
@@ -199,6 +201,8 @@ struct IRUnit {
    * Return the "start" timestamp when this IRUnit was constructed.
    */
   int64_t startNanos() const;
+  folly::Optional<StructuredLogEntry>& logEntry() const;
+  void initLogEntry(const Func*);
 
   /////////////////////////////////////////////////////////////////////////////
 
@@ -274,8 +278,8 @@ private:
   // "Cursor" for IRInstructions in the current bytecode.  Managed externally.
   uint16_t m_iroff{0};
 
-  // Timestamp at construction time.
-  int64_t m_startNanos;
+  int64_t m_startNanos; // Timestamp at construction time.
+  mutable folly::Optional<StructuredLogEntry> m_logEntry;
 };
 
 //////////////////////////////////////////////////////////////////////
@@ -287,6 +291,13 @@ std::string show(const IRUnit&);
 
 //////////////////////////////////////////////////////////////////////
 
+/*
+ * Find and return a unique block that ends the unit at lastSk.
+ *
+ * If one cannot be found, abort, unless the unit has 0 main exits and 1 or
+ * more blocks that end with Unreachable, in which case return nullptr. This
+ * indicates regions that ended early due to type contradictions.
+ */
 Block* findMainExitBlock(const IRUnit& unit, SrcKey lastSk);
 
 //////////////////////////////////////////////////////////////////////

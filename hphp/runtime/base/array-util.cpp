@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -39,7 +39,7 @@ namespace HPHP {
 // compositions
 
 Variant ArrayUtil::Splice(const Array& input, int offset, int64_t length /* = 0 */,
-                          const Variant& replacement /* = null_variant */,
+                          const Variant& replacement /* = uninit_variant */,
                           Array *removed /* = NULL */) {
   int num_in = input.size();
   if (offset > num_in) {
@@ -81,8 +81,8 @@ Variant ArrayUtil::Splice(const Array& input, int offset, int64_t length /* = 0 
 
   Array arr = replacement.toArray();
   if (!arr.empty()) {
-    for (ArrayIter iter(arr); iter; ++iter) {
-      const Variant& v = iter.secondRef();
+    for (ArrayIter iterb(arr); iterb; ++iterb) {
+      const Variant& v = iterb.secondRef();
       out_hash.appendWithRef(v);
     }
   }
@@ -188,14 +188,17 @@ void rangeCheckAlloc(double estNumSteps) {
 
 Variant ArrayUtil::Range(double low, double high, double step /* = 1.0 */) {
   Array ret;
+  double element;
+  int64_t i;
   if (low > high) { // Negative steps
     if (low - high < step || step <= 0) {
       throw_invalid_argument("step exceeds the specified range");
       return false;
     }
     rangeCheckAlloc((low - high) / step);
-    for (; low >= (high - DOUBLE_DRIFT_FIX); low -= step) {
-      ret.append(low);
+    for (i = 0, element = low; element >= (high - DOUBLE_DRIFT_FIX);
+         i++, element = low - (i * step)) {
+      ret.append(element);
     }
   } else if (high > low) { // Positive steps
     if (high - low < step || step <= 0) {
@@ -203,8 +206,9 @@ Variant ArrayUtil::Range(double low, double high, double step /* = 1.0 */) {
       return false;
     }
     rangeCheckAlloc((high - low) / step);
-    for (; low <= (high + DOUBLE_DRIFT_FIX); low += step) {
-      ret.append(low);
+    for (i = 0, element = low; element <= (high + DOUBLE_DRIFT_FIX);
+         i++, element = low + (i * step)) {
+      ret.append(element);
     }
   } else {
     ret.append(low);
@@ -212,7 +216,7 @@ Variant ArrayUtil::Range(double low, double high, double step /* = 1.0 */) {
   return ret;
 }
 
-Variant ArrayUtil::Range(double low, double high, int64_t step /* = 1 */) {
+Variant ArrayUtil::Range(int64_t low, int64_t high, int64_t step /* = 1 */) {
   Array ret;
   if (low > high) { // Negative steps
     if (low - high < step || step <= 0) {
@@ -488,7 +492,7 @@ static void create_miter_for_walk(folly::Optional<MArrayIter>& miter,
 void ArrayUtil::Walk(Variant& input, PFUNC_WALK walk_function,
                      const void *data, bool recursive /* = false */,
                      PointerSet *seen /* = NULL */,
-                     const Variant& userdata /* = null_variant */) {
+                     const Variant& userdata /* = uninit_variant */) {
   assert(walk_function);
 
   // The Optional is just to avoid copy constructing MArrayIter.
@@ -525,7 +529,7 @@ void ArrayUtil::Walk(Variant& input, PFUNC_WALK walk_function,
 
 Variant ArrayUtil::Reduce(const Array& input, PFUNC_REDUCE reduce_function,
                           const void *data,
-                          const Variant& initial /* = null_variant */) {
+                          const Variant& initial /* = uninit_variant */) {
   Variant result(initial);
   for (ArrayIter iter(input); iter; ++iter) {
     result = reduce_function(result, iter.second(), data);

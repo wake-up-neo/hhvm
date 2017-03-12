@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -30,6 +30,7 @@
 namespace HPHP {
   struct Array;
   struct StringData;
+  struct Class;
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -107,12 +108,13 @@ namespace HPHP { namespace rds {
 
 /*
  * Lifetime-related hooks, exported to be called at the appropriate
- * times.
+ * times. If shouldRegister is false the resultant rds will be excluded from
+ * the global rds list.
  */
 void requestInit();
 void requestExit();
-void threadInit();
-void threadExit();
+void threadInit(bool shouldRegister = true);
+void threadExit(bool shouldUnregister = true);
 
 /*
  * Flushing RDS means to madvise the memory away.  Should only be done
@@ -139,6 +141,7 @@ folly::Range<const char*> persistentSection();
 // with a void* pointer to the data, the size of the data, and the stored
 // type-index.
 template <typename F> void forEachNormalAlloc(F);
+template <typename F> void forEachLocalAlloc(F);
 
 /*
  * The thread-local pointer to the base of RDS.
@@ -184,11 +187,19 @@ struct Profile { TransID transId;
                  Offset bcOff;
                  const StringData* name; };
 
+/*
+ * Static class properties in Mode::Local
+ */
+
+struct SPropCache { const Class* cls;
+                    Slot slot; };
+
 using Symbol = boost::variant< StaticLocal
                              , ClsConstant
                              , StaticMethod
                              , StaticMethodF
                              , Profile
+                             , SPropCache
                              >;
 
 //////////////////////////////////////////////////////////////////////

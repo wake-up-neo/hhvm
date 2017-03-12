@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,6 +24,7 @@
 
 #include "hphp/runtime/vm/func.h"
 #include "hphp/runtime/vm/srckey.h"
+#include "hphp/runtime/vm/treadmill.h"
 
 #include "hphp/runtime/vm/jit/region-selection.h"
 #include "hphp/runtime/vm/jit/translator.h"
@@ -175,7 +176,7 @@ struct ProfTransRec {
    */
   SrcKey lastSrcKey() const {
     assertx(m_kind == TransKind::Profile);
-    return SrcKey(m_sk.func(), m_lastBcOff, m_sk.resumed());
+    return SrcKey{m_sk, m_lastBcOff};
   }
 
   /*
@@ -279,12 +280,27 @@ struct ProfData {
   ProfData(const ProfData&) = delete;
   ProfData& operator=(const ProfData&) = delete;
 
+  struct Session final {
+    Session() { requestInitProfData(); }
+    ~Session() { requestExitProfData(); }
+    Session(Session&&) = delete;
+    Session& operator=(Session&&) = delete;
+
+  private:
+    Treadmill::Session m_ts;
+  };
+
   /*
    * Allocate a new id for a translation. Depending on the kind of the
    * translation, a TransRec for it may or may not be created later by calling
    * addTransProfile() or addTransProfPrologue().
    */
   TransID allocTransID();
+
+  size_t numTransRecs() {
+    ReadLock lock{m_transLock};
+    return m_transRecs.size();
+  }
 
   ProfTransRec* transRec(TransID id) {
     ReadLock lock{m_transLock};
@@ -348,11 +364,7 @@ struct ProfData {
    * are passed. If no such funclet has been associated with a TransID,
    * (kInvalidTransID|nullptr) is returned.
    */
-  TransID dvFuncletTransId(const Func* func, int nArgs) const;
-  const ProfTransRec* dvFuncletTransRec(const Func* func, int nArgs) const {
-    auto tid = dvFuncletTransId(func, nArgs);
-    return tid != kInvalidTransID ? transRec(tid) : nullptr;
-  }
+  TransID dvFuncletTransId(SrcKey sk) const;
 
   /*
    * Record a profiling translation: creates a ProfTransRec and returns the
@@ -387,6 +399,18 @@ struct ProfData {
   }
 
   /*
+   * Returns true on the first call for the given `funcId', false for all
+   * subsequent calls.
+   *
+   * Used to ensure that each FuncId is only put in the retranslation queue
+   * once.
+   */
+  bool shouldQueue(FuncId funcId) {
+    m_queuedFuncs.ensureSize(funcId + 1);
+    return !m_queuedFuncs[funcId].exchange(true, std::memory_order_relaxed);
+  }
+
+  /*
    * Forget that a SrcKey is optimized.
    */
   void clearOptimized(SrcKey sk) {
@@ -417,6 +441,14 @@ struct ProfData {
     auto const func = Func::fromFuncId(funcId);
     auto const bcSize = func->past() - func->base();
     m_profilingBCSize.fetch_add(bcSize, std::memory_order_relaxed);
+  }
+
+  /*
+   * The maximum FuncId among all the functions that are being profiled.
+   */
+  FuncId maxProfilingFuncId() const {
+    auto const s = m_profilingFuncs.size();
+    return s > 0 ? s - 1 : InvalidFuncId;
   }
 
   /*
@@ -530,6 +562,11 @@ private:
   std::atomic<int64_t> m_optimizedFuncCount{0};
 
   /*
+   * Funcs that have been queued for asynchronous retranslation.
+   */
+  AtomicVector<bool> m_queuedFuncs;
+
+  /*
    * SrcKeys that have already been optimized. SrcKeys are marked as not
    * optimized by setting their entry to false rather than erasing it from the
    * map, since repeatedly erasing and inserting the same key in an
@@ -538,10 +575,13 @@ private:
   folly::AtomicHashMap<SrcKey::AtomicInt, bool> m_optimizedSKs;
 
   /*
-   * Maps from (FuncId, nArgs) pairs to prologue TransID or DV funclet TransID,
-   * respectively.
+   * Map from (FuncId, nArgs) pairs to prologue TransID.
    */
   folly::AtomicHashMap<uint64_t, TransID> m_proflogueDB;
+
+  /*
+   * Map from SrcKey.toAtomicInt() to DV funclet TransID.
+   */
   folly::AtomicHashMap<uint64_t, TransID> m_dvFuncletDB;
 
   /*
@@ -565,6 +605,14 @@ private:
   mutable ReadWriteMutex m_targetProfilesLock;
   std::unordered_map<TransID, std::vector<TargetProfileInfo>> m_targetProfiles;
 };
+
+//////////////////////////////////////////////////////////////////////
+
+/*
+ * Returns whether or not we've collected enough profile data to trigger
+ * retranslateAll.
+ */
+bool hasEnoughProfDataToRetranslateAll();
 
 //////////////////////////////////////////////////////////////////////
 

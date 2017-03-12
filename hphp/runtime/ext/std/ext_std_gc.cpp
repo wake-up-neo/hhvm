@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -20,15 +20,15 @@
 namespace HPHP {
 
 static bool HHVM_FUNCTION(gc_enabled) {
-  return RuntimeOption::EvalEnableGC;
+  return MM().isGCEnabled();
 }
 
 static void HHVM_FUNCTION(gc_enable) {
-  // maybe this should turn on/off gc for just this request?
+  MM().setGCEnabled(true);
 }
 
 static void HHVM_FUNCTION(gc_disable) {
-  // maybe this should turn on/off gc for just this request?
+  MM().setGCEnabled(false);
 }
 
 static int64_t HHVM_FUNCTION(gc_collect_cycles) {

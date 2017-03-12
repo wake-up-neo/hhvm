@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -198,26 +198,24 @@ bool removeUnreachable(IRUnit& unit) {
 
   // Walk through the reachable blocks and erase any preds that weren't
   // found.
-  bool modified = false;
-  for (auto* block: blocks) {
-    auto& preds = block->preds();
-    for (auto it = preds.begin(); it != preds.end(); ) {
-      auto* inst = it->inst();
-      ++it;
+  jit::vector<IRInstruction*> deadInsts;
+  for (auto* block : blocks) {
+    for (auto &edge : block->preds()) {
+      auto* inst = edge.inst();
+      always_assert(!inst->isTransient());
       if (!visited.test(inst->block()->id())) {
-        if (it != preds.end() && it->inst() == inst) {
-          ++it;
-        }
-
-        ITRACE(3, "removing unreachable B{}\n", inst->block()->id());
-        inst->setNext(nullptr);
-        inst->setTaken(nullptr);
-        modified = true;
+        deadInsts.push_back(inst);
       }
     }
   }
 
-  return modified;
+  for (auto* inst : deadInsts) {
+    ITRACE(3, "removing unreachable B{}\n", inst->block()->id());
+    inst->setNext(nullptr);
+    inst->setTaken(nullptr);
+  }
+
+  return !deadInsts.empty();
 }
 
 /*

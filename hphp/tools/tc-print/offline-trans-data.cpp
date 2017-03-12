@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -70,7 +70,7 @@ void OfflineTransData::loadTCData(string dumpDir) {
     uint32_t  kind;
     FuncId    funcId;
     int32_t   resumed;
-    uint64_t  profCount;
+    int32_t   hasThis;
     uint64_t  annotationsCount;
     size_t    numBCMappings = 0;
     size_t    numBlocks = 0;
@@ -78,7 +78,7 @@ void OfflineTransData::loadTCData(string dumpDir) {
 
     READ("Translation %u {", &tRec.id);
     if (tRec.id == kInvalidTransID) {
-      addTrans(tRec, 0);
+      addTrans(tRec);
       READ_EMPTY();
       READ_EMPTY();
       continue;
@@ -89,6 +89,7 @@ void OfflineTransData::loadTCData(string dumpDir) {
     READ(" src.funcName = %s", funcName);
     tRec.funcName = funcName;
     READ(" src.resumed = %d", &resumed);
+    READ(" src.hasThis = %d", &hasThis);
     READ(" src.bcStart = %d", &tRec.bcStart);
 
     READ(" src.blocks = %lu", &numBlocks);
@@ -162,8 +163,6 @@ void OfflineTransData::loadTCData(string dumpDir) {
       tRec.annotations.emplace_back(title, annotation);
     }
 
-    READ(" profCount = %" PRIu64 "", &profCount);
-
     READ(" bcMapping = %lu", &numBCMappings);
     for (size_t i = 0; i < numBCMappings; i++) {
       TransBCMapping bcMap;
@@ -196,11 +195,18 @@ void OfflineTransData::loadTCData(string dumpDir) {
 
     READ_EMPTY();
     READ_EMPTY();
-    tRec.src = SrcKey { funcId, tRec.bcStart, static_cast<bool>(resumed) };
     tRec.kind = (TransKind)kind;
+    if (isPrologue(tRec.kind)) {
+      tRec.src = SrcKey { funcId, tRec.bcStart, SrcKey::PrologueTag{} };
+    } else {
+      tRec.src = SrcKey {
+        funcId, tRec.bcStart,
+        static_cast<bool>(resumed), static_cast<bool>(hasThis)
+      };
+    }
     always_assert_flog(tid == tRec.id,
                        "Translation {} has id {}", tid, tRec.id);
-    addTrans(tRec, profCount);
+    addTrans(tRec);
 
     funcIds.insert(tRec.src.funcID());
 
@@ -256,23 +262,14 @@ TransID OfflineTransData::getTransContaining(TCA addr) const {
 
 
 // Find translations that belong to the selectedFuncId
-// Also returns the max prof count among them
-uint64_t OfflineTransData::findFuncTrans(uint32_t selectedFuncId,
-                                         vector<TransID> *inodes) {
-  uint64_t maxProfCount = 1; // Init w/ 1 to avoid div by 0 when all counts are 0
-
+void OfflineTransData::findFuncTrans(uint32_t selectedFuncId,
+                                     vector<TransID> *inodes) {
   for (uint32_t tid = 0; tid < nTranslations; tid++) {
     if (!translations[tid].isValid() ||
         translations[tid].kind == TransKind::Anchor ||
         translations[tid].src.funcID() != selectedFuncId) continue;
-
     inodes->push_back(tid);
-
-    uint64_t profCount = transCounters[tid];
-    if (profCount > maxProfCount) maxProfCount = profCount;
   }
-
-  return maxProfCount;
 }
 
 
@@ -289,8 +286,8 @@ void OfflineTransData::addControlArcs(uint32_t selectedFuncId,
 
     auto const srcFuncId = getTransRec(transId)->src.funcID();
 
-    for (size_t i = 0; i < jmpTargets.size(); i++) {
-      TransID targetId = getTransStartingAt(jmpTargets[i]);
+    for (size_t i2 = 0; i2 < jmpTargets.size(); i2++) {
+      TransID targetId = getTransStartingAt(jmpTargets[i2]);
       if (targetId != INVALID_ID &&
           // filter jumps to prologues of other funcs for now
           getTransRec(targetId)->src.funcID() == srcFuncId &&
@@ -316,6 +313,8 @@ void OfflineTransData::printTransRec(TransID transId,
     "  src.funcId = {}\n"
     "  src.funcName = {}\n"
     "  src.resumed = {}\n"
+    "  src.hasThis = {}\n"
+    "  src.prologue = {}\n"
     "  src.bcStartOffset = {}\n"
     "  src.guards = {}\n",
     tRec->id,
@@ -323,6 +322,8 @@ void OfflineTransData::printTransRec(TransID transId,
     tRec->src.funcID(),
     tRec->funcName,
     tRec->src.resumed(),
+    tRec->src.hasThis(),
+    tRec->src.prologue(),
     tRec->src.offset(),
     tRec->guards.size());
 
@@ -409,12 +410,6 @@ void OfflineTransData::printTransRec(TransID transId,
         std::cout << folly::format(" = {}\n", annotation.second);
       }
     }
-  }
-
-  if (transCounters[transId]) {
-    std::cout << folly::format(
-      "  prof-counters = {}\n",
-      transCounters[transId]);
   }
 
   transStats.printEventsHeader(transId);

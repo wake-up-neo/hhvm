@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -69,11 +69,6 @@ private:
   Ptr m_arr;
 
   Array(ArrayData* ad, NoIncRef) : m_arr(ad, NoIncRef{}) {}
-
-public:
-  template<class F> void scan(F& mark) const {
-    mark(m_arr);
-  }
 
 public:
   /*
@@ -511,21 +506,19 @@ public:
   template<typename T>
   Variant& lvalAtImpl(const T& key, Flags = Flags::None) {
     if (!m_arr) m_arr = Ptr::attach(ArrayData::Create());
-    Variant* ret = nullptr;
-    ArrayData* escalated = m_arr->lval(key, ret, m_arr->cowCheck());
-    if (escalated != m_arr) m_arr = Ptr::attach(escalated);
-    assert(ret);
-    return *ret;
+    auto const r = m_arr->lval(key, m_arr->cowCheck());
+    if (r.array != m_arr) m_arr = Ptr::attach(r.array);
+    assert(r.val);
+    return *r.val;
   }
 
   template<typename T>
   Variant& lvalAtRefImpl(const T& key, Flags = Flags::None) {
     if (!m_arr) m_arr = Ptr::attach(ArrayData::Create());
-    Variant* ret = nullptr;
-    ArrayData* escalated = m_arr->lvalRef(key, ret, m_arr->cowCheck());
-    if (escalated != m_arr) m_arr = Ptr::attach(escalated);
-    assert(ret);
-    return *ret;
+    auto const r = m_arr->lvalRef(key, m_arr->cowCheck());
+    if (r.array != m_arr) m_arr = Ptr::attach(r.array);
+    assert(r.val);
+    return *r.val;
   }
 
   static void compileTimeAssertions();
@@ -595,6 +588,10 @@ private:
 
 ALWAYS_INLINE Array empty_array() {
   return Array::attach(staticEmptyArray());
+}
+
+ALWAYS_INLINE Array empty_vec_array() {
+  return Array::attach(staticEmptyVecArray());
 }
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -90,6 +90,40 @@ let elaborate_into_current_ns nsenv id =
     | None -> "\\" ^ id
     | Some ns -> "\\" ^ ns ^ "\\" ^ id
 
+(* Walks over the namespace map and checks if any source
+ * matches the given id.
+ * If a match is found, then removes the match and
+ * replaces it with the target
+ * If no match is found, returns the id
+ *
+ * Regularly, translates from the long name to the short name.
+ * If the reverse flag is give, then translation is done
+ * otherway around.*)
+let rec translate_id ~reverse ns_map id =
+  match ns_map with
+    | [] -> id
+    | (short_name, long_name)::rest ->
+      let (target, source) = if reverse
+                             then (long_name, short_name)
+                             else (short_name, long_name) in
+      (* Append backslash at the end so that it doesn't match partially *)
+      if String_utils.string_starts_with id (source ^ "\\")
+      (* Strip out the prefix and connect it to the next beginning *)
+      then target ^ (String_utils.lstrip id source)
+      else translate_id ~reverse rest id
+
+(* Runs the autonamespace translation for both fully qualified and non qualified
+ * names *)
+let renamespace_if_aliased ?(reverse = false) ns_map id =
+  try
+    let has_bslash = id.[0] = '\\' in
+    let len = String.length id in
+    let id = if has_bslash then String.sub id 1 (len - 1) else id in
+    let translation = translate_id ~reverse ns_map id in
+    if has_bslash then "\\" ^ translation else translation
+  (* If there is some matching problem, that means we are not aliasing *)
+  with _ -> id
+
 (* Resolves an identifier in a given namespace environment. For example, if we
  * are in the namespace "N\O", the identifier "P\Q" is resolved to "\N\O\P\Q".
  *
@@ -138,7 +172,9 @@ let elaborate_id_impl ~autoimport nsenv kind (p, id) =
           use ^ (String.sub id bslash_loc len)
         end
     end in
-  p, fully_qualified
+  let translated = renamespace_if_aliased
+      (ParserOptions.auto_namespace_map nsenv.ns_popt) fully_qualified in
+  p, translated
 
 let elaborate_id = elaborate_id_impl ~autoimport:true
 (* When a name that clashes with an auto-imported name is first being
@@ -232,4 +268,5 @@ module ElaborateDefs = struct
     List.concat (List.rev acc)
 end
 
-let elaborate_defs ast = ElaborateDefs.program empty ast
+let elaborate_defs popt ast =
+  ElaborateDefs.program (Namespace_env.empty popt) ast

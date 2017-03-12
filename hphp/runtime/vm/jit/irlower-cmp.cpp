@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,6 +22,7 @@
 #include "hphp/runtime/vm/jit/ir-instruction.h"
 #include "hphp/runtime/vm/jit/ir-opcode.h"
 #include "hphp/runtime/vm/jit/ssa-tmp.h"
+#include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/type.h"
 #include "hphp/runtime/vm/jit/vasm-gen.h"
 #include "hphp/runtime/vm/jit/vasm-instr.h"
@@ -308,6 +309,8 @@ IMPL_OPCODE_CALL(NSameDict);
 
 IMPL_OPCODE_CALL(EqKeyset);
 IMPL_OPCODE_CALL(NeqKeyset);
+IMPL_OPCODE_CALL(SameKeyset);
+IMPL_OPCODE_CALL(NSameKeyset);
 
 IMPL_OPCODE_CALL(GtRes);
 IMPL_OPCODE_CALL(GteRes);
@@ -346,13 +349,16 @@ void cgEqFunc(IRLS& env, const IRInstruction* inst) {
   v << setcc{CC_E, sf, d};
 }
 
-void cgDbgAssertFunc(IRLS& env, const IRInstruction* inst) {
-  auto const s0 = srcLoc(env, inst, 0).reg(0);
-  auto const s1 = srcLoc(env, inst, 1).reg(0);
+void cgDbgAssertARFunc(IRLS& env, const IRInstruction* inst) {
+  auto const sp = srcLoc(env, inst, 0).reg();
+  auto const func = srcLoc(env, inst, 1).reg(0);
+  auto const off = cellsToBytes(inst->extra<DbgAssertARFunc>()->offset.offset);
+
   auto& v = vmain(env);
 
   auto const sf = v.makeReg();
-  v << cmpq{s0, s1, sf};
+  v << cmpqm{func, sp[off + AROFF(m_func)], sf};
+
   ifThen(v, CC_NE, sf, [&](Vout& v) { v << ud2{}; });
 }
 
@@ -361,6 +367,12 @@ void cgDbgAssertFunc(IRLS& env, const IRInstruction* inst) {
 void cgEqStrPtr(IRLS& env, const IRInstruction* inst) {
   assertx(inst->src(0)->type() <= TStr);
   assertx(inst->src(1)->type() <= TStr);
+  implCmp(env, inst, CC_E);
+}
+
+void cgEqArrayDataPtr(IRLS& env, const IRInstruction* inst) {
+  assertx(inst->src(0)->type() <= TArrLike);
+  assertx(inst->src(1)->type() <= TArrLike);
   implCmp(env, inst, CC_E);
 }
 

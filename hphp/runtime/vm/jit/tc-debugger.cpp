@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -124,8 +124,9 @@ bool addDbgGuards(const Unit* unit) {
   return true;
 }
 
-bool addDbgGuard(const Func* func, Offset offset, bool resumed) {
-  SrcKey sk(func, offset, resumed);
+bool addDbgGuardHelper(const Func* func, Offset offset,
+                       bool resumed, bool hasThis) {
+  SrcKey sk{func, offset, resumed, hasThis};
   if (auto const sr = srcDB().find(sk)) {
     if (sr->hasDebuggerGuard()) {
       return true;
@@ -151,6 +152,12 @@ bool addDbgGuard(const Func* func, Offset offset, bool resumed) {
   }
   fixups.process(nullptr);
   return true;
+}
+
+bool addDbgGuard(const Func* func, Offset offset, bool resumed) {
+  auto const ret = addDbgGuardHelper(func, offset, resumed, false);
+  if (!ret || !func->cls() || func->isStatic()) return ret;
+  return addDbgGuardHelper(func, offset, resumed, true);
 }
 
 }}}

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -42,11 +42,13 @@
 #include "hphp/runtime/vm/jit/mcgen.h"
 #include "hphp/runtime/vm/jit/phys-reg.h"
 #include "hphp/runtime/vm/jit/phys-reg-saver.h"
+#include "hphp/runtime/vm/jit/print.h"
 #include "hphp/runtime/vm/jit/service-request-handlers.h"
 #include "hphp/runtime/vm/jit/service-requests.h"
 #include "hphp/runtime/vm/jit/smashable-instr.h"
 #include "hphp/runtime/vm/jit/stack-offsets.h"
 #include "hphp/runtime/vm/jit/stack-overflow.h"
+#include "hphp/runtime/vm/jit/target-cache.h"
 #include "hphp/runtime/vm/jit/tc.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/unique-stubs-arm.h"
@@ -70,7 +72,6 @@
 #include "hphp/util/arch.h"
 #include "hphp/util/asm-x64.h"
 #include "hphp/util/data-block.h"
-#include "hphp/util/disasm.h"
 #include "hphp/util/trace.h"
 
 #include <folly/Format.h>
@@ -173,8 +174,7 @@ TCA fcallHelper(ActRec* ar) {
   if (LIKELY(!RuntimeOption::EvalFailJitPrologs)) {
     auto const tca = mcgen::getFuncPrologue(
       const_cast<Func*>(ar->func()),
-      ar->numArgs(),
-      ar
+      ar->numArgs()
     );
     if (tca) return tca;
   }
@@ -198,47 +198,6 @@ TCA fcallHelper(ActRec* ar) {
     tl_regState = VMRegState::CLEAN;
     throw;
   }
-}
-
-void syncFuncBodyVMRegs(ActRec* fp, void* sp) {
-  auto& regs = vmRegsUnsafe();
-  regs.fp = fp;
-  regs.stack.top() = (Cell*)sp;
-
-  auto const nargs = fp->numArgs();
-  auto const nparams = fp->func()->numNonVariadicParams();
-  auto const& paramInfo = fp->func()->params();
-
-  auto firstDVI = InvalidAbsoluteOffset;
-
-  for (auto i = nargs; i < nparams; ++i) {
-    auto const dvi = paramInfo[i].funcletOff;
-    if (dvi != InvalidAbsoluteOffset) {
-      firstDVI = dvi;
-      break;
-    }
-  }
-  if (firstDVI != InvalidAbsoluteOffset) {
-    regs.pc = fp->m_func->unit()->entry() + firstDVI;
-  } else {
-    regs.pc = fp->m_func->getEntry();
-  }
-}
-
-TCA funcBodyHelper(ActRec* fp) {
-  assert_native_stack_aligned();
-  void* const sp = reinterpret_cast<Cell*>(fp) - fp->func()->numSlotsInFrame();
-  syncFuncBodyVMRegs(fp, sp);
-  tl_regState = VMRegState::CLEAN;
-
-  auto const func = const_cast<Func*>(fp->m_func);
-  auto tca = mcgen::getFuncBody(func);
-  if (!tca) {
-    tca = tc::ustubs().resumeHelper;
-  }
-
-  tl_regState = VMRegState::DIRTY;
-  return tca;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -266,27 +225,17 @@ TCA emitFuncPrologueRedispatch(CodeBlock& cb, DataBlock& data) {
     auto const pTabOff = safe_cast<int32_t>(Func::prologueTableOff());
     auto const ptrSize = safe_cast<int32_t>(sizeof(LowPtr<uint8_t>));
 
-    // If we passed more args than declared, we might need to dispatch to the
+    // If we passed more args than declared, we need to dispatch to the
     // "too many arguments" prologue.
     ifThen(v, CC_L, sf, [&] (Vout& v) {
-      auto const sf = v.makeReg();
+      auto const dest = v.makeReg();
 
-      // If we passed fewer than kNumFixedPrologues, argc is still a valid
-      // index into the prologue table.
-      v << cmpli{kNumFixedPrologues, argc, sf};
+      auto const nargs = v.makeReg();
+      v << movzlq{nparams, nargs};
 
-      ifThen(v, CC_NL, sf, [&] (Vout& v) {
-        auto const dest = v.makeReg();
-
-        auto const nargs = v.makeReg();
-        v << movzlq{nparams, nargs};
-
-        // Too many gosh-darned arguments passed.  Go to the (nparams + 1)-th
-        // prologue, which is always the "too many args" entry point.
-        emitLdLowPtr(v, func[nargs * ptrSize + (pTabOff + ptrSize)],
-                     dest, sizeof(LowPtr<uint8_t>));
-        v << jmpr{dest};
-      });
+      emitLdLowPtr(v, func[nargs * ptrSize + (pTabOff + ptrSize)],
+                   dest, sizeof(LowPtr<uint8_t>));
+      v << jmpr{dest};
     });
 
     auto const nargs = v.makeReg();
@@ -345,7 +294,7 @@ TCA emitFuncBodyHelperThunk(CodeBlock& cb, DataBlock& data) {
   alignJmpTarget(cb);
 
   return vwrap(cb, data, [] (Vout& v) {
-    TCA (*helper)(ActRec*) = &funcBodyHelper;
+    TCA (*helper)(ActRec*) = &svcreq::funcBodyHelper;
     auto const dest = v.makeReg();
     v << simplecall(v, helper, rvmfp(), dest);
     v << jmpr{dest};
@@ -374,8 +323,7 @@ TCA emitFunctionEnterHelper(CodeBlock& main, CodeBlock& cold,
     // (because of fb_intercept).  If that happens, we need to return to the
     // caller, but the handler will have already popped the callee's frame.
     // So, we need to save these values for later.
-    v << pushm{ar[AROFF(m_savedRip)]};
-    v << pushm{ar[AROFF(m_sfp)]};
+    v << pushpm{ar[AROFF(m_savedRip)], ar[AROFF(m_sfp)]};
 
     v << copy2{ar, v.cns(EventHook::NormalFunc), rarg(0), rarg(1)};
 
@@ -413,8 +361,7 @@ TCA emitFunctionEnterHelper(CodeBlock& main, CodeBlock& cold,
       // callee's frame, so we're ready to continue from the original call
       // site.  We just need to grab the fp/rip of the original frame that we
       // saved earlier, and sync rvmsp().
-      v << pop{rvmfp()};
-      v << pop{saved_rip};
+      v << popp{rvmfp(), saved_rip};
 
       // Drop our call frame; the stublogue{} instruction guarantees that this
       // is exactly 16 bytes.
@@ -505,7 +452,7 @@ TCA emitInterpRet(CodeBlock& cb, DataBlock& data) {
     storeReturnRegs(v);
     assertNativeStackAligned(v);
 
-    v << lea{rvmsp()[-AROFF(m_r)], r_svcreq_arg(0)};
+    v << lea{rvmsp()[-kArRetOff], r_svcreq_arg(0)};
     v << copy{rvmfp(), r_svcreq_arg(1)};
   });
   svcreq::emit_persistent(cb, data, folly::none, REQ_POST_INTERP_RET);
@@ -537,7 +484,7 @@ TCA emitDebuggerInterpRet(CodeBlock& cb, DataBlock& data) {
     assertNativeStackAligned(v);
 
     auto const ar = v.makeReg();
-    v << lea{rvmsp()[-AROFF(m_r)], ar};
+    v << lea{rvmsp()[-kArRetOff], ar};
     debuggerRetImpl(v, ar);
   });
 }
@@ -1076,6 +1023,7 @@ TCA emitDecRefGeneric(CodeBlock& cb, DataBlock& data) {
   CGMeta meta;
 
   auto const start = vwrap(cb, data, meta, [] (Vout& v) {
+    v << vregrestrict{};
     v << stublogue{};
 
     auto const rdata = rarg(0);
@@ -1115,7 +1063,7 @@ TCA emitDecRefGeneric(CodeBlock& cb, DataBlock& data) {
 
 TCA emitEnterTCExit(CodeBlock& cb, DataBlock& data, UniqueStubs& us) {
   return vwrap(cb, data, [&] (Vout& v) {
-    // Eagerly save VM regs and realign the native stack.
+    // Eagerly save VM regs.
     storeVMRegs(v);
 
     // Realign the native stack.
@@ -1133,14 +1081,18 @@ TCA emitEnterTCExit(CodeBlock& cb, DataBlock& data, UniqueStubs& us) {
     // a return value out of a function (either a RetC, or a Yield, or an Await
     // that's suspending, etc), and moreover, we must be executing the return
     // that leaves this level of VM reentry (i.e. the only way we get here is
-    // by coming from the callToExit stub).
+    // by coming from the callToExit stub or by a phpret{} or leavetc{} that
+    // undoes the calltc{} or resumetc{} in enterTCHelper).
     //
     // Either way, we have a live PHP return value in the return registers,
     // which we need to put on the top of the evaluation stack.
     storeReturnRegs(v);
 
     // Perform a native return.
-    v << stubret{RegSet(), true};
+    //
+    // On PPC64, as there is no new frame created when entering the VM, the FP
+    // must not be saved.
+    v << stubret{RegSet(), arch() != Arch::PPC64};
   });
 }
 
@@ -1151,7 +1103,7 @@ TCA emitEnterTCHelper(CodeBlock& cb, DataBlock& data, UniqueStubs& us) {
   auto const fp       = rarg(1);
   auto const start    = rarg(2);
   auto const firstAR  = rarg(3);
-#if defined(__CYGWIN__) || defined(__MINGW__) || defined(_MSC_VER)
+#ifdef _MSC_VER
   auto const tl       = reg::r10;
   auto const calleeAR = reg::r11;
 #else
@@ -1160,13 +1112,13 @@ TCA emitEnterTCHelper(CodeBlock& cb, DataBlock& data, UniqueStubs& us) {
 #endif
 
   return vwrap2(cb, cb, data, [&] (Vout& v, Vout& vc) {
-    // Native func prologue.
-    v << stublogue{true};
-
     // Architecture-specific setup for entering the TC.
     v << inittc{};
 
-#if defined(__CYGWIN__) || defined(__MINGW__) || defined(_MSC_VER)
+    // Native func prologue.
+    v << stublogue{arch() != Arch::PPC64};
+
+#ifdef _MSC_VER
     // Windows hates argument registers.
     v << load{rsp()[0x28], reg::r10};
     v << load{rsp()[0x30], reg::r11};
@@ -1217,23 +1169,11 @@ TCA emitHandleSRHelper(CodeBlock& cb, DataBlock& data) {
     storeVMRegs(v);
 
     // Pack the service request args into a svcreq::ReqInfo on the stack.
-    switch (arch()) {
-      case Arch::X64:
-      case Arch::PPC64:
-        for (auto i = svcreq::kMaxArgs; i-- > 0; ) {
-          v << push{r_svcreq_arg(i)};
-        }
-        v << push{r_svcreq_stub()};
-        v << push{r_svcreq_req()};
-        break;
-      case Arch::ARM:
-        assertx(!(svcreq::kMaxArgs & 1));
-        for (auto i = svcreq::kMaxArgs - 1; i > 0; i -= 2) {
-          v << pushp{r_svcreq_arg(i - 1), r_svcreq_arg(i)};
-        }
-        v << pushp{r_svcreq_req(), r_svcreq_stub()};
-        break;
+    assertx(!(svcreq::kMaxArgs & 1));
+    for (auto i = svcreq::kMaxArgs; i >= 2; i -= 2) {
+      v << pushp{r_svcreq_arg(i - 1), r_svcreq_arg(i - 2)};
     }
+    v << pushp{r_svcreq_stub(), r_svcreq_req()};
 
     // Call mcg->handleServiceRequest(rsp()).
     auto const sp = v.makeReg();
@@ -1325,6 +1265,19 @@ TCA emitThrowSwitchMode(CodeBlock& cb, DataBlock& data) {
   });
 }
 
+template<class F>
+TCA emitHelperThunk(CodeCache& code, CodeBlock& cb, DataBlock& data, F* func) {
+  // we only emit these calls into hot, main and cold.
+  if (deltaFits(code.base() - (TCA)func, sz::dword) &&
+      deltaFits(code.frozen().base() - (TCA)func, sz::dword)) {
+    return (TCA)func;
+  }
+  alignJmpTarget(cb);
+  return vwrap(cb, data, [&] (Vout& v) {
+      v << jmpi{(TCA)func};
+  });
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 
 }
@@ -1370,7 +1323,7 @@ void UniqueStubs::emitAll(CodeCache& code, Debug::DebugInfo& dbg) {
 
   TCA inner_stub;
   ADD(asyncSwitchCtrl,  emitAsyncSwitchCtrl(main, data, &inner_stub));
-  ADD(asyncRetCtrl,     emitAsyncRetCtrl(main, data, inner_stub));
+  ADD(asyncRetCtrl,     emitAsyncRetCtrl(hot(), data, inner_stub));
 
   ADD(bindCallStub,           emitBindCallStub<false>(cold, data));
   ADD(immutableBindCallStub,  emitBindCallStub<true>(cold, data));
@@ -1380,6 +1333,19 @@ void UniqueStubs::emitAll(CodeCache& code, Debug::DebugInfo& dbg) {
 
   ADD(callToExit,         emitCallToExit(main, data, *this));
   ADD(throwSwitchMode,    emitThrowSwitchMode(frozen, data));
+
+  ADD(handlePrimeCacheInit,
+      emitHelperThunk(code, cold, data,
+                      MethodCache::handlePrimeCacheInit<false>));
+  ADD(handlePrimeCacheInitFatal,
+      emitHelperThunk(code, cold, data,
+                      MethodCache::handlePrimeCacheInit<true>));
+  ADD(handleSlowPath,
+      emitHelperThunk(code, main, data,
+                      MethodCache::handleSlowPath<false>));
+  ADD(handleSlowPathFatal,
+      emitHelperThunk(code, main, data,
+                      MethodCache::handleSlowPath<true>));
 
 #undef ADD
 
@@ -1397,6 +1363,8 @@ void UniqueStubs::emitAll(CodeCache& code, Debug::DebugInfo& dbg) {
 
 TCA UniqueStubs::add(const char* name, TCA start,
                      const CodeCache& code, Debug::DebugInfo& dbg) {
+  if (!code.isValidCodeAddress(start)) return start;
+
   auto& cb = code.blockFor(start);
   auto const end = cb.frontier();
 
@@ -1408,9 +1376,8 @@ TCA UniqueStubs::add(const char* name, TCA start,
 
   ONTRACE(2,
           [&]{
-            Disasm dasm(Disasm::Options().indent(4));
             std::ostringstream os;
-            dasm.disasm(os, start, end);
+            disasmRange(os, start, end);
             FTRACE(2, "{}\n", os.str());
           }()
          );
@@ -1465,8 +1432,6 @@ RegSet interp_one_cf_regs() {
 }
 
 void emitInterpReq(Vout& v, SrcKey sk, FPInvOffset spOff) {
-  if (RuntimeOption::EvalJitTransCounters) emitTransCounterInc(v);
-
   if (!sk.resumed()) {
     v << lea{rvmfp()[-cellsToBytes(spOff.offset)], rvmsp()};
   }

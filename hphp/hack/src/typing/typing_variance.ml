@@ -46,6 +46,7 @@ type position_descr =
                                    * A<T1, ..>, T1 is (Rtype_argument "A")
                                    *)
   | Rconstraint_as
+  | Rconstraint_eq
   | Rconstraint_super
 
 type position_variance =
@@ -147,6 +148,8 @@ let reason_to_string ~sign (_, descr, variance) =
       "`super` constraints on method type parameters are covariant"
   | Rconstraint_as ->
       "`as` constraints on method type parameters are contravariant"
+  | Rconstraint_eq ->
+      "`=` constraints on method type parameters are invariant"
 
 let detailed_message variance pos stack =
   match stack with
@@ -447,8 +450,7 @@ and type_list tcopt root variance env tyl =
 
 and type_ tcopt root variance env (reason, ty) =
   match ty with
-  | Tany -> env
-  | Tmixed -> env
+  | Tany | Tmixed | Terr -> env
   | Tarray (ty1, ty2) ->
     let env = type_option tcopt root variance env ty1 in
     let env = type_option tcopt root variance env ty2 in
@@ -466,20 +468,8 @@ and type_ tcopt root variance env (reason, ty) =
      * covariant type params).
      *)
     env
-  | Tgeneric (name, constraints) ->
-     let pos = Reason.to_pos reason in
-     (* As above for 'Tthis', if 'this' appears in any constraints on the type,
-      * check that it's being referenced in a proper position.
-      *)
-     List.iter constraints begin fun (_, (r, _ as ty))  ->
-        match ty with
-        | (_, Tthis) ->
-           Option.value_map
-             (snd root)
-             ~default:()
-             ~f: (check_final_this_pos_variance variance (Reason.to_pos r))
-        | _ -> ()
-      end ;
+  | Tgeneric name ->
+    let pos = Reason.to_pos reason in
       (* This section makes the position more precise.
        * Say we find a return type that is a tuple (int, int, T).
        * The whole tuple is in covariant position, and so the position
@@ -604,13 +594,13 @@ and type_ tcopt root variance env (reason, ty) =
  * however -- you can't imagine doing very much with a returned value that is
  * some (unspecified) supertype of a class.
  *)
-and constraint_ tcopt root env cstr =
-  match cstr with
-  | Ast.Constraint_as, (r, _ as ty) ->
-      let pos = Reason.to_pos r in
-      let reason = pos, Rconstraint_as, Pcontravariant in
-      type_ tcopt root (Vcontravariant [reason]) env ty
-  | Ast.Constraint_super, (r, _ as ty) ->
-      let pos = Reason.to_pos r in
-      let reason = pos, Rconstraint_super, Pcovariant in
-      type_ tcopt root (Vcovariant [reason]) env ty
+and constraint_ tcopt root env (ck, (r, _ as ty)) =
+  let pos = Reason.to_pos r in
+  let var = match ck with
+    | Ast.Constraint_as -> Vcontravariant [pos, Rconstraint_as, Pcontravariant]
+    | Ast.Constraint_eq ->
+      let reasons = [pos, Rconstraint_eq, Pinvariant] in
+      Vinvariant (reasons, reasons)
+    | Ast.Constraint_super -> Vcovariant [pos, Rconstraint_super, Pcovariant]
+  in
+  type_ tcopt root var env ty

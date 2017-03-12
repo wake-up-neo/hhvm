@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -32,7 +32,6 @@ void HHVM_STATIC_METHOD(WaitHandle, setOnIoWaitExitCallback,
 void HHVM_STATIC_METHOD(WaitHandle, setOnJoinCallback,
                         const Variant& callback);
 void HHVM_METHOD(WaitHandle, import);
-Variant HHVM_METHOD(WaitHandle, join);
 bool HHVM_METHOD(WaitHandle, isFinished);
 bool HHVM_METHOD(WaitHandle, isSucceeded);
 bool HHVM_METHOD(WaitHandle, isFailed);
@@ -191,17 +190,10 @@ struct c_WaitHandle : ObjectData {
     static_assert(offsetof(c_WaitHandle, m_ctxVecIndex) == aux, "");
   }
 
- public:
-  template<class F> void scan(F& mark) const {
-    if (isFinished()) {
-      mark(m_resultOrException);
-    } else {
-      m_parentChain.scan(mark);
-    }
-    // TODO: t7925088 switch on kind and handle subclasses
-  }
+  // TODO: t7925088 switch on kind and handle subclasses
 
  protected:
+  TYPE_SCAN_IGNORE_ALL;
   union {
     // STATE_SUCCEEDED || STATE_FAILED
     Cell m_resultOrException;

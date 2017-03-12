@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -91,13 +91,13 @@ bool simplify_impl(Env& env, Vlabel b, size_t i, Simplify simplify) {
     for (auto const& inst : blocks[Vlabel(v)].code) {
       visitUses(unit, inst, [&] (Vreg r) {
         if (r >= env.use_counts.size()) {
-          env.use_counts.resize(size_t{r}+1);
+          env.use_counts.resize(size_t{r} + 1);
         }
         ++env.use_counts[r];
       });
       visitDefs(unit, inst, [&] (Vreg r) {
         if (r >= env.def_insts.size()) {
-          env.def_insts.resize(size_t{r}+1, Vinstr::nop);
+          env.def_insts.resize(size_t{r} + 1, Vinstr::nop);
         }
         env.def_insts[r] = inst.op;
       });
@@ -140,8 +140,23 @@ bool simplify(Env& env, const andq& vandq, Vlabel b, size_t i) {
 }
 
 bool simplify(Env& env, const andqi& vandqi, Vlabel b, size_t i) {
-  return simplify_and<testqi>(env, vandqi, b, i);
+  return
+    simplify_and<testqi>(env, vandqi, b, i) ||
+    simplify_impl(env, b, i, [&] (Vout& v) {
+      if (!arch_any(Arch::X64)) return 0;
+
+      if (env.use_counts[vandqi.sf] == 0 && vandqi.s0.q() == 0xff) {
+        // andqi{0xff, s, d} --> movzbq{s, d}
+        auto const tmp = v.makeReg();
+        v << movtqb{vandqi.s1, tmp};
+        v << movzbq{tmp, vandqi.d};
+        return 1;
+      }
+      return 0;
+    });
 }
+
+////////////////////////////////////////////////////////////////////////////////
 
 bool simplify(Env& env, const setcc& vsetcc, Vlabel b, size_t i) {
   return if_inst<Vinstr::xorbi>(env, b, i + 1, [&] (const xorbi& vxorbi) {
@@ -158,10 +173,40 @@ bool simplify(Env& env, const setcc& vsetcc, Vlabel b, size_t i) {
   });
 }
 
+// Fold a cmov of a certain width into a copy if both values are the same
+// register or have the same known constant value.
+template <typename Inst>
+bool cmov_fold_impl(Env& env, const Inst& inst, Vlabel b, size_t i) {
+  auto const equivalent = [&]{
+    if (inst.t == inst.f) return true;
+
+    auto const t_it = env.unit.regToConst.find(inst.t);
+    if (t_it == env.unit.regToConst.end()) return false;
+    auto const f_it = env.unit.regToConst.find(inst.f);
+    if (f_it == env.unit.regToConst.end()) return false;
+
+    auto const t_const = t_it->second;
+    auto const f_const = f_it->second;
+    if (t_const.isUndef || f_const.isUndef) return false;
+    if (t_const.kind != f_const.kind) return false;
+    return t_const.val == f_const.val;
+  }();
+  if (!equivalent) return false;
+
+  return simplify_impl(
+    env, b, i,
+    [&] (Vout& v) {
+      v << copy{inst.t, inst.d};
+      return 1;
+    }
+  );
+}
+
 // Turn a cmov of a certain width into a matching setcc instruction if the
 // conditions are correct (both sources are constants of value 0 or 1).
 template <typename Inst, typename Extend>
-bool cmov_impl(Env& env, const Inst& inst, Vlabel b, size_t i, Extend extend) {
+bool cmov_setcc_impl(Env& env, const Inst& inst, Vlabel b,
+                     size_t i, Extend extend) {
   auto const t_it = env.unit.regToConst.find(inst.t);
   if (t_it == env.unit.regToConst.end()) return false;
   auto const f_it = env.unit.regToConst.find(inst.f);
@@ -193,45 +238,47 @@ bool cmov_impl(Env& env, const Inst& inst, Vlabel b, size_t i, Extend extend) {
   bool f_val;
   if (!check_const(f_it->second, f_val)) return false;
 
-  return simplify_impl(
-    env, b, i, [&] (Vout& v) {
-      auto const d = env.unit.makeReg();
-      if (t_val == f_val) {
-        v << copy{env.unit.makeConst(t_val), d};
-      } else if (t_val) {
-        v << setcc{inst.cc, inst.sf, d};
-      } else {
-        v << setcc{ccNegate(inst.cc), inst.sf, d};
-      }
-      extend(v, d, inst.d);
-      return 1;
+  return simplify_impl(env, b, i, [&] (Vout& v) {
+    auto const d = env.unit.makeReg();
+    if (t_val == f_val) {
+      v << copy{env.unit.makeConst(t_val), d};
+    } else if (t_val) {
+      v << setcc{inst.cc, inst.sf, d};
+    } else {
+      v << setcc{ccNegate(inst.cc), inst.sf, d};
     }
-  );
+    extend(v, d, inst.d);
+    return 1;
+  });
 }
 
 bool simplify(Env& env, const cmovb& inst, Vlabel b, size_t i) {
-  return cmov_impl(
+  if (cmov_fold_impl(env, inst, b, i)) return true;
+  return cmov_setcc_impl(
     env, inst, b, i,
     [](Vout& v, Vreg8 src, Vreg dest) { v << copy{src, dest}; }
   );
 }
 
 bool simplify(Env& env, const cmovw& inst, Vlabel b, size_t i) {
-  return cmov_impl(
+  if (cmov_fold_impl(env, inst, b, i)) return true;
+  return cmov_setcc_impl(
     env, inst, b, i,
     [](Vout& v, Vreg8 src, Vreg dest) { v << movzbw{src, dest}; }
   );
 }
 
 bool simplify(Env& env, const cmovl& inst, Vlabel b, size_t i) {
-  return cmov_impl(
+  if (cmov_fold_impl(env, inst, b, i)) return true;
+  return cmov_setcc_impl(
     env, inst, b, i,
     [](Vout& v, Vreg8 src, Vreg dest) { v << movzbl{src, dest}; }
   );
 }
 
 bool simplify(Env& env, const cmovq& inst, Vlabel b, size_t i) {
-  return cmov_impl(
+  if (cmov_fold_impl(env, inst, b, i)) return true;
+  return cmov_setcc_impl(
     env, inst, b, i,
     [](Vout& v, Vreg8 src, Vreg dest) { v << movzbq{src, dest}; }
   );
@@ -240,17 +287,22 @@ bool simplify(Env& env, const cmovq& inst, Vlabel b, size_t i) {
 ////////////////////////////////////////////////////////////////////////////////
 
 /*
- * Simplify equal/not-equal comparisons against zero into test
- * instructions. Only perform this simplification if the comparison is
- * immediately followed by an instruction which uses the flag result with an
- * equals or not-equals condition code. Furthermore, that must be the only usage
- * of that flag result.
+ * Simplify equal/not-equal comparisons against zero into test instructions.
+ *
+ * Only perform this simplification if the comparison is immediately followed
+ * by an instruction which uses the flag result with an equals or not-equals
+ * condition code.  Furthermore, that must be the only usage of that flag
+ * result.
  */
 
-// Check if an instruction uses a particular flag register and contains an equal
-// or not-equal condition code. If more than one condition code or flag register
-// is used, we don't match against the instruction. This is preferred over
-// maintaining an explicit list of allowed instructions.
+/*
+ * Check if an instruction uses a particular flag register and contains an equal
+ * or not-equal condition code.
+ *
+ * If more than one condition code or flag register is used, we don't match
+ * against the instruction.  This is preferred over maintaining an explicit
+ * list of allowed instructions.
+ */
 struct CmpUseChecker {
   explicit CmpUseChecker(VregSF target) : target{target} {}
 
@@ -275,8 +327,10 @@ struct CmpUseChecker {
   folly::Optional<bool> use_result;
 };
 
-// Transform a cmp* instruction into a test* instruction if all the above
-// conditions are met.
+/*
+ * Transform a cmp* instruction into a test* instruction if all the above
+ * conditions are met.
+ */
 template <typename Out, typename In, typename Reg>
 bool cmp_zero_impl(Env& env, const In& inst, Reg r, Vlabel b, size_t i) {
   if (env.use_counts[inst.sf] != 1) return false;
@@ -294,32 +348,34 @@ bool cmp_zero_impl(Env& env, const In& inst, Reg r, Vlabel b, size_t i) {
   }();
   if (!suitable_use) return false;
 
-  return simplify_impl(
-    env, b, i,
-    [&] (Vout& v) {
-      v << Out{r, r, inst.sf};
-      return 1;
-    }
-  );
+  return simplify_impl(env, b, i, [&] (Vout& v) {
+    v << Out{r, r, inst.sf};
+    return 1;
+  });
 }
 
-// Determine if either register in the instruction represents a constant zero,
-// returning it. Returns an invalid register if neither does.
+/*
+ * Determine if either register in the instruction represents a constant zero
+ * and return it.  Returns an invalid register if neither does.
+ */
 template <typename In>
 auto get_cmp_zero_reg(Env& env, const In& inst) -> decltype(inst.s0) {
-  auto const s0_it = env.unit.regToConst.find(inst.s0);
-  auto const s1_it = env.unit.regToConst.find(inst.s1);
-  if (s0_it != env.unit.regToConst.end() && s0_it->second.val == 0) {
+  auto const& consts = env.unit.regToConst;
+
+  auto const s0_it = consts.find(inst.s0);
+  auto const s1_it = consts.find(inst.s1);
+  if (s0_it != consts.end() && s0_it->second.val == 0) {
     return inst.s1;
-  } else if (s1_it != env.unit.regToConst.end() && s1_it->second.val == 0) {
+  } else if (s1_it != consts.end() && s1_it->second.val == 0) {
     return inst.s0;
   } else {
     return decltype(inst.s0){Vreg::kInvalidReg};
   }
 }
 
-// Comparisons against another register
-
+/*
+ * Comparisons against another register.
+ */
 bool simplify(Env& env, const cmpb& inst, Vlabel b, size_t i) {
   auto const reg = get_cmp_zero_reg(env, inst);
   return reg.isValid() ? cmp_zero_impl<testb>(env, inst, reg, b, i) : false;
@@ -335,8 +391,9 @@ bool simplify(Env& env, const cmpq& inst, Vlabel b, size_t i) {
   return reg.isValid() ? cmp_zero_impl<testq>(env, inst, reg, b, i) : false;
 }
 
-// Comparisons against literals
-
+/*
+ * Comparisons against literals.
+ */
 bool simplify(Env& env, const cmpbi& inst, Vlabel b, size_t i) {
   return (inst.s0.q() == 0)
     ? cmp_zero_impl<testb>(env, inst, inst.s1, b, i) : false;
@@ -374,8 +431,21 @@ bool simplify(Env& env, const copyargs& inst, Vlabel b, size_t i) {
   });
 }
 
+bool simplify(Env& env, const loadb& inst, Vlabel b, size_t i) {
+  return if_inst<Vinstr::movzbl>(env, b, i + 1, [&] (const movzbl& cm) {
+    // loadb; movzbl; -> loadzbl;
+    if (!(arch() == Arch::ARM &&
+          env.use_counts[inst.d] == 1 &&
+          inst.d == cm.s)) return false;
+
+    return simplify_impl(env, b, i, [&] (Vout& v) {
+      v << loadzbl{inst.s, cm.d};
+      return 2;
+    });
+  });
+}
+
 bool simplify(Env& env, const movzlq& inst, Vlabel b, size_t i) {
-  if (arch() != Arch::X64) return false;
   auto const def_op = env.def_insts[inst.s];
 
   // Check if `inst.s' was defined by an instruction with Vreg32 operands, or
@@ -389,6 +459,16 @@ bool simplify(Env& env, const movzlq& inst, Vlabel b, size_t i) {
   // always zero the upper bits.
   return simplify_impl(env, b, i, [&] (Vout& v) {
     v << copy{inst.s, inst.d};
+    return 1;
+  });
+}
+
+bool simplify(Env& env, const pop& inst, Vlabel b, size_t i) {
+  if (env.use_counts[inst.d]) return false;
+
+  // Convert to an lea when popping to a reg without any uses.
+  return simplify_impl(env, b, i, [&] (Vout& v) {
+    v << lea{reg::rsp[8], reg::rsp};
     return 1;
   });
 }

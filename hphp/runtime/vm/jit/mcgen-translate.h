@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,11 +17,18 @@
 #ifndef incl_HPHP_JIT_MCGEN_TRANSLATE_H_
 #define incl_HPHP_JIT_MCGEN_TRANSLATE_H_
 
+#include "hphp/runtime/vm/jit/code-cache.h"
 #include "hphp/runtime/vm/jit/types.h"
+
+#include <folly/Optional.h>
 
 namespace HPHP { namespace jit {
 
+struct FPInvOffset;
+struct ProfTransRec;
 struct TransArgs;
+
+namespace tc { struct TransMetaInfo; };
 
 namespace mcgen {
 
@@ -35,23 +42,17 @@ namespace mcgen {
  * Should the region be absent, an appropriate region for the designated kind
  * will be selected.
  */
-TCA translate(TransArgs args);
+folly::Optional<tc::TransMetaInfo> translate(
+  TransArgs args,
+  FPInvOffset spOff,
+  folly::Optional<CodeCache::View> optView = folly::none
+);
 
 /*
- * Create a translation for the SrcKey specified in args.
- *
- * If a translation for this SrcKey already exists it will be returned. The kind
- * of translation created will be selected based on the SrcKey specified.
+ * True iff retranslateAll is enabled and supported by the current server
+ * execution mode.
  */
-TCA createTranslation(TransArgs args);
-
-/*
- * Find the translation for the SrcKey specified in args.
- *
- * If no translation exists or the current VM frame is a pseudomain then return
- * nullptr.
- */
-TCA findTranslation(const TransArgs& args);
+bool retranslateAllEnabled();
 
 }}}
 

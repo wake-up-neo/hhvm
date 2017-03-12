@@ -159,7 +159,7 @@ function pg_field_num(resource $result, string $field_name): int;
 function pg_field_prtlen(
   resource $result,
   mixed $row_number,
-  mixed $field = null_variant,
+  mixed $field = uninit_variant,
 ): ?int;
 
 <<__Native>>
@@ -309,6 +309,9 @@ function pg_send_query(resource $connection, string $query): bool;
 
 <<__Native>>
 function pg_set_client_encoding(resource $connection, string $encoding): int;
+
+<<__Native>>
+function pg_set_error_verbosity(resource $connection, int $verbosity): mixed;
 
 <<__Native>>
 function pg_trace(string $pathname, string $mode, resource $connection): bool;

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,14 +24,16 @@ namespace HPHP { namespace jit {
 // TransContext.
 
 inline TransContext::TransContext(
-  TransID id, TransKind kind, TransFlags flags, SrcKey sk, FPInvOffset spOff
-)
+  TransID id, TransKind kind, TransFlags flags,
+  SrcKey sk, FPInvOffset spOff, Op fpushOff)
   : transID(id)
   , kind(kind)
   , flags(flags)
   , initSpOffset(spOff)
+  , callerFPushOp(fpushOff)
   , func(sk.valid() ? sk.func() : nullptr)
   , initBcOffset(sk.offset())
+  , hasThis(sk.hasThis())
   , prologue(sk.prologue())
   , resumed(sk.resumed())
 {}
@@ -41,7 +43,7 @@ inline SrcKey TransContext::srcKey() const {
     assertx(!resumed);
     return SrcKey { func, initBcOffset, SrcKey::PrologueTag{} };
   }
-  return SrcKey { func, initBcOffset, resumed };
+  return SrcKey { func, initBcOffset, resumed, hasThis };
 }
 
 ///////////////////////////////////////////////////////////////////////////////

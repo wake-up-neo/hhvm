@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -119,7 +119,6 @@ int64_t convArrToDblHelper(ArrayData* a);
 int64_t convStrToDblHelper(const StringData* s);
 int64_t convResToDblHelper(const ResourceHdr* r);
 int64_t convCellToDblHelper(TypedValue tv);
-int64_t convArrToIntHelper(ArrayData* a);
 ObjectData* convCellToObjHelper(TypedValue tv);
 StringData* convDblToStrHelper(int64_t i);
 StringData* convIntToStrHelper(int64_t i);
@@ -153,12 +152,7 @@ void raise_error_sd(const StringData* sd);
 
 RefData* ldClosureStaticLoc(StringData* name, ActRec* fp);
 
-bool ak_exist_string(ArrayData* arr, StringData* key);
-bool ak_exist_string_obj(ObjectData* obj, StringData* key);
-bool ak_exist_int_obj(ObjectData* obj, int64_t key);
-
 TypedValue arrayIdxI(ArrayData*, int64_t, TypedValue);
-TypedValue arrayIdxIc(ArrayData*, int64_t, TypedValue);
 TypedValue arrayIdxS(ArrayData*, StringData*, TypedValue);
 TypedValue arrayIdxSi(ArrayData*, StringData*, TypedValue);
 
@@ -169,8 +163,6 @@ TypedValue keysetIdxI(ArrayData*, int64_t, TypedValue);
 TypedValue keysetIdxS(ArrayData*, StringData*, TypedValue);
 
 TypedValue mapIdx(ObjectData*, StringData*, TypedValue);
-
-TypedValue getMemoKeyHelper(TypedValue tv);
 
 int32_t arrayVsize(ArrayData*);
 
@@ -184,8 +176,6 @@ TypedValue* getSPropOrRaise(const Class* cls,
 int64_t switchDoubleHelper(int64_t val, int64_t base, int64_t nTargets);
 int64_t switchStringHelper(StringData* s, int64_t base, int64_t nTargets);
 int64_t switchObjHelper(ObjectData* o, int64_t base, int64_t nTargets);
-
-void profileArrayKindHelper(ArrayKindProfile* profile, ArrayData* arr);
 
 void checkFrame(ActRec* fp, Cell* sp, bool fullCheck, Offset bcOff);
 
@@ -218,8 +208,6 @@ void registerLiveObj(ObjectData* obj);
 
 /* Check if a method of the given name exists on the class. */
 bool methodExistsHelper(Class*, StringData*);
-
-int64_t decodeCufIterHelper(Iter* it, TypedValue func);
 
 /*
  * Throw a VMSwitchMode exception.

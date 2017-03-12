@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -31,20 +31,12 @@
 #include "hphp/util/compression.h"
 #include "hphp/util/logger.h"
 #include <folly/String.h>
-#ifdef HAVE_SNAPPY
-#include <snappy.h>
-#endif
-#include <lz4.h>
-#include <lz4hc.h>
 #include <memory>
 #include <algorithm>
 
 #define PHP_ZLIB_MODIFIER 1000
 
-
-using namespace HPHP;
-
-namespace {
+namespace HPHP {
 
 ///////////////////////////////////////////////////////////////////////////////
 // compress.zlib:// stream wrapper
@@ -77,16 +69,11 @@ static struct ZlibStreamWrapper final : Stream::Wrapper {
     auto file = req::make<ZipFile>();
     bool ret = file->open(translated, mode);
     if (!ret) {
-      raise_warning("%s", file->getLastError().c_str());
       return nullptr;
     }
     return file;
   }
 } s_zlib_stream_wrapper;
-
-} // nil namespace
-
-namespace HPHP {
 
 const int64_t k_ZLIB_ENCODING_RAW     = -MAX_WBITS;
 const int64_t k_ZLIB_ENCODING_GZIP    = 0x1f;
@@ -383,37 +370,6 @@ Variant HHVM_FUNCTION(gzwrite, const Resource& zp, const String& str,
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// Snappy functions
-
-#ifdef HAVE_SNAPPY
-
-Variant HHVM_FUNCTION(snappy_compress, const String& data) {
-  size_t size;
-  char *compressed =
-    (char *)malloc(snappy::MaxCompressedLength(data.size()) + 1);
-
-  snappy::RawCompress(data.data(), data.size(), compressed, &size);
-  compressed = (char *)realloc(compressed, size + 1);
-  compressed[size] = '\0';
-  return String(compressed, size, AttachString);
-}
-
-Variant HHVM_FUNCTION(snappy_uncompress, const String& data) {
-  size_t dsize;
-
-  snappy::GetUncompressedLength(data.data(), data.size(), &dsize);
-  String s = String(dsize, ReserveString);
-  char *uncompressed = s.mutableData();
-
-  if (!snappy::RawUncompress(data.data(), data.size(), uncompressed)) {
-    return false;
-  }
-  s.setSize(dsize);
-  return s;
-}
-#endif // HAVE_SNAPPY
-
-///////////////////////////////////////////////////////////////////////////////
 // NZLIB functions
 
 #define NZLIB_MAGIC 0x6e7a6c69 /* nzli */
@@ -476,122 +432,7 @@ Variant HHVM_FUNCTION(nzuncompress, const String& compressed) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// LZ4 functions
-
-// Varint helper functions for lz4
-int VarintSize(int val) {
-  int s = 1;
-  while (val >= 128) {
-    ++s;
-    val >>= 7;
-  }
-  return s;
-}
-
-void VarintEncode(int val, char** dest) {
-  char* p = *dest;
-  while (val >= 128) {
-    *p++ = 0x80 | (static_cast<char>(val) & 0x7f);
-    val >>= 7;
-  }
-  *p++ = static_cast<char>(val);
-  *dest = p;
-}
-
-int VarintDecode(const char** src, int max_size) {
-  const char* p = *src;
-  int val = 0;
-  int shift = 0;
-  while (*p & 0x80) {
-    if (max_size <= 1) { return -1; }
-    --max_size;
-    val |= static_cast<int>(*p++ & 0x7f) << shift;
-    shift += 7;
-  }
-  val |= static_cast<int>(*p++) << shift;
-  *src = p;
-  return val;
-}
-
-Variant HHVM_FUNCTION(lz4_compress, const String& uncompressed,
-                                    bool high /* = false */) {
-  if (high) {
-    return f_lz4_hccompress(uncompressed);
-  }
-  int bufsize = LZ4_compressBound(uncompressed.size());
-  if (bufsize < 0) {
-    return false;
-  }
-  int headerSize = VarintSize(uncompressed.size());
-  bufsize += headerSize;  // for the header
-  String s = String(bufsize, ReserveString);
-  char *compressed = s.mutableData();
-
-  VarintEncode(uncompressed.size(), &compressed);  // write the header
-
-  int csize = LZ4_compress(uncompressed.data(), compressed,
-      uncompressed.size());
-  if (csize < 0) {
-    return false;
-  }
-  bufsize = csize + headerSize;
-  s.shrink(bufsize);
-  return s;
-}
-
-Variant HHVM_FUNCTION(lz4_hccompress, const String& uncompressed) {
-  int bufsize = LZ4_compressBound(uncompressed.size());
-  if (bufsize < 0) {
-    return false;
-  }
-  int headerSize = VarintSize(uncompressed.size());
-  bufsize += headerSize;  // for the header
-  String s = String(bufsize, ReserveString);
-  char *compressed = s.mutableData();
-
-  VarintEncode(uncompressed.size(), &compressed);  // write the header
-
-  int csize = LZ4_compressHC(uncompressed.data(),
-      compressed, uncompressed.size());
-  if (csize < 0) {
-    return false;
-  }
-  bufsize = csize + headerSize;
-  s.shrink(bufsize);
-  return s;
-}
-
-Variant HHVM_FUNCTION(lz4_uncompress, const String& compressed) {
-  const char* compressed_ptr = compressed.data();
-  int dsize = VarintDecode(&compressed_ptr, compressed.size());
-  if (dsize < 0) {
-    return false;
-  }
-
-  int inSize = compressed.size() - (compressed_ptr - compressed.data());
-  String s = String(dsize, ReserveString);
-  char *uncompressed = s.mutableData();
-#ifdef LZ4_MAX_INPUT_SIZE
-  int ret = LZ4_decompress_safe(compressed_ptr, uncompressed, inSize, dsize);
-
-  if (ret != dsize) {
-    return false;
-  }
-#else
-  int ret = LZ4_decompress_fast(compressed_ptr, uncompressed, dsize);
-
-  if (ret <= 0 || ret > inSize) {
-    return false;
-  }
-#endif
-
-  s.setSize(dsize);
-  return s;
-}
-
-///////////////////////////////////////////////////////////////////////////////
 // Chunk-based API
-namespace {
 
 const StaticString s_SystemLib_ChunkedInflator("__SystemLib\\ChunkedInflator");
 
@@ -651,6 +492,9 @@ struct ChunkedInflator {
  private:
   ::z_stream m_zstream;
   bool m_eof;
+
+  // z_stream contains void* that we don't care about.
+  TYPE_SCAN_IGNORE_FIELD(m_zstream);
 };
 
 #define FETCH_CHUNKED_INFLATOR(dest, src) \
@@ -668,8 +512,6 @@ String HHVM_METHOD(ChunkedInflator,
   FETCH_CHUNKED_INFLATOR(data, this_);
   assert(data);
   return data->inflateChunk(chunk);
-}
-
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -716,15 +558,8 @@ struct ZlibExtension final : Extension {
     HHVM_FE(qlzcompress);
     HHVM_FE(qlzuncompress);
 #endif
-#ifdef HAVE_SNAPPY
-    HHVM_FE(snappy_compress);
-    HHVM_FE(snappy_uncompress);
-#endif
     HHVM_FE(nzcompress);
     HHVM_FE(nzuncompress);
-    HHVM_FE(lz4_compress);
-    HHVM_FE(lz4_hccompress);
-    HHVM_FE(lz4_uncompress);
 
     HHVM_NAMED_ME(__SystemLib\\ChunkedInflator, eof,
                   HHVM_MN(ChunkedInflator, eof));
@@ -737,9 +572,6 @@ struct ZlibExtension final : Extension {
     loadSystemlib();
 #ifdef HAVE_QUICKLZ
     loadSystemlib("zlib-qlz");
-#endif
-#ifdef HAVE_SNAPPY
-    loadSystemlib("zlib-snappy");
 #endif
   }
 } s_zlib_extension;

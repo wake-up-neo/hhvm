@@ -32,6 +32,16 @@ open Core
  *
  *****************************************************************************)
 
+exception Worker_exited_abnormally of int
+exception Worker_oomed
+exception Worker_busy
+
+type send_job_failure =
+  | Worker_already_exited of Unix.process_status
+  | Other_send_job_failure of exn
+
+exception Worker_failed_to_send_job of send_job_failure
+
 (* Should we 'prespawn' the worker ? *)
 let use_prespawned = not Sys.win32
 
@@ -54,8 +64,7 @@ let max_workers = 1000
 type request = Request of (serializer -> unit)
 and serializer = { send: 'a. 'a -> unit }
 and void (* an empty type *)
-
-
+type call_wrapper = { wrap: 'x 'b. ('x -> 'b) -> 'x -> 'b }
 
 (*****************************************************************************
  * Everything we need to know about a worker.
@@ -66,6 +75,17 @@ type t = {
 
   id: int; (* Simple id for the worker. This is not the worker pid: on
               Windows, we spawn a new worker for each job. *)
+
+  (** The call wrapper will wrap any workload sent to the worker (via "call"
+   * below) before invoking the workload.
+   *
+   * That is, when calling the worker with workload `f x`, it will be wrapped
+   * as `wrap (f x)`.
+   *
+   * This allows universal handling of workload at the time we create the actual
+   * workers. For example, this can be useful to handle exceptions uniformly
+   * across workers regardless what workload is called on them. *)
+  call_wrapper: call_wrapper option;
 
   (* Sanity check: is the worker still available ? *)
   mutable killed: bool;
@@ -119,7 +139,15 @@ and 'a slave = {
  *****************************************************************************)
 
 let slave_main ic oc =
+  let start_user_time = ref 0.0 in
+  let start_system_time = ref 0.0 in
   let send_result data =
+    let tm = Unix.times () in
+    let end_user_time = tm.Unix.tms_utime +. tm.Unix.tms_cutime in
+    let end_system_time = tm.Unix.tms_stime +. tm.Unix.tms_cstime in
+    Measure.sample "worker_user_time" (end_user_time -. !start_user_time);
+    Measure.sample "worker_system_time" (end_system_time -. !start_system_time);
+
     let stats = Measure.serialize (Measure.pop_global ()) in
     let s = Marshal.to_string (data,stats) [Marshal.Closures] in
     let len = String.length s in
@@ -134,7 +162,11 @@ let slave_main ic oc =
     Daemon.output_string oc s;
     Daemon.flush oc in
   try
+    Measure.push_global ();
     let Request do_process = Daemon.from_channel ic in
+    let tm = Unix.times () in
+    start_user_time := tm.Unix.tms_utime +. tm.Unix.tms_cutime;
+    start_system_time := tm.Unix.tms_stime +. tm.Unix.tms_cstime;
     do_process { send = send_result };
     exit 0
   with
@@ -142,6 +174,18 @@ let slave_main ic oc =
       exit 1
   | SharedMem.Out_of_shared_memory ->
       Exit_status.(exit Out_of_shared_memory)
+  | SharedMem.Hash_table_full ->
+      Exit_status.(exit Hash_table_full)
+  | SharedMem.Heap_full ->
+      Exit_status.(exit Heap_full)
+  | SharedMem.Sql_assertion_failure err_num ->
+      let exit_code = match err_num with
+        | 11 -> Exit_status.Sql_corrupt
+        | 14 -> Exit_status.Sql_cantopen
+        | 21 -> Exit_status.Sql_misuse
+        | _ -> Exit_status.Sql_assertion_failure
+      in
+      Exit_status.exit exit_code
   | e ->
       let e_str = Printexc.to_string e in
       Printf.printf "Exception: %s\n" e_str;
@@ -216,15 +260,17 @@ let register_entry_point ~restore =
 let workers = ref []
 
 (* Build one worker. *)
-let make_one spawn id =
+let make_one ?call_wrapper spawn id =
   if id >= max_workers then failwith "Too many workers";
 
   let prespawned = if not use_prespawned then None else Some (spawn ()) in
-  let worker = { id; busy = false; killed = false; prespawned; spawn } in
+  let worker = { call_wrapper; id; busy = false; killed = false; prespawned; spawn } in
   workers := worker :: !workers;
   worker
 
-let make ~saved_state ~entry ~nbr_procs ~gc_control ~heap_handle =
+(** Make a few workers. When workload is given to a worker (via "call" below),
+ * the workload is wrapped in the calL_wrapper. *)
+let make ?call_wrapper ~saved_state ~entry ~nbr_procs ~gc_control ~heap_handle =
   let spawn log_fd =
     Unix.clear_close_on_exec heap_handle.SharedMem.h_fd;
     let handle =
@@ -237,7 +283,7 @@ let make ~saved_state ~entry ~nbr_procs ~gc_control ~heap_handle =
   in
   let made_workers = ref [] in
   for n = 1 to nbr_procs do
-    made_workers := make_one spawn n :: !made_workers
+    made_workers := make_one ?call_wrapper spawn n :: !made_workers
   done;
   !made_workers
 
@@ -248,7 +294,7 @@ let make ~saved_state ~entry ~nbr_procs ~gc_control ~heap_handle =
 
 let call w (type a) (type b) (f : a -> b) (x : a) : b handle =
   if w.killed then Printf.ksprintf failwith "killed worker (%d)" w.id;
-  if w.busy then Printf.ksprintf failwith "busy worker (%d)" w.id;
+  if w.busy then raise Worker_busy;
   (* Spawn the slave, if not prespawned. *)
   let { Daemon.pid = slave_pid; channels = (inc, outc) } as h =
     match w.prespawned with
@@ -266,7 +312,7 @@ let call w (type a) (type b) (f : a -> b) (x : a) : b handle =
         raise SharedMem.Out_of_shared_memory
     | _, Unix.WEXITED i ->
         Printf.eprintf "Subprocess(%d): fail %d" slave_pid i;
-        Pervasives.exit i
+        raise (Worker_exited_abnormally i)
     | _, Unix.WSTOPPED i ->
         Printf.ksprintf failwith "Subprocess(%d): stopped %d" slave_pid i
     | _, Unix.WSIGNALED i ->
@@ -275,10 +321,24 @@ let call w (type a) (type b) (f : a -> b) (x : a) : b handle =
   let infd = Daemon.descr_of_in_channel inc in
   let slave = { result; slave_pid; infd; worker = w; } in
   w.busy <- true;
+  let request = match w.call_wrapper with
+    | Some { wrap } ->
+      (Request (fun { send } -> send (wrap f x)))
+    | None -> (Request (fun { send } -> send (f x)))
+
+  in
   (* Send the job to the slave. *)
-  Daemon.to_channel outc
+  let () = try Daemon.to_channel outc
     ~flush:true ~flags:[Marshal.Closures]
-    (Request (fun { send } -> send (f x)));
+    request with
+    | e -> begin
+      match Unix.waitpid [Unix.WNOHANG] slave_pid with
+      | 0, _ ->
+        raise (Worker_failed_to_send_job (Other_send_job_failure e))
+      | _, status ->
+        raise (Worker_failed_to_send_job (Worker_already_exited status))
+    end
+  in
   (* And returned the 'handle'. *)
   ref (Processing slave)
 
@@ -288,6 +348,10 @@ let call w (type a) (type b) (f : a -> b) (x : a) : b handle =
  * This might block if the worker hasn't finished yet.
  *
  **************************************************************************)
+
+let is_oom_failure msg =
+  (String_utils.string_starts_with msg "Subprocess") &&
+  (String_utils.is_substring "signaled -7" msg)
 
 let get_result d =
   match !d with
@@ -299,7 +363,10 @@ let get_result d =
         s.worker.busy <- false;
         d := Cached res;
         res
-      with exn ->
+      with
+      | Failure (msg) when is_oom_failure msg ->
+        raise Worker_oomed
+      | exn ->
         s.worker.busy <- false;
         d := Failed exn;
         raise exn

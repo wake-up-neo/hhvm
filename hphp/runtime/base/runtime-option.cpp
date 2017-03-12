@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,6 +24,7 @@
 #include <set>
 #include <vector>
 
+#include <folly/FileUtil.h>
 #include <folly/String.h>
 #include <folly/portability/SysResource.h>
 #include <folly/portability/SysTime.h>
@@ -40,7 +41,6 @@
 #include "hphp/util/process.h"
 #include "hphp/util/file-cache.h"
 #include "hphp/util/log-file-flusher.h"
-#include "hphp/runtime/base/file-util.h"
 
 #include "hphp/parser/scanner.h"
 
@@ -48,22 +48,25 @@
 #include "hphp/runtime/server/virtual-host.h"
 #include "hphp/runtime/server/files-match.h"
 #include "hphp/runtime/server/access-log.h"
-
-#include "hphp/runtime/base/type-conversions.h"
-#include "hphp/runtime/base/builtin-functions.h"
-#include "hphp/runtime/base/apc-file-storage.h"
-#include "hphp/runtime/base/extended-logger.h"
 #ifdef FACEBOOK
 #include "hphp/facebook/runtime/server/thrift-logger.h"
 #endif
-#include "hphp/runtime/base/simple-counter.h"
+
+#include "hphp/runtime/base/apc-file-storage.h"
+#include "hphp/runtime/base/autoload-handler.h"
+#include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/base/config.h"
+#include "hphp/runtime/base/crash-reporter.h"
+#include "hphp/runtime/base/extended-logger.h"
+#include "hphp/runtime/base/file-util.h"
+#include "hphp/runtime/base/hphp-system.h"
+#include "hphp/runtime/base/ini-setting.h"
+#include "hphp/runtime/base/init-fini-node.h"
 #include "hphp/runtime/base/memory-manager.h"
 #include "hphp/runtime/base/preg.h"
-#include "hphp/runtime/base/crash-reporter.h"
+#include "hphp/runtime/base/simple-counter.h"
 #include "hphp/runtime/base/static-string-table.h"
-#include "hphp/runtime/base/config.h"
-#include "hphp/runtime/base/ini-setting.h"
-#include "hphp/runtime/base/hphp-system.h"
+#include "hphp/runtime/base/type-conversions.h"
 #include "hphp/runtime/base/zend-url.h"
 #include "hphp/runtime/ext/extension-registry.h"
 
@@ -72,11 +75,12 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-const char *RuntimeOption::ExecutionMode = "";
 std::string RuntimeOption::BuildId;
 std::string RuntimeOption::InstanceId;
 std::string RuntimeOption::DeploymentId;
 std::string RuntimeOption::PidFile = "www.pid";
+
+bool RuntimeOption::ServerMode = false;
 
 bool RuntimeOption::EnableHipHopSyntax = false;
 bool RuntimeOption::EnableHipHopExperimentalSyntax = false;
@@ -88,6 +92,7 @@ bool RuntimeOption::EnableEmitterStats = true;
 bool RuntimeOption::EnableIntrinsicsExtension = false;
 bool RuntimeOption::CheckSymLink = true;
 bool RuntimeOption::EnableArgsInBacktraces = true;
+bool RuntimeOption::EnableContextInErrorHandler = true;
 bool RuntimeOption::EnableZendCompat = false;
 bool RuntimeOption::EnableZendSorting = false;
 bool RuntimeOption::EnableZendIniCompat = true;
@@ -100,6 +105,7 @@ bool RuntimeOption::AutoprimeGenerators = true;
 #ifdef FACEBOOK
 bool RuntimeOption::UseThriftLogger = false;
 size_t RuntimeOption::LoggerBatchSize = 100;
+size_t RuntimeOption::LoggerFlushTimeout = 0;
 #endif
 std::map<std::string, ErrorLogFileData> RuntimeOption::ErrorLogs = {
   {Logger::DEFAULT, ErrorLogFileData()},
@@ -123,6 +129,7 @@ int RuntimeOption::RuntimeErrorReportingLevel =
 int RuntimeOption::ForceErrorReportingLevel = 0;
 
 std::string RuntimeOption::ServerUser;
+std::vector<std::string> RuntimeOption::TzdataSearchPaths;
 
 int RuntimeOption::MaxSerializedStringSize = 64 * 1024 * 1024; // 64MB
 bool RuntimeOption::NoInfiniteRecursionDetection = false;
@@ -161,6 +168,7 @@ bool RuntimeOption::ServerHttpSafeMode = false;
 bool RuntimeOption::ServerStatCache = false;
 bool RuntimeOption::ServerFixPathInfo = false;
 bool RuntimeOption::ServerAddVaryEncoding = true;
+bool RuntimeOption::ServerLogSettingsOnStartup = false;
 std::vector<std::string> RuntimeOption::ServerWarmupRequests;
 std::string RuntimeOption::ServerCleanupRequest;
 int RuntimeOption::ServerInternalWarmupThreads = 0;
@@ -193,6 +201,7 @@ bool RuntimeOption::StopOldServer = false;
 int RuntimeOption::OldServerWait = 30;
 int RuntimeOption::CacheFreeFactor = 50;
 int64_t RuntimeOption::ServerRSSNeededMb = 4096;
+int64_t RuntimeOption::ServerCriticalFreeMb = 512;
 std::vector<std::string> RuntimeOption::ServerNextProtocols;
 bool RuntimeOption::ServerEnableH2C = false;
 int RuntimeOption::BrotliCompressionEnabled = -1;
@@ -302,8 +311,10 @@ bool RuntimeOption::UnserializationWhitelistCheckWarningOnly = true;
 int64_t RuntimeOption::UnserializationBigMapThreshold = 1 << 16;
 
 std::string RuntimeOption::TakeoverFilename;
+std::string RuntimeOption::AdminServerIP;
 int RuntimeOption::AdminServerPort = 0;
 int RuntimeOption::AdminThreadCount = 1;
+int RuntimeOption::AdminServerQueueToWorkerRatio = 1;
 std::string RuntimeOption::AdminPassword;
 std::set<std::string> RuntimeOption::AdminPasswords;
 
@@ -406,11 +417,12 @@ bool RuntimeOption::PHP7_EngineExceptions = false;
 bool RuntimeOption::PHP7_IntSemantics = false;
 bool RuntimeOption::PHP7_LTR_assign = false;
 bool RuntimeOption::PHP7_NoHexNumerics = false;
-bool RuntimeOption::PHP7_ReportVersion = false;
+bool RuntimeOption::PHP7_Builtins = false;
 bool RuntimeOption::PHP7_ScalarTypes = false;
 bool RuntimeOption::PHP7_Substr = false;
 bool RuntimeOption::PHP7_InfNanFloatParse = false;
 bool RuntimeOption::PHP7_UVS = false;
+bool RuntimeOption::PHP7_DisallowUnsafeCurlUploads = false;
 
 std::map<std::string, std::string> RuntimeOption::AliasedNamespaces;
 
@@ -445,12 +457,20 @@ static inline bool pgoDefault() {
 #endif
 }
 
+static inline bool eagerGcDefault() {
+#ifdef HHVM_EAGER_GC
+  return true;
+#else
+  return false;
+#endif
+}
+
 static inline uint64_t pgoThresholdDefault() {
   return debug ? 2 : 2000;
 }
 
 static inline bool evalJitDefault() {
-#if defined(__CYGWIN__) || defined(_MSC_VER)
+#ifdef _MSC_VER
   return false;
 #else
   return true;
@@ -483,12 +503,16 @@ static inline uint32_t resetProfCountersDefault() {
   return RuntimeOption::EvalJitConcurrently ? 250 : 1000;
 }
 
+static inline int retranslateAllRequestDefault() {
+  return RuntimeOption::ServerExecutionMode() ? 3000 : 0;
+}
+
 uint64_t ahotDefault() {
   return RuntimeOption::RepoAuthoritative ? 4 << 20 : 0;
 }
 
 const uint64_t kEvalVMStackElmsDefault =
-#ifdef VALGRIND
+#if defined(VALGRIND) && !defined(FOLLY_SANITIZE_ADDRESS)
  0x800
 #else
  0x4000
@@ -522,6 +546,7 @@ std::string RuntimeOption::RepoCentralPath;
 int32_t RuntimeOption::RepoCentralFileMode;
 std::string RuntimeOption::RepoCentralFileUser;
 std::string RuntimeOption::RepoCentralFileGroup;
+bool RuntimeOption::RepoAllowFallbackPath = true;
 std::string RuntimeOption::RepoEvalMode;
 std::string RuntimeOption::RepoJournal = "delete";
 bool RuntimeOption::RepoCommit = true;
@@ -553,6 +578,7 @@ bool RuntimeOption::EnableDebuggerPrompt = true;
 bool RuntimeOption::EnableDebuggerServer = false;
 bool RuntimeOption::EnableDebuggerUsageLog = false;
 bool RuntimeOption::DebuggerDisableIPv6 = false;
+std::string RuntimeOption::DebuggerServerIP;
 int RuntimeOption::DebuggerServerPort = 8089;
 int RuntimeOption::DebuggerDefaultRpcPort = 8083;
 std::string RuntimeOption::DebuggerDefaultRpcAuth;
@@ -561,7 +587,7 @@ int RuntimeOption::DebuggerDefaultRpcTimeout = 30;
 std::string RuntimeOption::DebuggerDefaultSandboxPath;
 std::string RuntimeOption::DebuggerStartupDocument;
 int RuntimeOption::DebuggerSignalTimeout = 1;
-std::string RuntimeOption::DebuggerAuthTokenScript;
+std::string RuntimeOption::DebuggerAuthTokenScriptBin;
 
 std::string RuntimeOption::SendmailPath = "sendmail -t -i";
 std::string RuntimeOption::MailForceExtraParameters;
@@ -589,6 +615,8 @@ int RuntimeOption::Fb303ServerPoolThreads = 1;
 
 double RuntimeOption::XenonPeriodSeconds = 0.0;
 bool RuntimeOption::XenonForceAlwaysOn = false;
+bool RuntimeOption::XenonTraceUnitLoad = false;
+std::string RuntimeOption::XenonStructLogDest;
 bool RuntimeOption::TrackPerUnitMemory = false;
 
 std::map<std::string, std::string> RuntimeOption::CustomSettings;
@@ -636,9 +664,11 @@ static void normalizePath(std::string &path) {
 
 static bool matchHdfPattern(const std::string &value,
                             const IniSetting::Map& ini, Hdf hdfPattern,
-                            const std::string& name) {
+                            const std::string& name,
+                            const std::string& suffix = "") {
   string pattern = Config::GetString(ini, hdfPattern, name, "", false);
   if (!pattern.empty()) {
+    if (!suffix.empty()) pattern += suffix;
     Variant ret = preg_match(String(pattern.c_str(), pattern.size(),
                                     CopyString),
                              String(value.c_str(), value.size(),
@@ -658,7 +688,7 @@ static std::vector<std::string> getTierOverwrites(IniSetting::Map& ini,
                                                   Hdf& config) {
 
   // Machine metrics
-  string hostname, tier, cpu;
+  string hostname, tier, cpu, tiers;
   {
     hostname = Config::GetString(ini, config, "Machine.name");
     if (hostname.empty()) {
@@ -671,6 +701,13 @@ static std::vector<std::string> getTierOverwrites(IniSetting::Map& ini,
     if (cpu.empty()) {
       cpu = Process::GetCPUModel();
     }
+
+    tiers = Config::GetString(ini, config, "Machine.tiers");
+    if (!tiers.empty()) {
+      if (!folly::readFile(tiers.c_str(), tiers)) {
+        tiers.clear();
+      }
+    }
   }
 
   std::vector<std::string> messages;
@@ -681,11 +718,13 @@ static std::vector<std::string> getTierOverwrites(IniSetting::Map& ini,
       if (messages.empty()) {
         messages.emplace_back(folly::sformat(
                                 "Matching tiers using: "
-                                "machine='{}', tier='{}', cpu = '{}'",
-                                hostname, tier, cpu));
+                                "machine='{}', tier='{}', "
+                                "cpu = '{}', tiers = '{}'",
+                                hostname, tier, cpu, tiers));
       }
       if (matchHdfPattern(hostname, ini, hdf, "machine") &&
           matchHdfPattern(tier, ini, hdf, "tier") &&
+          matchHdfPattern(tiers, ini, hdf, "tiers", "m") &&
           matchHdfPattern(cpu, ini, hdf, "cpu")) {
         messages.emplace_back(folly::sformat(
                                 "Matched tier: {}", hdf.getName()));
@@ -770,7 +809,8 @@ void RuntimeOption::Load(
   Config::Bind(PidFile, ini, config, "PidFile", "www.pid");
   Config::Bind(DeploymentId, ini, config, "DeploymentId");
 
-  Config::Bind(DynamicInvokeFunctions, ini, config, "DynamicInvokeFunctions");
+  Config::Bind(DynamicInvokeFunctions, ini, config, "DynamicInvokeFunctions",
+               DynamicInvokeFunctions);
 
   {
     // Logging
@@ -823,6 +863,7 @@ void RuntimeOption::Load(
 #ifdef FACEBOOK
     Config::Bind(UseThriftLogger, ini, config, "Log.UseThriftLogger");
     Config::Bind(LoggerBatchSize, ini, config, "Log.BatchSize", 100);
+    Config::Bind(LoggerFlushTimeout, ini, config, "Log.FlushTimeout", 0);
     if (UseThriftLogger) {
       fprintf(stderr,
               "WARNING: Log.UseThriftLogger overrides other logger options.\n"
@@ -993,52 +1034,52 @@ void RuntimeOption::Load(
   }
   {
     // Repo
-    {
-      // Local Repo
-      Config::Bind(RepoLocalMode, ini, config, "Repo.Local.Mode");
-      if (RepoLocalMode.empty()) {
-        const char* HHVM_REPO_LOCAL_MODE = getenv("HHVM_REPO_LOCAL_MODE");
-        if (HHVM_REPO_LOCAL_MODE != nullptr) {
-          RepoLocalMode = HHVM_REPO_LOCAL_MODE;
-        }
-        RepoLocalMode = "r-";
+    // Local Repo
+    Config::Bind(RepoLocalMode, ini, config, "Repo.Local.Mode");
+    if (RepoLocalMode.empty()) {
+      const char* HHVM_REPO_LOCAL_MODE = getenv("HHVM_REPO_LOCAL_MODE");
+      if (HHVM_REPO_LOCAL_MODE != nullptr) {
+        RepoLocalMode = HHVM_REPO_LOCAL_MODE;
       }
-      if (RepoLocalMode.compare("rw")
-          && RepoLocalMode.compare("r-")
-          && RepoLocalMode.compare("--")) {
-        Logger::Error("Bad config setting: Repo.Local.Mode=%s",
-                      RepoLocalMode.c_str());
-        RepoLocalMode = "rw";
-      }
-      // Repo.Local.Path.
-      Config::Bind(RepoLocalPath, ini, config, "Repo.Local.Path");
-      if (RepoLocalPath.empty()) {
-        const char* HHVM_REPO_LOCAL_PATH = getenv("HHVM_REPO_LOCAL_PATH");
-        if (HHVM_REPO_LOCAL_PATH != nullptr) {
-          RepoLocalPath = HHVM_REPO_LOCAL_PATH;
-        }
-      }
-      Config::Bind(RepoCentralFileMode, ini, config, "Repo.Central.FileMode");
-      Config::Bind(RepoCentralFileUser, ini, config, "Repo.Central.FileUser");
-      Config::Bind(RepoCentralFileGroup, ini, config, "Repo.Central.FileGroup");
+      RepoLocalMode = "r-";
     }
-    {
-      // Central Repo
-      Config::Bind(RepoCentralPath, ini, config, "Repo.Central.Path");
+    if (RepoLocalMode.compare("rw")
+        && RepoLocalMode.compare("r-")
+        && RepoLocalMode.compare("--")) {
+      Logger::Error("Bad config setting: Repo.Local.Mode=%s",
+                    RepoLocalMode.c_str());
+      RepoLocalMode = "rw";
     }
-    {
-      // Repo - Eval
-      Config::Bind(RepoEvalMode, ini, config, "Repo.Eval.Mode");
-      if (RepoEvalMode.empty()) {
-        RepoEvalMode = "readonly";
-      } else if (RepoEvalMode.compare("local")
-                 && RepoEvalMode.compare("central")
-                 && RepoEvalMode.compare("readonly")) {
-        Logger::Error("Bad config setting: Repo.Eval.Mode=%s",
-                      RepoEvalMode.c_str());
-        RepoEvalMode = "readonly";
+    // Repo.Local.Path
+    Config::Bind(RepoLocalPath, ini, config, "Repo.Local.Path");
+    if (RepoLocalPath.empty()) {
+      const char* HHVM_REPO_LOCAL_PATH = getenv("HHVM_REPO_LOCAL_PATH");
+      if (HHVM_REPO_LOCAL_PATH != nullptr) {
+        RepoLocalPath = HHVM_REPO_LOCAL_PATH;
       }
     }
+
+    // Central Repo
+    Config::Bind(RepoCentralPath, ini, config, "Repo.Central.Path");
+    Config::Bind(RepoCentralFileMode, ini, config, "Repo.Central.FileMode");
+    Config::Bind(RepoCentralFileUser, ini, config, "Repo.Central.FileUser");
+    Config::Bind(RepoCentralFileGroup, ini, config, "Repo.Central.FileGroup");
+
+    Config::Bind(RepoAllowFallbackPath, ini, config, "Repo.AllowFallbackPath",
+                 RepoAllowFallbackPath);
+
+    // Repo - Eval
+    Config::Bind(RepoEvalMode, ini, config, "Repo.Eval.Mode");
+    if (RepoEvalMode.empty()) {
+      RepoEvalMode = "readonly";
+    } else if (RepoEvalMode.compare("local")
+               && RepoEvalMode.compare("central")
+               && RepoEvalMode.compare("readonly")) {
+      Logger::Error("Bad config setting: Repo.Eval.Mode=%s",
+                    RepoEvalMode.c_str());
+      RepoEvalMode = "readonly";
+    }
+
     Config::Bind(RepoJournal, ini, config, "Repo.Journal", "delete");
     Config::Bind(RepoCommit, ini, config, "Repo.Commit", true);
     Config::Bind(RepoDebugInfo, ini, config, "Repo.DebugInfo", true);
@@ -1059,13 +1100,15 @@ void RuntimeOption::Load(
   }
   {
     // Eval
-    Config::Bind(EnableHipHopSyntax, ini, config, "Eval.EnableHipHopSyntax");
+    Config::Bind(EnableHipHopSyntax, ini, config, "Eval.EnableHipHopSyntax",
+                 EnableHipHopSyntax);
     Config::Bind(EnableHipHopExperimentalSyntax, ini,
                  config, "Eval.EnableHipHopExperimentalSyntax");
     Config::Bind(EnableShortTags, ini, config, "Eval.EnableShortTags", true);
     Config::Bind(EnableAspTags, ini, config, "Eval.EnableAspTags");
-    Config::Bind(EnableXHP, ini, config, "Eval.EnableXHP", false);
-    Config::Bind(EnableZendCompat, ini, config, "Eval.EnableZendCompat", false);
+    Config::Bind(EnableXHP, ini, config, "Eval.EnableXHP", EnableXHP);
+    Config::Bind(EnableZendCompat, ini, config, "Eval.EnableZendCompat",
+                 EnableZendCompat);
     Config::Bind(EnableZendSorting, ini, config, "Eval.EnableZendSorting",
                  false);
     Config::Bind(TimeoutsUseWallTime, ini, config, "Eval.TimeoutsUseWallTime",
@@ -1090,11 +1133,17 @@ void RuntimeOption::Load(
     if (EvalPerfRelocate > 0) {
       setRelocateRequests(EvalPerfRelocate);
     }
+    if (!RuntimeOption::ServerExecutionMode()) {
+      // We only allow jit worker threads in server mode to avoid issues with
+      // fork() and the worker threads. This may change in the future.
+      EvalJitWorkerThreads = 0;
+    }
     low_malloc_huge_pages(EvalMaxLowMemHugePages);
     HardwareCounter::Init(EvalProfileHWEnable,
                           url_decode(EvalProfileHWEvents.data(),
                                      EvalProfileHWEvents.size()).toCppString(),
-                          false);
+                          false,
+                          EvalProfileHWExcludeKernel);
 
     Config::Bind(EnableEmitterStats, ini, config, "Eval.EnableEmitterStats",
                  EnableEmitterStats);
@@ -1106,11 +1155,6 @@ void RuntimeOption::Load(
       throw std::runtime_error("Code coverage is not supported with "
         "Eval.Jit=true");
     }
-    if (EvalJitConcurrently && EvalJitTransCounters) {
-      // TODO(12493872): Make thread-safe or remove counters.
-      throw std::runtime_error("Translation counters are not supported with "
-        "Eval.JitConcurrently != 0");
-    }
     Config::Bind(DisableSmallAllocator, ini, config,
                  "Eval.DisableSmallAllocator", DisableSmallAllocator);
     SetArenaSlabAllocBypass(DisableSmallAllocator);
@@ -1121,6 +1165,8 @@ void RuntimeOption::Load(
     // NB: after we know the value of RepoAuthoritative.
     Config::Bind(EnableArgsInBacktraces, ini, config,
                  "Eval.EnableArgsInBacktraces", !RepoAuthoritative);
+    Config::Bind(EnableContextInErrorHandler, ini, config,
+                 "Eval.EnableContextInErrorHandler", !RepoAuthoritative);
     Config::Bind(EvalAuthoritativeMode, ini, config, "Eval.AuthoritativeMode",
                  false);
     if (RepoAuthoritative) {
@@ -1137,6 +1183,7 @@ void RuntimeOption::Load(
                    "Eval.Debugger.EnableDebuggerServer");
       Config::Bind(EnableDebuggerUsageLog, ini, config,
                    "Eval.Debugger.EnableDebuggerUsageLog");
+      Config::Bind(DebuggerServerIP, ini, config, "Eval.Debugger.IP");
       Config::Bind(DebuggerServerPort, ini, config, "Eval.Debugger.Port", 8089);
       Config::Bind(DebuggerDisableIPv6, ini, config,
                    "Eval.Debugger.DisableIPv6", false);
@@ -1154,8 +1201,8 @@ void RuntimeOption::Load(
                    "Eval.Debugger.RPC.HostDomain");
       Config::Bind(DebuggerDefaultRpcTimeout, ini, config,
                    "Eval.Debugger.RPC.DefaultTimeout", 30);
-      Config::Bind(DebuggerAuthTokenScript, ini, config,
-                   "Eval.Debugger.Auth.TokenScript");
+      Config::Bind(DebuggerAuthTokenScriptBin, ini, config,
+                   "Eval.Debugger.Auth.TokenScriptBin");
     }
   }
   {
@@ -1179,8 +1226,13 @@ void RuntimeOption::Load(
                  40 << 20);
     Config::Bind(CodeCache::GlobalDataSize, ini, config,
                  "Eval.JitGlobalDataSize", CodeCache::ASize >> 2);
-    Config::Bind(CodeCache::AMaxUsage, ini, config, "Eval.JitAMaxUsage",
-                 CodeCache::ASize);
+
+    Config::Bind(CodeCache::AMaxUsage, ini, config,
+                 "Eval.JitAMaxUsage", CodeCache::ASize);
+    Config::Bind(CodeCache::AColdMaxUsage, ini, config,
+                 "Eval.JitAColdMaxUsage", CodeCache::AColdSize);
+    Config::Bind(CodeCache::AFrozenMaxUsage, ini, config,
+                 "Eval.JitAFrozenMaxUsage", CodeCache::AFrozenSize);
 
     Config::Bind(CodeCache::MapTCHuge, ini, config, "Eval.MapTCHuge",
                  hugePagesSoundNice());
@@ -1196,14 +1248,17 @@ void RuntimeOption::Load(
     // Hack Language
     Config::Bind(IntsOverflowToInts, ini, config,
                  "Hack.Lang.IntsOverflowToInts", EnableHipHopSyntax);
+    auto const def = RuntimeOption::EnableHipHopSyntax ?
+      HackStrictOption::ON : HackStrictOption::OFF;
+
     Config::Bind(StrictArrayFillKeys, ini, config,
-                 "Hack.Lang.StrictArrayFillKeys");
+                 "Hack.Lang.StrictArrayFillKeys", def);
     Config::Bind(DisallowDynamicVarEnvFuncs, ini, config,
-                 "Hack.Lang.DisallowDynamicVarEnvFuncs");
+                 "Hack.Lang.DisallowDynamicVarEnvFuncs", def);
     Config::Bind(IconvIgnoreCorrect, ini, config,
-                 "Hack.Lang.IconvIgnoreCorrect");
+                 "Hack.Lang.IconvIgnoreCorrect", def);
     Config::Bind(MinMaxAllowDegenerate, ini, config,
-                 "Hack.Lang.MinMaxAllowDegenerate");
+                 "Hack.Lang.MinMaxAllowDegenerate", def);
 
 #ifdef FACEBOOK
     // Force off for Facebook unless you explicitly turn on; folks here both
@@ -1258,8 +1313,7 @@ void RuntimeOption::Load(
                  s_PHP7_master);
     Config::Bind(PHP7_NoHexNumerics, ini, config, "PHP7.NoHexNumerics",
                  s_PHP7_master);
-    Config::Bind(PHP7_ReportVersion, ini, config, "PHP7.ReportVersion",
-                 s_PHP7_master);
+    Config::Bind(PHP7_Builtins, ini, config, "PHP7.Builtins", s_PHP7_master);
     Config::Bind(PHP7_ScalarTypes, ini, config, "PHP7.ScalarTypes",
                  s_PHP7_master);
     Config::Bind(PHP7_Substr, ini, config, "PHP7.Substr",
@@ -1267,6 +1321,8 @@ void RuntimeOption::Load(
     Config::Bind(PHP7_InfNanFloatParse, ini, config, "PHP7.InfNanFloatParse",
                  s_PHP7_master);
     Config::Bind(PHP7_UVS, ini, config, "PHP7.UVS", s_PHP7_master);
+    Config::Bind(PHP7_DisallowUnsafeCurlUploads, ini, config,
+                 "PHP7.DisallowUnsafeCurlUploads", s_PHP7_master);
   }
   {
     // Server
@@ -1310,6 +1366,8 @@ void RuntimeOption::Load(
     Config::Bind(ServerFixPathInfo, ini, config, "Server.FixPathInfo", false);
     Config::Bind(ServerAddVaryEncoding, ini, config, "Server.AddVaryEncoding",
                  ServerAddVaryEncoding);
+    Config::Bind(ServerLogSettingsOnStartup, ini, config,
+                 "Server.LogSettingsOnStartup", false);
     Config::Bind(ServerWarmupRequests, ini, config, "Server.WarmupRequests");
     Config::Bind(ServerCleanupRequest, ini, config, "Server.CleanupRequest");
     Config::Bind(ServerInternalWarmupThreads, ini, config,
@@ -1351,6 +1409,8 @@ void RuntimeOption::Load(
     Config::Bind(StopOldServer, ini, config, "Server.StopOld", false);
     Config::Bind(OldServerWait, ini, config, "Server.StopOldWait", 30);
     Config::Bind(ServerRSSNeededMb, ini, config, "Server.RSSNeededMb", 4096);
+    Config::Bind(ServerCriticalFreeMb, ini, config,
+                 "Server.CriticalFreeMb", 512);
     Config::Bind(CacheFreeFactor, ini, config, "Server.CacheFreeFactor", 50);
     if (CacheFreeFactor > 100) CacheFreeFactor = 100;
     if (CacheFreeFactor < 0) CacheFreeFactor = 0;
@@ -1622,8 +1682,14 @@ void RuntimeOption::Load(
   }
   {
     // Admin Server
+    Config::Bind(AdminServerIP, ini, config, "AdminServer.IP", ServerIP);
     Config::Bind(AdminServerPort, ini, config, "AdminServer.Port", 0);
+    // Single-threaded by default. If increasing the max thread count > 1, the
+    // queue-to-worker ratio can be raised for a more conservative growth: e.g.,
+    // a ratio of 3 means a second thread will spwan at 3 queued requests, etc.
     Config::Bind(AdminThreadCount, ini, config, "AdminServer.ThreadCount", 1);
+    Config::Bind(AdminServerQueueToWorkerRatio, ini, config,
+                 "AdminServer.QueueToWorkerRatio", 1);
     Config::Bind(AdminPassword, ini, config, "AdminServer.Password");
     Config::Bind(AdminPasswords, ini, config, "AdminServer.Passwords");
   }
@@ -1765,6 +1831,8 @@ void RuntimeOption::Load(
     // Xenon
     Config::Bind(XenonPeriodSeconds, ini, config, "Xenon.Period", 0.0);
     Config::Bind(XenonForceAlwaysOn, ini, config, "Xenon.ForceAlwaysOn", false);
+    Config::Bind(XenonTraceUnitLoad, ini, config, "Xenon.TraceUnitLoad", false);
+    Config::Bind(XenonStructLogDest, ini, config, "Xenon.StructLogDest", "");
   }
   {
     // We directly read zend.assertions here, so that we can get its INI value
@@ -1778,15 +1846,29 @@ void RuntimeOption::Load(
   }
 
   Config::Bind(AliasedNamespaces, ini, config, "AliasedNamespaces");
+  for (auto it = AliasedNamespaces.begin(); it != AliasedNamespaces.end(); ) {
+    if (!is_valid_class_name(it->second)) {
+      Logger::Warning("Skipping invalid AliasedNamespace %s\n",
+                      it->second.c_str());
+      it = AliasedNamespaces.erase(it);
+      continue;
+    }
+
+    while (it->second.size() && it->second[0] == '\\') {
+      it->second = it->second.substr(1);
+    }
+
+    ++it;
+  }
+
+  Config::Bind(TzdataSearchPaths, ini, config, "TzdataSearchPaths");
+
   Config::Bind(CustomSettings, ini, config, "CustomSettings");
 
+  // Run initializers depedent on options, e.g., resizing atomic maps/vectors.
   refineStaticStringTableSize();
-
-  // Reconstruct AtomicVectors keyed by FuncId, making sure we haven't created
-  // any Funcs yet.
-  always_assert(Func::nextFuncId() == 0);
-  AtomicVectorInit::runAll();
-
+  InitFiniNode::ProcessPostRuntimeOptions();
+  always_assert(Func::getFuncVec().size() == RuntimeOption::EvalFuncCountHint);
 
   // **************************************************************************
   //                                  DANGER
@@ -1912,7 +1994,6 @@ void RuntimeOption::Load(
   Config::Bind(RuntimeOption::Extensions, ini, config, "extensions");
   Config::Bind(RuntimeOption::DynamicExtensions, ini,
                config, "DynamicExtensions");
-
 
   ExtensionRegistry::moduleLoad(ini, config);
   initialize_apc();

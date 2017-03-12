@@ -35,7 +35,7 @@ function test() {
 "
 
 let build_code_edit st_line st_column ed_line ed_column text =
-  File_content.{
+  Ide_api_types.{
     range = Some {
       st = {
         line = st_line;
@@ -58,38 +58,20 @@ let () =
   let env = Test.connect_persistent_client env in
 
   (* Open a new file in editor *)
-  let env, _ = Test.(run_loop_once env { default_loop_input with
-    persistent_client_request = Some (OPEN_FILE bar_name)
-  }) in
+  let env = Test.open_file env bar_name ~contents:"" in
   (* Start typing in the new file *)
-  let env, _ = Test.(run_loop_once env { default_loop_input with
-    persistent_client_request = Some (EDIT_FILE
-      (bar_name, [File_content.{range = None; text = bar_contents;}])
-    )
-  }) in
+  let env, _ = Test.edit_file env bar_name bar_contents in
   (* Request completions *)
-  let env, loop_output = Test.(run_loop_once env { default_loop_input with
-    persistent_client_request = Some (IDE_AUTOCOMPLETE
-      (bar_name, File_content.{line = 3; column = 5})
-    )
-  }) in
-  (match loop_output.persistent_client_response with
-  | Some [x] when x.AutocompleteService.res_name = "foo" -> ()
-  | _ -> Test.fail "Unexpected or missing autocomplete response");
+  let env, loop_output = Test.ide_autocomplete env (bar_name, 3, 5) in
+  Test.assert_autocomplete loop_output ["foo"];
 
   (* Add a new definition to the file *)
   let env, _ = Test.(run_loop_once env { default_loop_input with
     persistent_client_request = Some (EDIT_FILE
-      (bar_name, [build_code_edit 2 1 2 1 foo2_definition])
+      (Test.prepend_root bar_name, [build_code_edit 2 1 2 1 foo2_definition])
     )
   }) in
 
   (* Check that new definition is among the completions *)
-  let _, loop_output = Test.(run_loop_once env { default_loop_input with
-    persistent_client_request = Some (IDE_AUTOCOMPLETE
-      (bar_name, File_content.{line = 4; column = 5})
-    )
-  }) in
-  (match loop_output.persistent_client_response with
-  | Some [_; _] -> ()
-  | _ -> Test.fail "Expected two completions")
+  let _, loop_output = Test.ide_autocomplete env (bar_name, 4, 5) in
+  Test.assert_autocomplete loop_output ["foo"; "foo2"]

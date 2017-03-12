@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -27,6 +27,7 @@
 #include "hphp/runtime/ext/json/ext_json.h"
 #include "hphp/runtime/ext/std/ext_std_output.h"
 #include "hphp/runtime/server/access-log.h"
+#include "hphp/runtime/server/cli-server.h"
 #include "hphp/runtime/server/http-protocol.h"
 #include "hphp/runtime/server/http-request-handler.h"
 #include "hphp/runtime/server/request-uri.h"
@@ -66,8 +67,9 @@ RPCRequestHandler::~RPCRequestHandler() {
 
 void RPCRequestHandler::initState() {
   hphp_session_init();
-  bool isServer = RuntimeOption::ServerExecutionMode();
-  m_context = hphp_context_init();
+  bool isServer =
+    RuntimeOption::ServerExecutionMode() && !is_cli_mode();
+  m_context = g_context.getNoCheck();
   if (isServer) {
     m_context->obStart(uninit_null(),
                        0,
@@ -148,7 +150,9 @@ void RPCRequestHandler::handleRequest(Transport *transport) {
   // authentication
   const std::set<std::string> &passwords = m_serverInfo->getPasswords();
   if (!passwords.empty()) {
-    auto iter = passwords.find(transport->getParam("auth"));
+    auto iter = passwords.find(
+      transport->getParam("auth", m_serverInfo->getMethod())
+    );
     if (iter == passwords.end()) {
       transport->sendString("Unauthorized", 401);
       transport->onSendEnd();
@@ -162,7 +166,9 @@ void RPCRequestHandler::handleRequest(Transport *transport) {
     }
   } else {
     const std::string &password = m_serverInfo->getPassword();
-    if (!password.empty() && password != transport->getParam("auth")) {
+    if (!password.empty() &&
+      password != transport->getParam("auth", m_serverInfo->getMethod())
+    ) {
       transport->sendString("Unauthorized", 401);
       transport->onSendEnd();
       GetAccessLog().log(transport, nullptr);
@@ -177,7 +183,7 @@ void RPCRequestHandler::handleRequest(Transport *transport) {
 
   // return encoding type
   ReturnEncodeType returnEncodeType = m_returnEncodeType;
-  if (transport->getParam("return") == "serialize") {
+  if (transport->getParam("return", m_serverInfo->getMethod()) == "serialize") {
     returnEncodeType = ReturnEncodeType::Serialize;
   }
 
@@ -264,9 +270,10 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
   bool error = false;
 
   Array params;
-  std::string sparams = transport->getParam("params");
+  Transport::Method requestMethod = m_serverInfo->getMethod();
+  std::string sparams = transport->getParam("params", requestMethod);
   if (!sparams.empty()) {
-    Variant jparams = Variant::attach(
+    auto jparams = Variant::attach(
       HHVM_FN(json_decode)(String(sparams), true)
     );
     if (jparams.isArray()) {
@@ -276,10 +283,10 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
     }
   } else {
     std::vector<std::string> sparams;
-    transport->getArrayParam("p", sparams);
+    transport->getArrayParam("p", sparams, requestMethod);
     if (!sparams.empty()) {
       for (unsigned int i = 0; i < sparams.size(); i++) {
-        Variant jparams = Variant::attach(
+        auto jparams = Variant::attach(
           HHVM_FN(json_decode)(String(sparams[i]), true)
         );
         if (same(jparams, false)) {
@@ -298,10 +305,10 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
     }
   }
 
-  if (transport->getIntParam("reset") == 1) {
+  if (transport->getIntParam("reset", requestMethod) == 1) {
     m_reset = true;
   }
-  int output = transport->getIntParam("output");
+  int output = transport->getIntParam("output", requestMethod);
 
   // We don't debug RPC requests, so we need to detach XDebugHook if xdebug was
   // enabled.
@@ -331,9 +338,9 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
       rpcFile = rpcFunc;
       rpcFunc.clear();
     } else {
-      rpcFile = transport->getParam("include");
+      rpcFile = transport->getParam("include", requestMethod);
       if (rpcFile.empty()) {
-        rpcFile = transport->getParam("include_once");
+        rpcFile = transport->getParam("include_once", requestMethod);
         runOnce = true;
       }
     }

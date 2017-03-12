@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1998-2010 Zend Technologies Ltd. (http://www.zend.com) |
    +----------------------------------------------------------------------+
    | This source file is subject to version 2.00 of the Zend license,     |
@@ -613,15 +613,6 @@ bool collator_asort(Variant &array, int sort_flags, bool ascending,
                     UCollator *coll, Intl::IntlError *errcode) {
   assert(coll);
   bool byKey = false;
-  bool ret = collator_sort_internal(false, array, sort_flags, ascending, byKey,
-                                    coll, errcode);
-  return ret;
-}
-
-bool collator_ksort(Variant &array, int sort_flags, bool ascending,
-                    UCollator *coll, Intl::IntlError *errcode) {
-  assert(coll);
-  bool byKey = true;
   bool ret = collator_sort_internal(false, array, sort_flags, ascending, byKey,
                                     coll, errcode);
   return ret;

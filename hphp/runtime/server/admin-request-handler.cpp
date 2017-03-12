@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,6 +22,7 @@
 #include "hphp/runtime/base/hhprof.h"
 #include "hphp/runtime/base/http-client.h"
 #include "hphp/runtime/base/init-fini-node.h"
+#include "hphp/runtime/base/ini-setting.h"
 #include "hphp/runtime/base/memory-manager.h"
 #include "hphp/runtime/base/preg.h"
 #include "hphp/runtime/base/program-functions.h"
@@ -70,6 +71,7 @@
 #include <folly/Random.h>
 #include <folly/portability/Unistd.h>
 
+#include <cstdio>
 #include <fstream>
 #include <string>
 #include <sstream>
@@ -248,6 +250,7 @@ void AdminRequestHandler::handleRequest(Transport *transport) {
         "/instance-id:     instance id that's passed in from command line\n"
         "/compiler-id:     returns the compiler id that built this app\n"
         "/repo-schema:     return the repo schema id used by this app\n"
+        "/ini-get-all:     dump all settings as JSON\n"
         "/check-load:      how many threads are actively handling requests\n"
         "/check-queued:    how many http requests are queued waiting to be\n"
         "                  handled\n"
@@ -281,19 +284,13 @@ void AdminRequestHandler::handleRequest(Transport *transport) {
         "/stats.keys:      list all available keys\n"
         "    from          optional, <timestamp>, or <-n> second ago\n"
         "    to            optional, <timestamp>, or <-n> second ago\n"
-        "/stats.xml:       show server stats in XML\n"
+        "/stats.kvp:       show server stats in key-value pairs\n"
         "    from          optional, <timestamp>, or <-n> second ago\n"
         "    to            optional, <timestamp>, or <-n> second ago\n"
         "    agg           optional, aggragation: *, url, code\n"
         "    keys          optional, <key>,<key/hit>,<key/sec>,<:regex:>\n"
         "    url           optional, only stats of this page or URL\n"
         "    code          optional, only stats of pages returning this code\n"
-        "/stats.json:      show server stats in JSON\n"
-        "    (same as /stats.xml)\n"
-        "/stats.kvp:       show server stats in key-value pairs\n"
-        "    (same as /stats.xml)\n"
-        "/stats.html:      show server stats in HTML\n"
-        "    (same as /stats.xml)\n"
 
         "/xenon-snap:      generate a Xenon snapshot, which is logged later\n"
 
@@ -343,6 +340,9 @@ void AdminRequestHandler::handleRequest(Transport *transport) {
         "/proxy:           set up request proxy\n"
         "    origin        URL to proxy requests to\n"
         "    percentage    percentage of requests to proxy\n"
+        "/load-factor:     get or set load factor\n"
+        "    set           optional, set new load factor (default 1.0,"
+        "                  valid range [-1.0, 10.0])\n"
         ;
 #ifdef USE_TCMALLOC
         if (MallocExtensionInstance) {
@@ -657,6 +657,32 @@ void AdminRequestHandler::handleRequest(Transport *transport) {
         handleRandomApcRequest(cmd, transport)) {
       break;
     }
+    if (cmd == "load-factor") {
+      auto const factorStr = transport->getParam("set");
+      if (factorStr.empty()) {
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(3)
+            << HttpServer::LoadFactor.load();
+        transport->sendString(oss.str());
+        break;
+      }
+      double factor = 1.0;
+      if (sscanf(factorStr.c_str(), "%lf", &factor) < 1 ||
+          factor > 10 || factor < -1) {
+        transport->sendString("Invalid load factor spec: " + factorStr, 400);
+        break;
+      }
+      HttpServer::LoadFactor.store(factor, std::memory_order_relaxed);
+      transport->sendString(folly::sformat("Load factor updated to {}\n",
+                                           factor));
+      Logger::Info("Load factor updated to %lf", factor);
+      break;
+    }
+    if (cmd == "ini-get-all") {
+      auto out = IniSetting::GetAllAsJSON();
+      transport->sendString(out.c_str());
+      break;
+    }
 
 #ifdef USE_TCMALLOC
     if (MallocExtensionInstance) {
@@ -883,20 +909,14 @@ static bool toggle_switch(Transport *transport, bool &setting) {
   return true;
 }
 
-static bool send_report(Transport *transport, Writer::Format format,
-                        const char *mime) {
-  int64_t  from   = transport->getInt64Param ("from");
-  int64_t  to     = transport->getInt64Param ("to");
-  std::string agg    = transport->getParam      ("agg");
+static bool send_report(Transport *transport) {
   std::string keys   = transport->getParam      ("keys");
-  std::string url    = transport->getParam      ("url");
-  int    code   = transport->getIntParam   ("code");
   std::string prefix = transport->getParam      ("prefix");
 
   std::string out;
-  ServerStats::Report(out, format, from, to, agg, keys, url, code, prefix);
+  ServerStats::Report(out, keys, prefix);
 
-  transport->replaceHeader("Content-Type", mime);
+  transport->replaceHeader("Content-Type", "text/plain");
   transport->sendString(out);
   return true;
 }
@@ -1108,25 +1128,13 @@ bool AdminRequestHandler::handleStatsRequest(const std::string &cmd,
   }
 
   if (cmd == "stats.keys") {
-    int64_t from = transport->getInt64Param("from");
-    int64_t to = transport->getInt64Param("to");
     string out;
-    ServerStats::GetKeys(out, from, to);
+    ServerStats::GetKeys(out);
     transport->sendString(out);
     return true;
   }
-  if (cmd == "stats.xml") {
-    return send_report(transport, Writer::Format::XML, "application/xml");
-  }
-  if (cmd == "stats.json") {
-    return send_report(transport, Writer::Format::JSON,
-                       "application/json");
-  }
   if (cmd == "stats.kvp") {
-    return send_report(transport, Writer::Format::KVP, "text/plain");
-  }
-  if (cmd == "stats.html" || cmd == "stats.htm") {
-    return send_report(transport, Writer::Format::HTML, "text/html");
+    return send_report(transport);
   }
 
   if (cmd == "stats.xsl") {

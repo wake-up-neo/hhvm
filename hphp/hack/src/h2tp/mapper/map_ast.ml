@@ -156,6 +156,7 @@ let mk_mapper = fun m_in ->
     and v2 = map_id v2
     and v3 = map_of_list (fun (ck, h) -> ck, map_hint h) v3
     in (v1, v2, v3)
+  and map_constr (t1, c, t2) = (map_hint t1, c, map_hint t2)
   and map_tconstraint v = map_hint_option v
   and map_typedef_kind =
     function
@@ -337,6 +338,7 @@ let mk_mapper = fun m_in ->
       let k {
                   m_kind = v_m_kind;
                   m_tparams = v_m_tparams;
+                  m_constrs = v_m_constrs;
                   m_name = v_m_name;
                   m_params = v_m_params;
                   m_body = v_m_body;
@@ -348,6 +350,7 @@ let mk_mapper = fun m_in ->
                 } =
       let v_m_kind = map_of_list map_kind v_m_kind in
       let v_m_tparams = map_of_list map_tparam v_m_tparams in
+      let v_m_constrs = map_of_list map_constr v_m_constrs in
       let v_m_name = map_id v_m_name in
       let v_m_params = map_fun_params v_m_params in
       let v_m_body = map_block v_m_body in
@@ -361,6 +364,7 @@ let mk_mapper = fun m_in ->
         {
           m_kind = v_m_kind;
           m_tparams = v_m_tparams;
+          m_constrs = v_m_constrs;
           m_name = v_m_name;
           m_params = v_m_params;
           m_body = v_m_body;
@@ -477,8 +481,12 @@ let mk_mapper = fun m_in ->
     | SFlit v1 -> let v1 = map_pstring v1 in SFlit ((v1))
     | SFclass_const ((v1, v2)) ->
         let v1 = map_id v1 and v2 = map_pstring v2 in SFclass_const ((v1, v2))
-  and map_shape_field (v1, v2) =
-    let v1 = map_shape_field_name v1 and v2 = map_hint v2 in (v1, v2)
+  and map_shape_field { sf_optional; sf_name; sf_hint } =
+    {
+      sf_optional;
+      sf_name=map_shape_field_name sf_name;
+      sf_hint=map_hint sf_hint
+    }
   and map_stmt stmt =
     let k =
       function
@@ -557,6 +565,10 @@ let mk_mapper = fun m_in ->
       | True -> True
       | False -> False
       | Id v1 -> let v1 = map_id v1 in Id ((v1))
+      | Id_type_arguments (v1, v2) ->
+        let v1 = map_id v1
+        and v2 = map_of_list map_hint v2 in
+        Id_type_arguments (v1, v2)
       | Lvar v1 -> let v1 = map_id v1 in Lvar ((v1))
       | Lvarvar (n, v1) -> let v1 = map_id v1 in Lvarvar ((n, v1))
       | Dollardollar -> Dollardollar

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,6 +17,12 @@
 #include "hphp/runtime/vm/jit/irlower-internal.h"
 
 #include "hphp/runtime/base/array-iterator.h"
+#include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/base/execution-context.h"
+#include "hphp/runtime/base/object-data.h"
+#include "hphp/runtime/base/tv-helpers.h"
+#include "hphp/runtime/base/typed-value.h"
+#include "hphp/runtime/vm/act-rec.h"
 
 #include "hphp/runtime/vm/jit/types.h"
 #include "hphp/runtime/vm/jit/arg-group.h"
@@ -167,12 +173,12 @@ void implIterNext(IRLS& env, const IRInstruction* inst) {
   auto const args = [&] {
     auto const fp = srcLoc(env, inst, 0).reg();
 
-    auto args = argGroup(env, inst)
+    auto ret = argGroup(env, inst)
       .addr(fp, iterOffset(inst->marker(), extra->iterId))
       .addr(fp, localOffset(extra->valId));
-    if (isNextK) args.addr(fp, localOffset(extra->keyId));
+    if (isNextK) ret.addr(fp, localOffset(extra->keyId));
 
-    return args;
+    return ret;
   }();
 
   auto const helper = isWNext ? (TCA)witer_next_key :
@@ -189,15 +195,15 @@ void implMIterNext(IRLS& env, const IRInstruction* inst) {
   auto const args = [&] {
     auto const fp = srcLoc(env, inst, 0).reg();
 
-    auto args = argGroup(env, inst)
+    auto ret = argGroup(env, inst)
       .addr(fp, iterOffset(inst->marker(), extra->iterId))
       .addr(fp, localOffset(extra->valId));
     if (inst->is(MIterNextK)) {
-      args.addr(fp, localOffset(extra->keyId));
+      ret.addr(fp, localOffset(extra->keyId));
     } else {
-      args.imm(0);
+      ret.imm(0);
     }
-    return args;
+    return ret;
   }();
   cgCallHelper(vmain(env), env, CallSpec::direct(miter_next_key),
                callDest(env, inst), SyncOptions::Sync, args);
@@ -278,6 +284,32 @@ void cgCIterFree(IRLS& env, const IRInstruction* inst) {
   implIterFree(env, inst, CallSpec::method(&Iter::cfree));
 }
 
+///////////////////////////////////////////////////////////////////////////////
+
+int64_t decodeCufIterHelper(Iter* it, TypedValue func, ActRec* ar) {
+  ObjectData* obj = nullptr;
+  Class* cls = nullptr;
+  StringData* invName = nullptr;
+
+  if (LIKELY(ar->func()->isBuiltin())) {
+    ar = g_context->getOuterVMFrame(ar);
+  }
+  auto const f = vm_decode_function(tvAsVariant(&func), ar, false,
+                                    obj, cls, invName, DecodeFlags::NoWarn);
+  if (UNLIKELY(!f)) return false;
+
+  auto& cit = it->cuf();
+  cit.setFunc(f);
+  if (obj) {
+    cit.setCtx(obj);
+    obj->incRefCount();
+  } else {
+    cit.setCtx(cls);
+  }
+  cit.setName(invName);
+  return true;
+}
+
 void cgDecodeCufIter(IRLS& env, const IRInstruction* inst) {
   auto const extra = inst->extra<DecodeCufIter>();
   auto const fp = srcLoc(env, inst, 1).reg();
@@ -285,7 +317,8 @@ void cgDecodeCufIter(IRLS& env, const IRInstruction* inst) {
 
   auto const args = argGroup(env, inst)
     .addr(fp, iterOff)
-    .typedValue(0);
+    .typedValue(0)
+    .reg(fp);
 
   cgCallHelper(vmain(env), env, CallSpec::direct(decodeCufIterHelper),
                callDest(env, inst), SyncOptions::Sync, args);

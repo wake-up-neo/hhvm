@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -32,6 +32,16 @@ constexpr Arch arch() {
 #else
   return Arch::X64;
 #endif
+}
+
+constexpr bool arch_any() { return false; }
+
+/*
+ * Convenience helper for guarding on a set of architectures.
+ */
+template<class... Tail>
+bool arch_any(Arch a, Tail&&... archs) {
+  return arch() == a || arch_any(archs...);
 }
 
 /*

@@ -108,14 +108,6 @@ final class Generator<Tk, +Tv, -Ts> implements KeyedIterator<Tk, Tv> {
 
 abstract class WaitHandle<+T> implements Awaitable<T> {
   public function getWaitHandle(): this {}
-  public function import(): void {}
-  public function join(): T {}
-  public function isFinished(): bool {}
-  public function isSucceeded(): bool {}
-  public function isFailed(): bool {}
-  public function getID(): int {}
-  public function getName(): string {}
-  public function result() : T {}
   public static function setOnIOWaitEnterCallback(?(function(): void) $callback) {}
   public static function setOnIOWaitExitCallback(?(function(): void) $callback) {}
   public static function setOnJoinCallback(?(function(WaitableWaitHandle<mixed>): void) $callback) {}
@@ -125,9 +117,6 @@ final class StaticWaitHandle<+T> extends WaitHandle<T> {
 }
 
 abstract class WaitableWaitHandle<+T> extends WaitHandle<T> {
-  public function getContextIdx(): int {}
-  public function getCreator(): /*AsyncFunction*/WaitHandle<mixed> {}
-  public function getParents(): array<WaitableWaitHandle<mixed>> {}
 }
 
 abstract class ResumableWaitHandle<+T> extends WaitableWaitHandle<T> {
@@ -148,8 +137,14 @@ final class AwaitAllWaitHandle extends WaitableWaitHandle<void> {
   public static function fromArray<T>(
     array<WaitHandle<T>> $deps
   ): WaitHandle<void>;
+  public static function fromDict<Tk, Tv>(
+    dict<Tk, WaitHandle<Tv>> $deps
+  ): WaitHandle<void>;
   public static function fromMap<Tk, Tv>(
     ConstMap<Tk, WaitHandle<Tv>> $deps
+  ): WaitHandle<void>;
+  public static function fromVec<T>(
+    vec<WaitHandle<T>> $deps
   ): WaitHandle<void>;
   public static function fromVector<T>(
     ConstVector<WaitHandle<T>> $deps

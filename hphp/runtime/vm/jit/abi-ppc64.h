@@ -89,13 +89,14 @@ constexpr PhysReg rret_type() { return ppc64_asm::reg::r4; }
 
 PhysReg rret(size_t i = 0);
 PhysReg rret_simd(size_t i);
-constexpr PhysReg rret_indirect() { return ppc64_asm::reg::r3; };
 
 PhysReg rarg(size_t i);
 PhysReg rarg_simd(size_t i);
+PhysReg rarg_ind_ret(size_t i);
 
 size_t num_arg_regs();
 size_t num_arg_regs_simd();
+size_t num_arg_regs_ind_ret();
 
 constexpr PhysReg r_svcreq_req()  { return ppc64_asm::reg::r3; }
 constexpr PhysReg r_svcreq_stub() { return ppc64_asm::reg::r8; }
@@ -112,6 +113,10 @@ PhysReg r_svcreq_arg(size_t i);
  */
 constexpr Reg64 rAsm = ppc64_asm::reg::r11;
 constexpr RegXMM rFasm = ppc64_asm::reg::f15;
+
+///////////////////////////////////////////////////////////////////////////////
+
+inline Vflags required_flags(jit::ConditionCode cc) { return 0xff; }
 
 ///////////////////////////////////////////////////////////////////////////////
 

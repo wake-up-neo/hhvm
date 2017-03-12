@@ -133,6 +133,39 @@ final class AsyncMysqlClient {
                                         ): Awaitable<AsyncMysqlConnection>;
 
   /**
+   * Begin an async connection and query  to a MySQL instance.
+   *
+   * Use this to asynchronously connect and query a MySQL instance.
+   *
+   * Normally you would use this to make one query to the
+   * MySQL client.
+   *
+   * If you want to be able to reuse the connection use connect or
+   * connectWithOpts
+   *
+   * @param $host - The hostname to connect to.
+   * @param $port - The port to connect to.
+   * @param $dbname - The initial database to use when connecting.
+   * @param $user - The user to connect as.
+   * @param $password - The password to connect with.
+   * @param $connection_options - A set of options used for connection.
+   *
+   * @return - an `Awaitable` representing the result of your query. Use
+   *           `await` or `join` to get the actual `AsyncMysqlQueryResult`
+   *           object.
+   */
+  <<__HipHopSpecific, __Native>>
+    public static function connectAndQuery(
+                                        array $queries,
+                                        string $host,
+                                        int $port,
+                                        string $dbname,
+                                        string $user,
+                                        string $password,
+                                        AsyncMysqlConnectionOptions $conn_opts,
+                                      ): Awaitable<Vector<AsyncMysqlQueryResult>>;
+
+  /**
    * Create a new async connection from a synchronous MySQL instance.
    *
    * This is a synchronous function. You will block until the connection has
@@ -293,13 +326,16 @@ final class AsyncMysqlConnection {
   }
 
   /**
-   * Begin running a query on the MySQL database client.
+   * Begin running an unsafe query on the MySQL database client.
    *
    * If you have a direct query that requires no placeholders, then you can
    * use this method. It takes a raw string query that will be executed as-is.
    *
    * You may want to call `escapeString()` to ensure that any queries out of
    * your direct control are safe.
+   *
+   * We strongly recommend using `queryf()` instead in all cases, which
+   * automatically escapes parameters.
    *
    * @param $query - The query itself.
    * @param $timeout_micros - The maximum time, in microseconds, in which the
@@ -370,6 +406,10 @@ final class AsyncMysqlConnection {
    * `join` on the returned `Awaitable`, you will get a `Vector` of
    * `AsyncMysqlQueryResult`, one result for each query.
    *
+   * We strongly recommend using multiple calls to `queryf()` instead as it
+   * escapes parameters; multiple queries can be executed simultaneously by
+   * combining `queryf()` with `HH\Asio\v()`.
+   *
    * @param $queries - A `Vector` of queries, with each query being a `string`
    *                    in the array.
    * @param $timeout_micros - The maximum time, in microseconds, in which the
@@ -386,10 +426,14 @@ final class AsyncMysqlConnection {
     int $timeout_micros = -1): Awaitable<Vector<AsyncMysqlQueryResult>>;
 
   /**
-   * Escape a string to be safe to include in a query.
+   * Escape a string to be safe to include in a raw query.
    *
    * Use this method to ensure your query is safe from, for example, SQL
-   * injection.
+   * injection if you are not using an API that automatically escapes
+   * queries.
+   *
+   * We strongly recommend using `queryf()` instead, which automatically
+   * escapes string parameters.
    *
    * This method is equivalent to PHP's
    * [mysql_real_escape_string()](http://goo.gl/bnxqtE).

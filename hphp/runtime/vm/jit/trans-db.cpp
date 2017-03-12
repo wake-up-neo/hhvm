@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -31,7 +31,6 @@
 namespace HPHP { namespace jit { namespace transdb { namespace {
 std::map<TCA, TransID> s_transDB;
 std::vector<TransRec> s_translations;
-std::vector<uint64_t*> s_transCounters;
 }
 
 bool enabled() {
@@ -63,23 +62,6 @@ const TransRec* getTransRec(TransID transId) {
 
 size_t getNumTranslations() {
   return s_translations.size();
-}
-
-uint64_t* getTransCounterAddr() {
-  if (!enabled()) return nullptr;
-
-  auto const id = s_translations.size();
-
-  // allocate a new chunk of counters if necessary
-  if (id >= s_transCounters.size() * transCountersPerChunk) {
-    uint32_t   size = sizeof(uint64_t) * transCountersPerChunk;
-    auto *chunk = (uint64_t*)malloc(size);
-    bzero(chunk, size);
-    s_transCounters.push_back(chunk);
-  }
-  assertx(id / transCountersPerChunk < s_transCounters.size());
-  return &(s_transCounters[id / transCountersPerChunk]
-           [id % transCountersPerChunk]);
 }
 
 void addTranslation(const TransRec& transRec) {
@@ -116,21 +98,6 @@ void addTranslation(const TransRec& transRec) {
 
   // Optimize storage of the created TransRec.
   s_translations[id].optimizeForMemory();
-}
-
-uint64_t getTransCounter(TransID transId) {
-  if (!enabled()) return -1ul;
-  assertx(transId < s_translations.size());
-
-  uint64_t counter;
-
-  if (transId / transCountersPerChunk >= s_transCounters.size()) {
-    counter = 0;
-  } else {
-    counter =  s_transCounters[transId / transCountersPerChunk]
-                              [transId % transCountersPerChunk];
-  }
-  return counter;
 }
 
 }}}

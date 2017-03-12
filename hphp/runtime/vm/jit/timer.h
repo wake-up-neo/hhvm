@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -32,6 +32,12 @@
   TIMER_NAME(optimize_realxGuards)              \
   TIMER_NAME(optimize_refcountOpts)             \
   TIMER_NAME(optimize_reoptimize)               \
+  TIMER_NAME(optimize_loads)                    \
+  TIMER_NAME(optimize_stores)                   \
+  TIMER_NAME(optimize_gvn)                      \
+  TIMER_NAME(optimize_phis)                     \
+  TIMER_NAME(optimize_licm)                     \
+  TIMER_NAME(hoist_type_checks)                 \
   TIMER_NAME(partial_dce_DefInlineFP)           \
   TIMER_NAME(regalloc)                          \
   TIMER_NAME(regionizeFunc)                     \
@@ -54,7 +60,9 @@
   TIMER_NAME(vasm_optimize)                     \
   TIMER_NAME(vasm_dce)                          \
 
-namespace HPHP { namespace jit {
+namespace HPHP {
+struct StructuredLogEntry;
+namespace jit {
 
 /*
  * Timer is used to track how much CPU time we spend in the different stages of
@@ -92,7 +100,7 @@ struct Timer {
     }
   };
 
-  explicit Timer(Name name);
+  explicit Timer(Name name, StructuredLogEntry* = nullptr);
   ~Timer();
 
   /*
@@ -110,8 +118,9 @@ struct Timer {
 
  private:
   Name m_name;
-  int64_t m_start;
   bool m_finished;
+  int64_t m_start;
+  StructuredLogEntry* m_log_entry;
 };
 
 } }

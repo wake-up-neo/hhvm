@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -20,9 +20,7 @@
 
 #include <sys/shm.h>
 
-namespace {
-
-using namespace HPHP;
+namespace HPHP {
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -163,7 +161,6 @@ private:
   char* m_addr;
 };
 
-
 struct ShmopRequestLocal final : RequestEventHandler {
   virtual void requestInit() override {
     // no-op
@@ -171,10 +168,6 @@ struct ShmopRequestLocal final : RequestEventHandler {
 
   virtual void requestShutdown() override {
     m_records.clear();
-  }
-
-  virtual void vscan(IMarker&) const override {
-    // no-op
   }
 
   ShmRec* findShm(const char* functionName, int64_t shmid) {
@@ -276,4 +269,4 @@ struct ShmopExtension final : Extension {
 } s_shmop_extension;
 
 ///////////////////////////////////////////////////////////////////////////////
-} // anonymous namespace
+}

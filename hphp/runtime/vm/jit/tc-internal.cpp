@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,11 +17,15 @@
 #include "hphp/runtime/vm/jit/tc-internal.h"
 #include "hphp/runtime/vm/jit/tc.h"
 
+#include "hphp/runtime/base/perf-warning.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/stats.h"
 #include "hphp/runtime/vm/debug/debug.h"
+#include "hphp/runtime/vm/vm-regs.h"
+
 #include "hphp/runtime/vm/jit/code-cache.h"
 #include "hphp/runtime/vm/jit/debugger.h"
+#include "hphp/runtime/vm/jit/mcgen.h"
 #include "hphp/runtime/vm/jit/perf-counters.h"
 #include "hphp/runtime/vm/jit/prof-data.h"
 #include "hphp/runtime/vm/jit/srcdb.h"
@@ -31,36 +35,55 @@
 #include "hphp/runtime/vm/jit/unique-stubs.h"
 #include "hphp/runtime/vm/jit/unwind-itanium.h"
 #include "hphp/runtime/vm/jit/write-lease.h"
-#include "hphp/runtime/vm/vm-regs.h"
 
+#include "hphp/util/disasm.h"
 #include "hphp/util/mutex.h"
 #include "hphp/util/process.h"
 #include "hphp/util/trace.h"
 
+#include <atomic>
+
+TRACE_SET_MOD(mcg);
+
 namespace HPHP { namespace jit { namespace tc {
+
+CodeCache* g_code{nullptr};
+SrcDB g_srcDB;
+UniqueStubs g_ustubs;
+
+///////////////////////////////////////////////////////////////////////////////
 
 namespace {
 
 std::atomic<uint64_t> s_numTrans;
-CodeCache* s_code{nullptr};
 SimpleMutex s_codeLock{false, RankCodeCache};
 SimpleMutex s_metadataLock{false, RankCodeMetadata};
 __thread size_t s_initialTCSize;
-UniqueStubs s_ustubs;
-SrcDB s_srcDB;
 
-bool shouldPGOFunc(const Func& func) {
+bool shouldPGOFunc(const Func* func) {
   if (profData() == nullptr) return false;
 
   // JITing pseudo-mains requires extra checks that blow the IR.  PGO
   // can significantly increase the size of the regions, so disable it for
   // pseudo-mains (so regions will be just tracelets).
-  if (func.isPseudoMain()) return false;
+  if (func->isPseudoMain()) return false;
 
   if (!RuntimeOption::EvalJitPGOHotOnly) return true;
-  return func.attrs() & AttrHot;
+  return func->attrs() & AttrHot;
 }
 
+}
+
+TransLoc TransRange::loc() const {
+  TransLoc loc;
+  loc.setMainStart(main.begin());
+  loc.setColdStart(cold.begin() - sizeof(uint32_t));
+  loc.setFrozenStart(frozen.begin() - sizeof(uint32_t));
+  loc.setMainSize(main.size());
+
+  assertx(loc.coldCodeSize() == cold.size());
+  assertx(loc.frozenCodeSize() == frozen.size());
+  return loc;
 }
 
 bool canTranslate() {
@@ -95,23 +118,46 @@ bool shouldTranslateNoSizeLimit(const Func* func) {
   return true;
 }
 
+static std::atomic_flag s_did_log = ATOMIC_FLAG_INIT;
+
 bool shouldTranslate(const Func* func, TransKind kind) {
   if (!shouldTranslateNoSizeLimit(func)) return false;
 
-  // Otherwise, follow the Eval.JitAMaxUsage limit.  However, we do allow PGO
-  // translations past that limit if there's still space in code.hot.
-  if (code().main().used() < CodeCache::AMaxUsage) return true;
+  auto const main_under = code().main().used() < CodeCache::AMaxUsage;
+  auto const cold_under = code().cold().used() < CodeCache::AColdMaxUsage;
+  auto const froz_under = code().frozen().used() < CodeCache::AFrozenMaxUsage;
 
-  switch (kind) {
-    case TransKind::ProfPrologue:
-    case TransKind::Profile:
-    case TransKind::OptPrologue:
-    case TransKind::Optimize:
-      return code().hotEnabled();
+  // Otherwise, follow the Eval.JitAMaxUsage limits.
+  if (main_under && cold_under && froz_under) return true;
 
-    default:
-      return false;
+  // We use cold and frozen for all kinds of translations, but we allow PGO
+  // translations past the limit for main if there's still space in code.hot.
+  if (cold_under && froz_under) {
+    switch (kind) {
+      case TransKind::ProfPrologue:
+      case TransKind::Profile:
+      case TransKind::OptPrologue:
+      case TransKind::Optimize:
+        return code().hotEnabled();
+      default:
+        break;
+    }
   }
+
+  if (main_under && !s_did_log.test_and_set() &&
+      RuntimeOption::EvalProfBranchSampleFreq == 0) {
+    // If we ran out of TC space in cold or frozen but not in main, something
+    // unexpected is happening and we should take note of it.  We skip this
+    // logging if TC branch profiling is on, since it fills up code and frozen
+    // at a much higher rate.
+    if (!cold_under) {
+      logPerfWarning("cold_full", 1, [] (StructuredLogEntry&) {});
+    }
+    if (!froz_under) {
+      logPerfWarning("frozen_full", 1, [] (StructuredLogEntry&) {});
+    }
+  }
+  return false;
 }
 
 bool newTranslation() {
@@ -130,7 +176,9 @@ std::unique_lock<SimpleMutex> lockMetadata() {
   return std::unique_lock<SimpleMutex>{s_metadataLock};
 }
 
-void assertOwnsCodeLock() { s_codeLock.assertOwnedBySelf(); }
+void assertOwnsCodeLock(OptView v) {
+  if (!v || !v->isLocal()) s_codeLock.assertOwnedBySelf();
+}
 void assertOwnsMetadataLock() { s_metadataLock.assertOwnedBySelf(); }
 
 void requestInit() {
@@ -139,18 +187,13 @@ void requestInit() {
   memset(&tl_perf_counters, 0, sizeof(tl_perf_counters));
   Stats::init();
   requestInitProfData();
-  s_initialTCSize = s_code->totalUsed();
+  s_initialTCSize = g_code->totalUsed();
   assert(!g_unwind_rds.isInit());
   memset(g_unwind_rds.get(), 0, sizeof(UnwindRDS));
   g_unwind_rds.markInit();
 }
 
 void requestExit() {
-  always_assert(!GetWriteLease().amOwner());
-  TRACE_MOD(Trace::txlease, 2, "%" PRIx64 " write lease stats: %15" PRId64
-            " kept, %15" PRId64 " grabbed\n",
-            Process::GetThreadIdForTrace(), GetWriteLease().hintKept(),
-            GetWriteLease().hintGrabbed());
   Stats::dump();
   Stats::clear();
   Timer::RequestExit();
@@ -172,32 +215,27 @@ void requestExit() {
 
 void codeEmittedThisRequest(size_t& requestEntry, size_t& now) {
   requestEntry = s_initialTCSize;
-  now = s_code->totalUsed();
+  now = g_code->totalUsed();
 }
 
 void processInit() {
   auto codeLock = lockCode();
   auto metaLock = lockMetadata();
 
-  s_code = new CodeCache();
-  s_ustubs.emitAll(*s_code, *Debug::DebugInfo::Get());
+  g_code = new(low_malloc_data(sizeof(CodeCache))) CodeCache();
+  g_ustubs.emitAll(*g_code, *Debug::DebugInfo::Get());
 
   // Write an .eh_frame section that covers the whole TC.
-  initUnwinder(s_code->base(), s_code->codeSize());
+  initUnwinder(g_code->base(), g_code->codeSize());
+  Disasm::ExcludedAddressRange(g_code->base(), g_code->codeSize());
 }
-
-CodeCache& code() {
-  assert(s_code);
-  return *s_code;
-}
-const UniqueStubs& ustubs() { return s_ustubs; }
-SrcDB& srcDB() { return s_srcDB; }
-
-TCA offsetToAddr(uint32_t off) { return s_code->toAddr(off); }
-uint32_t addrToOffset(CTCA addr) { return s_code->toOffset(addr); }
 
 bool isValidCodeAddress(TCA addr) {
-  return s_code->isValidCodeAddress(addr);
+  return g_code->isValidCodeAddress(addr);
+}
+
+bool isProfileCodeAddress(TCA addr) {
+  return g_code->prof().contains(addr);
 }
 
 void freeTCStub(TCA stub) {
@@ -220,20 +258,38 @@ void checkFreeProfData() {
   // However, we keep the data around indefinitely in a few special modes:
   // * Eval.EnableReusableTC
   // * TC dumping enabled (Eval.DumpTC/DumpIR/etc.)
+  //
+  // Finally, when the RetranslateAll mode is enabled, the ProfData is discarded
+  // via a different mechanism, after all the optimized translations are
+  // generated.
   if (profData() &&
       !RuntimeOption::EvalEnableReusableTC &&
       code().main().used() >= CodeCache::AMaxUsage &&
       (!code().hotEnabled() ||
        profData()->profilingFuncs() == profData()->optimizedFuncs()) &&
-      !transdb::enabled()) {
+      !transdb::enabled() &&
+      !RuntimeOption::EvalJitRetranslateAllRequest) {
     discardProfData();
   }
 }
 
-bool profileSrcKey(SrcKey sk) {
-  if (!shouldPGOFunc(*sk.func())) return false;
-  if (profData()->optimized(sk.funcID())) return false;
-  if (profData()->profiling(sk.funcID())) return true;
+bool profileFunc(const Func* func) {
+  if (!shouldPGOFunc(func)) return false;
+
+  // If retranslateAll is enabled and we already passed the point that it should
+  // be scheduled to execute (via the treadmill), then we can't emit more
+  // Profile translations.  This is to ensure that, when retranslateAll() runs,
+  // no more Profile translations are being added to ProfData.
+  if (RuntimeOption::EvalJitRetranslateAllRequest != 0 &&
+      hasEnoughProfDataToRetranslateAll()) {
+    return false;
+  }
+
+  if (profData()->optimized(func->getFuncId())) return false;
+
+  // If we already started profiling `func', then we return true and skip the
+  // other checks below.
+  if (profData()->profiling(func->getFuncId())) return true;
 
   // Don't start profiling new functions if the size of either main or
   // prof is already above Eval.JitAMaxUsage and we already filled hot.
@@ -244,8 +300,8 @@ bool profileSrcKey(SrcKey sk) {
 
   // We have two knobs to control the number of functions we're allowed to
   // profile: Eval.JitProfileRequests and Eval.JitProfileBCSize. We profile new
-  // functions until either of these limits is exceeded. In practice we expect
-  // to hit the bytecode size limit first but we keep the request limit around
+  // functions until either of these limits is exceeded. In practice, we expect
+  // to hit the bytecode size limit first, but we keep the request limit around
   // as a safety net.
   if (RuntimeOption::EvalJitProfileBCSize > 0 &&
       profData()->profilingBCSize() >= RuntimeOption::EvalJitProfileBCSize) {
@@ -254,5 +310,87 @@ bool profileSrcKey(SrcKey sk) {
 
   return requestCount() <= RuntimeOption::EvalJitProfileRequests;
 }
+
+///////////////////////////////////////////////////////////////////////////////
+
+ThreadTCBuffer::ThreadTCBuffer(TCA start) : m_start(start) {
+  if (!start) return;
+
+  TCA fakeStart = code().threadLocalStart();
+  size_t off = 0;
+  auto initBlock = [&] (DataBlock& block, size_t sz, const char* nm) {
+    block.init(&fakeStart[off], &start[off], sz, nm);
+    off += sz;
+  };
+  initBlock(m_main, RuntimeOption::EvalThreadTCMainBufferSize,
+            "thread local main");
+  initBlock(m_cold, RuntimeOption::EvalThreadTCColdBufferSize,
+            "thread local cold");
+  initBlock(m_frozen, RuntimeOption::EvalThreadTCFrozenBufferSize,
+            "thread local frozen");
+  initBlock(m_data, RuntimeOption::EvalThreadTCDataBufferSize,
+            "thread local data");
+
+#ifndef NDEBUG
+  mprotect(m_start, mcgen::localTCSize(), PROT_NONE);
+#endif
+}
+
+#ifndef NDEBUG
+ThreadTCBuffer::~ThreadTCBuffer() {
+  mprotect(m_start, mcgen::localTCSize(), PROT_READ | PROT_WRITE);
+}
+#endif
+
+OptView ThreadTCBuffer::view() {
+  if (!valid()) return folly::none;
+  return CodeCache::View(m_main, m_cold, m_frozen, m_data, true);
+}
+
+bool reachedTranslationLimit(TransKind kind, SrcKey sk, const SrcRec& srcRec) {
+  const auto numTrans = srcRec.translations().size();
+
+  // Optimized translations perform this check at relocation time to avoid
+  // invalidating all of their SrcKeys early.
+  if (kind == TransKind::Optimize) return false;
+
+  if ((kind == TransKind::Profile &&
+       numTrans != RuntimeOption::EvalJitMaxProfileTranslations) ||
+      (kind != TransKind::Profile &&
+       numTrans != RuntimeOption::EvalJitMaxTranslations)) {
+    return false;
+  }
+  INC_TPC(max_trans);
+
+  if (debug && Trace::moduleEnabled(Trace::mcg, 2)) {
+    const auto& tns = srcRec.translations();
+    TRACE(1, "Too many (%zd) translations: %s, BC offset %d\n",
+          tns.size(), sk.unit()->filepath()->data(),
+          sk.offset());
+    SKTRACE(2, sk, "{\n");
+    TCA topTrans = srcRec.getTopTranslation();
+    for (size_t i = 0; i < tns.size(); ++i) {
+      auto const rec = transdb::getTransRec(tns[i].mainStart());
+      assertx(rec);
+      SKTRACE(2, sk, "%zd %p\n", i, tns[i].mainStart());
+      if (tns[i].mainStart() == topTrans) {
+        SKTRACE(2, sk, "%zd: *Top*\n", i);
+      }
+      if (rec->kind == TransKind::Anchor) {
+        SKTRACE(2, sk, "%zd: Anchor\n", i);
+      } else {
+        SKTRACE(2, sk, "%zd: guards {\n", i);
+        for (unsigned j = 0; j < rec->guards.size(); ++j) {
+          FTRACE(2, "{}\n", rec->guards[j]);
+        }
+        SKTRACE(2, sk, "%zd } guards\n", i);
+      }
+    }
+    SKTRACE(2, sk, "} /* Too many translations */\n");
+  }
+  return true;
+}
+
+////////////////////////////////////////////////////////////////////////////////
 
 }}}

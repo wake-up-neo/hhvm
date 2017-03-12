@@ -56,38 +56,39 @@ let assert_last_in_list assert_fun node =
     | _ :: t -> aux t in
   aux (syntax_to_list_no_separators node)
 
-(* If an ellipsis appears in a position other than the last element in the
-   list then return it. *)
-let misplaced_ellipsis params =
-  assert_last_in_list is_ellipsis params
-
-let is_variadic node =
+let is_variadic_expression node =
   begin match syntax node with
     | DecoratedExpression { decorated_expression_decorator; _; } ->
       is_ellipsis decorated_expression_decorator
     | _ -> false
   end
 
+let is_variadic_parameter_variable node =
+  (* TODO: This shouldn't be a decorated *expression* because we are not
+  expecting an expression at all. We're expecting a declaration. *)
+  is_variadic_expression node
+
+let is_variadic_parameter_declaration node =
+  begin match syntax node with
+  | VariadicParameter _ -> true
+  | ParameterDeclaration { parameter_name; _ } ->
+      is_variadic_parameter_variable parameter_name
+  | _ -> false
+  end
+
 let misplaced_variadic_param params =
-  let is_variadic node =
-    begin match syntax node with
-    | ParameterDeclaration { param_attr; param_visibility; param_type;
-      param_name; param_default } ->
-        is_variadic param_name
-    | _ -> false
-    end
-  in
-  assert_last_in_list is_variadic params
+  assert_last_in_list is_variadic_parameter_declaration params
 
 let misplaced_variadic_arg args =
-  assert_last_in_list is_variadic args
+  assert_last_in_list is_variadic_expression args
 
-(* If a list ends with an ellipsis followed by a comma, return it *)
-let ends_with_ellipsis_comma params =
+(* If a list ends with a variadic parameter followed by a comma, return it *)
+let ends_with_variadic_comma params =
   let rec aux params =
     match params with
     | [] -> None
-    | x :: y :: [] when is_ellipsis x && is_comma y -> Some y
+    | x :: y :: [] when is_variadic_parameter_declaration x && is_comma y ->
+      Some y
     | _ :: t -> aux t in
   aux (syntax_to_list_with_separators params)
 
@@ -145,7 +146,7 @@ let rec containing_classish_kind parents =
   | h :: t ->
     begin
       match syntax h with
-      | ClassishDeclaration c -> token_kind c.classish_token
+      | ClassishDeclaration c -> token_kind c.classish_keyword
       | _ -> containing_classish_kind t
     end
 
@@ -153,15 +154,15 @@ let rec containing_classish_kind parents =
 let methodish_modifier_contains_helper p node =
   match syntax node with
   | MethodishDeclaration syntax ->
-    let node = methodish_modifiers syntax in
-    (list_contains_predicate p node || p node)
+    let node = syntax.methodish_modifiers in
+    list_contains_predicate p node
   | _ -> false
 
 (* tests whether the methodish contains > 1 modifier that satisfies [p] *)
 let methodish_modifier_multiple_helper p node =
   match syntax node with
   | MethodishDeclaration syntax ->
-    let node = methodish_modifiers syntax in
+    let node = syntax.methodish_modifiers in
     list_contains_multiple_predicate p node
   | _ -> false
 
@@ -196,48 +197,46 @@ let methodish_multiple_visibility node =
 (* Given a function declaration header, confirm that it is a constructor
  * and that the methodish containing it has a static keyword *)
 let class_constructor_has_static node parents =
-  let label = function_name node in
+  let label = node.function_name in
   (is_construct label) && (matches_first methodish_contains_static parents)
 
 (* Given a function declaration header, confirm that it is NOT a constructor
  * and that the header containing it has visibility modifiers in parameters
  *)
 let class_non_constructor_has_visibility_param node parents =
-  let label = function_name node in
-  let params = function_params node in
   let has_visibility node =
     match syntax node with
-    | ParameterDeclaration node ->
-      node |> param_visibility |> is_missing |> not
+    | ParameterDeclaration { parameter_visibility; _ } ->
+      parameter_visibility |> is_missing |> not
     | _ -> false
   in
-  ( not (is_construct label)) &&
-  ( list_contains_predicate has_visibility params ||
-    has_visibility params)
+  let label = node.function_name in
+  let params = syntax_to_list_no_separators node.function_parameter_list in
+  (not (is_construct label)) && (List.exists has_visibility params)
 
 (* Given a function declaration header, confirm that it is a destructor
  * and that the methodish containing it has non-empty parameters *)
 let class_destructor_has_param node parents =
-  let label = function_name node in
-  let param = function_params node in
+  let label = node.function_name in
+  let param = node.function_parameter_list in
   (is_destruct label) && not (is_missing param)
 
 (* Given a function declaration header, confirm that it is a destructor
  * and that the methodish containing it has non-visibility modifiers *)
 let class_destructor_has_non_visibility_modifier node parents =
-  let label = function_name node in
+  let label = node.function_name in
   (is_destruct label) &&
   (matches_first methodish_contains_non_visibility parents)
 
 (* check that a constructor or a destructor is type annotated *)
 let class_constructor_destructor_has_non_void_type node parents =
-  let label = function_name node in
-  let type_ano = function_type node in
-  let function_colon = function_colon node in
+  let label = node.function_name in
+  let type_ano = node.function_type in
+  let function_colon = node.function_colon in
   let is_missing = is_missing type_ano && is_missing function_colon in
   let is_void = match syntax type_ano with
     | SimpleTypeSpecifier spec ->
-      is_void spec
+      is_void spec.simple_type_specifier
     | _ -> false
   in
   (is_construct label || is_destruct label) &&
@@ -247,7 +246,7 @@ let class_constructor_destructor_has_non_void_type node parents =
 let methodish_duplicate_modifier node =
   match syntax node with
   | MethodishDeclaration syntax ->
-    let modifiers = methodish_modifiers syntax in
+    let modifiers = syntax.methodish_modifiers in
     list_contains_duplicate modifiers
   | _ -> false
 
@@ -255,7 +254,7 @@ let methodish_duplicate_modifier node =
 let methodish_has_body node =
   match syntax node with
   | MethodishDeclaration syntax ->
-    let body = methodish_function_body syntax in
+    let body = syntax.methodish_function_body in
     not (is_missing body)
   | _ -> false
 
@@ -287,40 +286,9 @@ let methodish_abstract_conflict_with_final node =
   let has_final = methodish_contains_final node in
   is_abstract && has_final
 
-let statement_directly_in_switch parents =
-  match parents with
-  | l :: c :: s :: _ when (is_compound_statement c) && (is_list l) &&
-    (is_switch_statement s) ->
-    true
-  | c :: s :: _ when (is_compound_statement c) && (is_switch_statement s) ->
-    true
-  | _ -> false
-
-let first_statement compound =
-  match syntax compound with
-  | CompoundStatement { compound_statements; _ } ->
-    begin
-      match syntax compound_statements with
-      | Missing -> None (* Empty block *)
-      | SyntaxList (first :: _ ) -> Some first
-      | _ -> Some compound_statements (* Singleton statement in a block *)
-    end
-  | _ -> None
-
-let switch_first_is_label compound =
-  match first_statement compound with
-  | None -> true
-  | Some statement ->
-    begin
-      match syntax statement with
-      | DefaultStatement _
-      | CaseStatement _ -> true
-      | _ -> false
-    end
-
 let rec parameter_type_is_required parents =
   match parents with
-  | h :: _ when is_function h -> true
+  | h :: _ when is_function_declaration h -> true
   | h :: _ when is_anonymous_function h -> false (* TODO: Lambda? *)
   | _ :: t -> parameter_type_is_required t
   | [] -> false
@@ -349,9 +317,10 @@ let xhp_errors node _parents =
    element names. *)
   match syntax node with
   |  XHPAttribute attr when
-    (is_bad_xhp_attribute_name (PositionedSyntax.text attr.xhp_attr_name)) ->
-      let s = start_offset attr.xhp_attr_name in
-      let e = end_offset attr.xhp_attr_name in
+    (is_bad_xhp_attribute_name
+    (PositionedSyntax.text attr.xhp_attribute_name)) ->
+      let s = start_offset attr.xhp_attribute_name in
+      let e = end_offset attr.xhp_attribute_name in
       [ SyntaxError.make s e SyntaxError.error2002 ]
   | _ -> [ ]
 
@@ -389,24 +358,22 @@ let produce_error_for_header acc check node error error_node =
 let methodish_errors node parents =
   match syntax node with
   (* TODO how to narrow the range of error *)
-  | FunctionDeclarationHeader header ->
+  | FunctionDeclarationHeader { function_parameter_list; function_type; _} ->
     let errors = [] in
-    let params = function_params header in
-    let type_ano = function_type header in
     let errors =
       produce_error_for_header errors class_destructor_has_param node parents
-      SyntaxError.error2011 params in
+      SyntaxError.error2011 function_parameter_list in
     let errors =
       produce_error_for_header errors
       class_constructor_destructor_has_non_void_type
-      node parents SyntaxError.error2018 type_ano in
+      node parents SyntaxError.error2018 function_type in
     let errors =
       produce_error_for_header errors class_non_constructor_has_visibility_param
-      node parents SyntaxError.error2010 params in
+      node parents SyntaxError.error2010 function_parameter_list in
     errors
   | MethodishDeclaration md ->
-    let header_node = methodish_function_decl_header md in
-    let modifiers = methodish_modifiers md in
+    let header_node = md.methodish_function_decl_header in
+    let modifiers = md.methodish_modifiers in
     let errors = [] in
     let errors =
       produce_error_for_header errors class_constructor_has_static header_node
@@ -421,11 +388,11 @@ let methodish_errors node parents =
     let errors =
       produce_error errors methodish_duplicate_modifier node
       SyntaxError.error2013 modifiers in
-    let fun_body = methodish_function_body md in
+    let fun_body = md.methodish_function_body in
     let errors =
       produce_error errors methodish_abstract_with_body node
       SyntaxError.error2014 fun_body in
-    let fun_semicolon = methodish_semicolon md in
+    let fun_semicolon = md.methodish_semicolon in
     let errors =
       produce_error errors methodish_non_abstract_without_body node
       SyntaxError.error2015 fun_semicolon in
@@ -439,52 +406,43 @@ let methodish_errors node parents =
   | _ -> [ ]
 
 let params_errors params =
-  let errors = match misplaced_ellipsis params with
-  | None -> []
-  | Some ellipsis ->
-    let s = start_offset ellipsis in
-    let e = end_offset ellipsis in
-    [ SyntaxError.make s e SyntaxError.error2021 ] in
   let errors =
-    if errors = [] then
-      match ends_with_ellipsis_comma params with
-      | None -> []
-      | Some comma ->
-        let s = start_offset comma in
-        let e = end_offset comma in
-        [ SyntaxError.make s e SyntaxError.error2022 ]
-    else
-      errors
+    match ends_with_variadic_comma params with
+    | None -> []
+    | Some comma ->
+      let s = start_offset comma in
+      let e = end_offset comma in
+      [ SyntaxError.make s e SyntaxError.error2022 ]
   in
     match misplaced_variadic_param params with
     | None -> errors
     | Some param ->
       let s = start_offset param in
       let e = end_offset param in
-      ( SyntaxError.make s e SyntaxError.error2033 ) :: errors
+      ( SyntaxError.make s e SyntaxError.error2021 ) :: errors
 
 let parameter_errors node parents is_strict =
   match syntax node with
-  | ParameterDeclaration p
-    when is_strict && (is_missing p.param_type) &&
+  | ParameterDeclaration { parameter_type; _}
+    when is_strict && (is_missing parameter_type) &&
     (parameter_type_is_required parents) ->
       let s = start_offset node in
       let e = end_offset node in
       [ SyntaxError.make s e SyntaxError.error2001 ]
-  | FunctionDeclarationHeader { function_params; _ } ->
-    params_errors function_params
-  | AnonymousFunction { anonymous_params; _ } ->
-    params_errors anonymous_params
+  | FunctionDeclarationHeader { function_parameter_list; _ } ->
+    params_errors function_parameter_list
+  | AnonymousFunction { anonymous_parameters; _ } ->
+    params_errors anonymous_parameters
   | _ -> []
 
 let function_errors node _parents is_strict =
   match syntax node with
   | FunctionDeclarationHeader f ->
-    let label = function_name f in
+    let label = f.function_name in
     let is_function = not (is_construct label) && not (is_destruct label) in
-    if is_strict && is_missing (function_type f) && is_function then
+    if is_strict && is_missing f.function_type && is_function then
       (* Where do we want to report the error? Probably on the right paren. *)
-      let rparen = function_right_paren f in
+      let rparen = f.function_right_paren in
       let s = start_offset rparen in
       let e = end_offset rparen in
       [ SyntaxError.make s e SyntaxError.error2001 ]
@@ -494,25 +452,15 @@ let function_errors node _parents is_strict =
 
 let statement_errors node parents =
   let result = match syntax node with
-  | CaseStatement _
-    when not (statement_directly_in_switch parents) ->
-    Some (node, SyntaxError.error2003)
-  | DefaultStatement _
-    when not (statement_directly_in_switch parents) ->
-    Some (node, SyntaxError.error2004)
-    (* TODO: Detect when there is more than one default. *)
   | BreakStatement _
     when not (break_is_legal parents) ->
     Some (node, SyntaxError.error2005)
   | ContinueStatement _
     when not (continue_is_legal parents) ->
     Some (node, SyntaxError.error2006)
-  | TryStatement { catch_clauses; finally_clause; _ }
-    when (is_missing catch_clauses) && (is_missing finally_clause) ->
+  | TryStatement { try_catch_clauses; try_finally_clause; _ }
+    when (is_missing try_catch_clauses) && (is_missing try_finally_clause) ->
     Some (node, SyntaxError.error2007)
-  | SwitchStatement { switch_compound_statement; _ }
-    when not (switch_first_is_label switch_compound_statement) ->
-    Some (switch_compound_statement, SyntaxError.error2008)
   | _ -> None in
   match result with
   | None -> [ ]
@@ -523,7 +471,7 @@ let statement_errors node parents =
 
 let property_errors node is_strict =
   match syntax node with
-  | PropertyDeclaration p when is_strict && is_missing (p.prop_type) ->
+  | PropertyDeclaration p when is_strict && is_missing (p.property_type) ->
       let s = start_offset node in
       let e = end_offset node in
       [ SyntaxError.make s e SyntaxError.error2001 ]
@@ -531,12 +479,13 @@ let property_errors node is_strict =
 
 let expression_errors node =
   match syntax node with
-  | SubscriptExpression s when is_left_brace s.subscript_left ->
+  | SubscriptExpression { subscript_left_bracket; _}
+    when is_left_brace subscript_left_bracket ->
     let s = start_offset node in
     let e = end_offset node in
     [ SyntaxError.make s e SyntaxError.error2020 ]
-  | FunctionCallExpression s ->
-    begin match misplaced_variadic_arg s.function_call_arguments with
+  | FunctionCallExpression { function_call_argument_list; _} ->
+    begin match misplaced_variadic_arg function_call_argument_list with
       | Some h ->
         let s = start_offset h in
         let e = end_offset h in
@@ -567,7 +516,7 @@ let classish_errors node parents =
   match syntax node with
   | ClassishDeclaration c ->
     begin
-      let modifiers = classish_modifiers c in
+      let modifiers = c.classish_modifiers in
       let acc = [] in
       produce_error acc classish_duplicate_modifiers modifiers
       SyntaxError.error2031 modifiers
@@ -578,8 +527,8 @@ let type_errors node parents is_strict =
   match syntax node with
   | SimpleTypeSpecifier t ->
     let acc = [ ] in
-    produce_error acc (type_contains_array_in_strict is_strict) t
-    SyntaxError.error2032 t
+    produce_error acc (type_contains_array_in_strict is_strict)
+      t.simple_type_specifier SyntaxError.error2032 t.simple_type_specifier
   | _ -> [ ]
 
 let find_syntax_errors node is_strict =

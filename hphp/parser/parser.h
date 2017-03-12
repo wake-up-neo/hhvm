@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -27,6 +27,8 @@
 #include "hphp/util/lock.h"
 #include "hphp/util/functional.h"
 #include "hphp/util/hash-map-typedefs.h"
+
+#include <folly/String.h>
 
 #define IMPLEMENT_XHP_ATTRIBUTES                \
   Token m_xhpAttributes;                        \
@@ -90,7 +92,13 @@ struct ParserBase {
     StaticName
   };
 
-  static bool IsClosureName                (const std::string &name);
+  static bool IsClosureName(const std::string &name);
+  /*
+   * Is this the name of an anonymous class (either a closure,
+   * or a ClassExpression).
+   */
+  static bool IsAnonymousClassName(folly::StringPiece name);
+
   std::string newClosureName(
       const std::string &namespaceName,
       const std::string &className,

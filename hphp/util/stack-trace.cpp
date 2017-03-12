@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,7 +20,7 @@
 #include <set>
 #include <string>
 
-#if (!defined(__CYGWIN__) && !defined(__MINGW__) && !defined(_MSC_VER))
+#ifndef _MSC_VER
 #include <execinfo.h>
 #endif
 
@@ -194,13 +194,6 @@ void translateFromPerfMap(StackFrameExtra* frame) {
   }
 }
 
-struct StackTraceLog {
-  hphp_string_map<std::string> data;
-
-  static DECLARE_THREAD_LOCAL(StackTraceLog, s_logData);
-};
-IMPLEMENT_THREAD_LOCAL(StackTraceLog, StackTraceLog::s_logData);
-
 template <bool safe>
 int ALWAYS_INLINE get_backtrace(void** frame, int max) {
   int ret = 0;
@@ -221,6 +214,13 @@ int ALWAYS_INLINE get_backtrace(void** frame, int max) {
 
 }
 
+struct StackTraceLog {
+  hphp_string_map<std::string> data;
+
+  static DECLARE_THREAD_LOCAL(StackTraceLog, s_logData);
+};
+IMPLEMENT_THREAD_LOCAL(StackTraceLog, StackTraceLog::s_logData);
+
 ////////////////////////////////////////////////////////////////////////////////
 
 StackTraceBase::StackTraceBase() {
@@ -234,6 +234,11 @@ StackTrace::StackTrace(bool trace) {
     m_frames.resize(kMaxFrame);
     m_frames.resize(get_backtrace<false>(m_frames.data(), kMaxFrame));
   }
+}
+
+StackTrace::StackTrace(StackTrace::Force) {
+  m_frames.resize(kMaxFrame);
+  m_frames.resize(get_backtrace<false>(m_frames.data(), kMaxFrame));
 }
 
 StackTrace::StackTrace(void* const* ips, size_t count) {

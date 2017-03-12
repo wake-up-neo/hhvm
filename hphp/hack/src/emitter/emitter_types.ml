@@ -35,7 +35,7 @@ let rec fmt_hint (_, h) =
   | N.Hmixed -> "HH\\mixed"
   | N.Hthis -> "HH\\this"
   | N.Hprim prim -> fmt_prim prim
-  | N.Habstr (s, _) -> C.fmt_name s
+  | N.Habstr s -> C.fmt_name s
 
   | N.Happly ((_, s), []) -> C.fmt_name s
   | N.Happly ((_, s), args) ->
@@ -63,12 +63,13 @@ let rec fmt_hint (_, h) =
    * C.extract_shape_fields. asdf. *)
   | Nast.Hshape smap ->
     let fmt_field = function
-      | N.SFlit (_, s) -> "'" ^ s ^ "'"
-      | N.SFclass_const ((_, s1), (_, s2)) -> C.fmt_name s1 ^ "::" ^ s2
+      | Ast.SFlit (_, s) -> "'" ^ s ^ "'"
+      | Ast.SFclass_const ((_, s1), (_, s2)) -> C.fmt_name s1 ^ "::" ^ s2
     in
+    let format_shape_field (k, { N.sfi_hint; _ }) =
+      fmt_field k ^ "=>" ^ fmt_hint sfi_hint in
     let shape_fields =
-      List.map ~f:(fun (k, h) -> fmt_field k ^ "=>" ^ fmt_hint h)
-        (C.extract_shape_fields smap) in
+      List.map ~f:format_shape_field (C.extract_shape_fields smap) in
     "HH\\shape(" ^ String.concat ", " shape_fields ^ ")"
 
 
@@ -100,7 +101,7 @@ let rec hint_info ~tparams (_, h) =
 
   | N.Haccess (_, _) -> Some "", ["hh_type"; "extended_hint"; "type_constant"]
   (* Need to differentiate between type params and classes *)
-  | N.Habstr (s, _) | N.Happly ((_, s), _) ->
+  | N.Habstr s | N.Happly ((_, s), _) ->
     if List.mem tparams s then
       Some "", ["hh_type"; "extended_hint"; "type_var"]
     else

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -116,6 +116,13 @@ struct RegionDesc {
    * regions that are linear traces.
    */
   SrcKey            lastSrcKey() const;
+
+  /*
+   * Returns the profile count associated with block `bid'.  In case other
+   * blocks have been merged into this block, the returned count includes the
+   * counts of these other blocks as well.
+   */
+  int64_t           blockProfCount(BlockId bid) const;
 
   Block*            addBlock(SrcKey sk, int length, FPInvOffset spOffset);
   void              replaceBlock(BlockId bid, BlockPtr newBlock);
@@ -287,8 +294,8 @@ struct RegionDesc::Block {
   using ParamByRefMap = boost::container::flat_map<SrcKey,bool>;
   using KnownFuncMap  = boost::container::flat_map<SrcKey,const Func*>;
 
-  explicit Block(const Func* func, bool resumed, Offset start, int length,
-                 FPInvOffset initSpOff);
+  explicit Block(const Func* func, bool resumed, bool hasThis,
+                 Offset start, int length, FPInvOffset initSpOff);
 
   Block& operator=(const Block&) = delete;
 
@@ -299,10 +306,12 @@ struct RegionDesc::Block {
   BlockId     id()                const { return m_id; }
   const Unit* unit()              const { return m_func->unit(); }
   const Func* func()              const { return m_func; }
-  SrcKey      start()             const { return SrcKey { m_func, m_start,
-                                                          m_resumed }; }
-  SrcKey      last()              const { return SrcKey { m_func, m_last,
-                                                          m_resumed }; }
+  SrcKey      start()             const {
+    return SrcKey { m_func, m_start, m_resumed, m_hasThis };
+  }
+  SrcKey      last()              const {
+    return SrcKey { m_func, m_last, m_resumed, m_hasThis };
+  }
   int         length()            const { return m_length; }
   bool        empty()             const { return length() == 0; }
   bool        contains(SrcKey sk) const;
@@ -386,6 +395,7 @@ private:
   BlockId         m_id;
   const Func*     m_func;
   const bool      m_resumed;
+  const bool      m_hasThis;
   const Offset    m_start;
   Offset          m_last;
   int             m_length;
@@ -418,10 +428,15 @@ struct RegionContext {
   struct LiveType;
   struct PreLiveAR;
 
+  RegionContext(const Func* f, Offset bcOff, FPInvOffset spOff,
+                bool r, bool ht) :
+      func(f), bcOffset(bcOff), spOffset(spOff), resumed(r), hasThis(ht) {}
+
   const Func* func;
   Offset bcOffset;
   FPInvOffset spOffset;
   bool resumed;
+  bool hasThis;
   jit::vector<LiveType> liveTypes;
   jit::vector<PreLiveAR> preLiveARs;
 };

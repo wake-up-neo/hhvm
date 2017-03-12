@@ -44,9 +44,10 @@ let from_class {
     smeths = filter_inherited_elements (module StaticMethods) dc_smethods;
   }
 
-let get_for_classes classes =
+let get_for_classes ~old classes =
+  let get = if old then Decl_heap.Classes.get_old else Decl_heap.Classes.get in
   List.fold ~f:begin fun acc cls ->
-    match Decl_heap.Classes.get cls with
+    match get cls with
     | None -> acc
     | Some c -> SMap.add cls (from_class c) acc
   end classes ~init:SMap.empty
@@ -73,17 +74,6 @@ let remove_old_batch {
   Methods.remove_old_batch meths;
   StaticMethods.remove_old_batch smeths
 
-let revive_batch {
-  props;
-  sprops;
-  meths;
-  smeths;
-} =
-  Props.revive_batch props;
-  StaticProps.revive_batch sprops;
-  Methods.revive_batch meths;
-  StaticMethods.revive_batch smeths
-
 let remove_batch {
   props;
   sprops;
@@ -99,12 +89,6 @@ let oldify_all class_to_elems =
   SMap.iter begin fun cls elems ->
     Constructors.oldify_batch (SSet.singleton cls);
     oldify_batch elems
-  end class_to_elems
-
-let revive_all class_to_elems =
-  SMap.iter begin fun cls elems ->
-    Constructors.revive_batch (SSet.singleton cls);
-    revive_batch elems
   end class_to_elems
 
 let remove_old_all class_to_elems =

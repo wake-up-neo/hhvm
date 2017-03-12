@@ -9,6 +9,7 @@
  *)
 
 open Core
+open Option.Monad_infix
 open Reordered_argument_collections
 open Typing_defs
 
@@ -41,6 +42,7 @@ type action_internal  =
   | IGConst of string
 
 type result = (string * Pos.absolute) list
+type ide_result = (string * Pos.absolute list) option
 
 let process_fun_id results_acc target_fun id =
   if target_fun = (snd id)
@@ -54,20 +56,13 @@ let check_if_extends_class tcopt target_class_name class_name =
   | _ -> false
 
 let is_target_class tcopt target_classes class_name =
-  match tcopt, target_classes with
-  | _, Class_set s -> SSet.mem s class_name
-  | Some tcopt, Subclasses_of s ->
+  match target_classes with
+  | Class_set s -> SSet.mem s class_name
+  | Subclasses_of s ->
     s = class_name || check_if_extends_class tcopt s class_name
-  | None, Subclasses_of _ ->
-    (* The only reason why tcopt is optional is because this function can
-     * be called both from master and parallel worker. In current usage,
-     * the workers always use Class_set method so they won't need the
-     * tcopt, and passing it down to them is complicated/expensive.
-     *)
-    failwith "TypecheckerOptions are required to check subtyping"
 
-let process_member_id tcopt results_acc target_classes  target_member
-    class_ id _ _ ~is_method ~is_const =
+let process_member_id tcopt results_acc target_classes target_member
+    class_ ~targs:_ id _ _ ~is_method ~is_const =
   let member_name = snd id in
   let is_target = match target_member with
     | Method target_name  -> is_method && (member_name = target_name)
@@ -84,10 +79,10 @@ let process_member_id tcopt results_acc target_classes  target_member
       Pos.Map.add (fst id) (class_name ^ "::" ^ (snd id)) !results_acc
 
 let process_constructor tcopt results_acc
-    target_classes target_member class_ _ p =
+    target_classes target_member class_ ~targs _ p =
   process_member_id
-    tcopt results_acc target_classes target_member class_ (p, "__construct")
-    () () ~is_method:true ~is_const:false
+    tcopt results_acc target_classes target_member class_ ~targs
+    (p, "__construct") () () ~is_method:true ~is_const:false
 
 let process_class_id results_acc target_classes cid mid_option =
    if (SSet.mem target_classes (snd cid))
@@ -152,12 +147,12 @@ let find_child_classes tcopt target_class_name files_info files =
       acc)
   end
 
-let get_child_classes_files tcopt class_name =
-  match Typing_lazy_heap.get_class tcopt class_name with
-  | Some class_ ->
+let get_child_classes_files class_name =
+  match Naming_heap.TypeIdHeap.get class_name with
+  | Some (_, `Class) ->
     (* Find the files that contain classes that extend class_ *)
     let cid_hash =
-      Typing_deps.Dep.make (Typing_deps.Dep.Class class_.tc_name) in
+      Typing_deps.Dep.make (Typing_deps.Dep.Class class_name) in
     let extend_deps =
       Decl_compare.get_extend_deps cid_hash
         (Typing_deps.DepSet.singleton cid_hash)
@@ -166,24 +161,26 @@ let get_child_classes_files tcopt class_name =
   | _ ->
     Relative_path.Set.empty
 
-let get_deps_set tcopt classes =
+let get_deps_set classes =
+  let get_filename class_name =
+    Naming_heap.TypeIdHeap.get class_name >>= fun (pos, _) ->
+    Some (FileInfo.get_pos_filename pos)
+  in
   SSet.fold classes ~f:begin fun class_name acc ->
-    match Typing_lazy_heap.get_class tcopt class_name with
-    | Some class_ ->
-        (* Get all files with dependencies on this class *)
-        let fn = Pos.filename class_.tc_pos in
-        let dep = Typing_deps.Dep.Class class_.tc_name in
-        let bazooka = Typing_deps.get_bazooka dep in
-        let files = Typing_deps.get_files bazooka in
-        let files = Relative_path.Set.add files fn in
-        Relative_path.Set.union files acc
+    match get_filename class_name with
     | None -> acc
+    | Some fn ->
+      let dep = Typing_deps.Dep.Class class_name in
+      let bazooka = Typing_deps.get_bazooka dep in
+      let files = Typing_deps.get_files bazooka in
+      let files = Relative_path.Set.add files fn in
+      Relative_path.Set.union files acc
   end ~init:Relative_path.Set.empty
 
-let get_deps_set_function tcopt f_name =
-  match Typing_lazy_heap.get_fun tcopt f_name with
-  | Some fun_ ->
-    let fn = Pos.filename fun_.ft_pos in
+let get_deps_set_function f_name =
+  match Naming_heap.FunPosHeap.get f_name with
+  | Some pos ->
+    let fn = FileInfo.get_pos_filename pos in
     let dep = Typing_deps.Dep.Fun f_name in
     let bazooka = Typing_deps.get_bazooka dep in
     let files = Typing_deps.get_files bazooka in
@@ -191,10 +188,10 @@ let get_deps_set_function tcopt f_name =
   | None ->
     Relative_path.Set.empty
 
-let get_deps_set_gconst tcopt cst_name =
-  match Typing_lazy_heap.get_gconst tcopt cst_name with
-  | Some cst_ ->
-    let fn = Pos.filename @@ Typing_reason.to_pos @@ fst cst_ in
+let get_deps_set_gconst cst_name =
+  match Naming_heap.ConstPosHeap.get cst_name with
+  | Some pos ->
+    let fn = FileInfo.get_pos_filename pos in
     let dep = Typing_deps.Dep.GConst cst_name in
     let bazooka = Typing_deps.get_bazooka dep in
     let files = Typing_deps.get_files bazooka in
@@ -205,17 +202,17 @@ let get_deps_set_gconst tcopt cst_name =
 let find_refs tcopt target acc fileinfo_l =
   let results_acc = ref Pos.Map.empty in
   attach_hooks tcopt results_acc target;
-  let tcopt = TypecheckerOptions.permissive in
+  let tcopt = TypecheckerOptions.make_permissive tcopt in
   ServerIdeUtils.recheck tcopt fileinfo_l;
   detach_hooks ();
   Pos.Map.fold begin fun p str acc ->
     (str, p) :: acc
   end !results_acc acc
 
-let parallel_find_refs workers fileinfo_l target =
+let parallel_find_refs workers fileinfo_l target tcopt =
   MultiWorker.call
     workers
-    ~job:(find_refs None target)
+    ~job:(find_refs tcopt target)
     ~neutral:([])
     ~merge:(List.rev_append)
     ~next:(MultiWorker.next workers fileinfo_l)
@@ -237,9 +234,11 @@ let get_definitions tcopt = function
       | None -> acc
     end
   | IClass class_name ->
-    begin match Typing_lazy_heap.get_class tcopt class_name with
-      | Some class_ -> [(class_name, class_.tc_pos)]
-      | None -> []
+    Option.value ~default:[] begin Naming_heap.TypeIdHeap.get class_name >>=
+    function (_, `Class) -> Typing_lazy_heap.get_class tcopt class_name >>=
+      fun class_ -> Some([(class_name, class_.tc_pos)])
+    | (_, `Typedef) -> Typing_lazy_heap.get_typedef tcopt class_name >>=
+      fun type_ -> Some([class_name, type_.td_pos])
     end
   | IFunction fun_name ->
     begin match Typing_lazy_heap.get_fun tcopt fun_name with
@@ -262,9 +261,9 @@ let find_references tcopt workers target include_defs
   end ~init:[] in
   let results =
     if List.length fileinfo_l < 10 then
-      find_refs None target [] fileinfo_l
+      find_refs tcopt target [] fileinfo_l
     else
-      parallel_find_refs workers fileinfo_l target
+      parallel_find_refs workers fileinfo_l target tcopt
     in
   if include_defs then
     let defs = get_definitions tcopt target in
@@ -272,19 +271,24 @@ let find_references tcopt workers target include_defs
   else
     results
 
-let get_dependent_files_function tcopt _workers f_name =
+let get_dependent_files_function _workers f_name =
   (* This is performant enough to not need to go parallel for now *)
-  get_deps_set_function tcopt f_name
+  get_deps_set_function f_name
 
-let get_dependent_files_gconst tcopt _workers cst_name =
+let get_dependent_files_gconst _workers cst_name =
   (* This is performant enough to not need to go parallel for now *)
-  get_deps_set_gconst tcopt cst_name
+  get_deps_set_gconst cst_name
 
-let get_dependent_files tcopt _workers input_set =
+let get_dependent_files _workers input_set =
   (* This is performant enough to not need to go parallel for now *)
-  get_deps_set tcopt input_set
+  get_deps_set input_set
 
-let print results =
-  List.iter (List.rev results) (fun (s, p) ->
-    Printf.printf "%s %s\n" s (Pos.string p)
+let result_to_ide_message x =
+  let open Ide_message in
+  Find_references_response (
+    Option.map x ~f:begin fun (symbol_name, references) ->
+      let references =
+        List.map references ~f:Ide_api_types.pos_to_file_range in
+      {symbol_name; references}
+    end
   )

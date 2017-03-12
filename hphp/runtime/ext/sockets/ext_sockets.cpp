@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -15,11 +15,16 @@
    +----------------------------------------------------------------------+
 */
 #include "hphp/runtime/ext/sockets/ext_sockets.h"
+#include "hphp/runtime/base/zend-php-config.h"
 
 #include <sys/types.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+
+#if HAVE_IF_NAMETOINDEX
+#include <net/if.h>
+#endif
 
 #include <folly/String.h>
 #include <folly/SocketAddress.h>
@@ -35,6 +40,7 @@
 #include "hphp/runtime/base/ssl-socket.h"
 #include "hphp/runtime/server/server-stats.h"
 #include "hphp/runtime/base/mem-file.h"
+#include "hphp/runtime/base/zend-functions.h"
 #include "hphp/util/logger.h"
 
 #define PHP_NORMAL_READ 0x0001
@@ -121,6 +127,26 @@ static bool get_sockaddr(sockaddr *sa, socklen_t salen,
   return false;
 }
 
+namespace {
+static bool php_string_to_if_index(const char *val, unsigned *out)
+{
+#if HAVE_IF_NAMETOINDEX
+  unsigned int ind = if_nametoindex(val);
+  if (ind == 0) {
+    raise_warning("no interface with name \"%s\" could be found", val);
+    return false;
+  } else {
+    *out = ind;
+    return true;
+  }
+#else
+  raise_warning("this platform does not support looking up an interface by "
+                "name, an integer interface index must be supplied instead");
+  return false;
+#endif
+}
+}
+
 static bool php_set_inet6_addr(struct sockaddr_in6 *sin6,
                                const char *address,
                                req::ptr<Socket> sock) {
@@ -152,6 +178,23 @@ static bool php_set_inet6_addr(struct sockaddr_in6 *sin6,
            ((struct sockaddr_in6*)(addrinfo->ai_addr))->sin6_addr.s6_addr,
            sizeof(struct in6_addr));
     freeaddrinfo(addrinfo);
+  }
+
+  const char *scope = strchr(address, '%');
+  if (scope++) {
+    int64_t lval = 0;
+    double dval = 0;
+    unsigned scope_id = 0;
+    if (KindOfInt64 == is_numeric_string(scope, strlen(scope), &lval, &dval,
+                                         0)) {
+      if (lval > 0 && lval <= UINT_MAX) {
+        scope_id = lval;
+      }
+    } else {
+      php_string_to_if_index(scope, &scope_id);
+    }
+
+    sin6->sin6_scope_id = scope_id;
   }
 
   return true;
@@ -355,8 +398,8 @@ static req::ptr<Socket> create_new_socket(
   if (sslsock) {
     sock = sslsock;
   } else {
-    sock = req::make<Socket>(fd, domain, hosturl.getHost().c_str(),
-                             hosturl.getPort());
+    sock = req::make<StreamSocket>(fd, domain, hosturl.getHost().c_str(),
+                                   hosturl.getPort());
   }
 
   if (!sock->valid()) {
@@ -446,7 +489,7 @@ static Variant new_socket_connect(const HostURL &hosturl, double timeout,
     size_t sa_size;
 
     fd = socket(domain, type, 0);
-    sock = req::make<Socket>(
+    sock = req::make<StreamSocket>(
       fd, domain, hosturl.getHost().c_str(), hosturl.getPort());
 
     if (!set_sockaddr(sa_storage, sock, hosturl.getHost().c_str(),
@@ -497,10 +540,10 @@ static Variant new_socket_connect(const HostURL &hosturl, double timeout,
     if (sslsock) {
       sock = sslsock;
     } else {
-      sock = req::make<Socket>(fd,
-                                  domain,
-                                  hosturl.getHost().c_str(),
-                                  hosturl.getPort());
+      sock = req::make<StreamSocket>(fd,
+                                     domain,
+                                     hosturl.getHost().c_str(),
+                                     hosturl.getPort());
     }
   }
 
@@ -529,12 +572,12 @@ Variant HHVM_FUNCTION(socket_create,
   check_socket_parameters(domain, type);
   int socketId = socket(domain, type, protocol);
   if (socketId == -1) {
-    SOCKET_ERROR(req::make<Socket>(),
+    SOCKET_ERROR(req::make<ConcreteSocket>(),
                  "Unable to create socket",
                  errno);
     return false;
   }
-  return Variant(req::make<Socket>(socketId, domain));
+  return Variant(req::make<ConcreteSocket>(socketId, domain));
 }
 
 Variant HHVM_FUNCTION(socket_create_listen,
@@ -551,7 +594,7 @@ Variant HHVM_FUNCTION(socket_create_listen,
   la.sin_family = result.hostbuf.h_addrtype;
   la.sin_port = htons((unsigned short)port);
 
-  auto sock = req::make<Socket>(
+  auto sock = req::make<ConcreteSocket>(
     socket(PF_INET, SOCK_STREAM, 0), PF_INET, "0.0.0.0", port);
 
   if (!sock->valid()) {
@@ -575,28 +618,42 @@ Variant HHVM_FUNCTION(socket_create_listen,
 const StaticString
   s_socktype_generic("generic_socket");
 
-bool HHVM_FUNCTION(socket_create_pair,
-                   int domain,
-                   int type,
-                   int protocol,
-                   VRefParam fd) {
+bool socket_create_pair_impl(int domain, int type, int protocol, VRefParam fd,
+                             bool asStream) {
   check_socket_parameters(domain, type);
 
   int fds_array[2];
   if (socketpair(domain, type, protocol, fds_array) != 0) {
-    SOCKET_ERROR(req::make<Socket>(),
+    SOCKET_ERROR(req::make<StreamSocket>(),
                  "unable to create socket pair",
                  errno);
     return false;
   }
 
-  fd.assignIfRef(make_packed_array(
-    Variant(req::make<Socket>(fds_array[0], domain, nullptr, 0, 0.0,
-                              s_socktype_generic)),
-    Variant(req::make<Socket>(fds_array[1], domain, nullptr, 0, 0.0,
-                              s_socktype_generic))
-  ));
+  if (asStream) {
+    fd.assignIfRef(make_packed_array(
+      Variant(req::make<StreamSocket>(fds_array[0], domain, nullptr, 0, 0.0,
+                                      s_socktype_generic)),
+      Variant(req::make<StreamSocket>(fds_array[1], domain, nullptr, 0, 0.0,
+                                      s_socktype_generic))
+    ));
+  } else {
+    fd.assignIfRef(make_packed_array(
+      Variant(req::make<ConcreteSocket>(fds_array[0], domain, nullptr, 0, 0.0,
+                                        s_socktype_generic)),
+      Variant(req::make<ConcreteSocket>(fds_array[1], domain, nullptr, 0, 0.0,
+                                        s_socktype_generic))
+    ));
+  }
   return true;
+}
+
+bool HHVM_FUNCTION(socket_create_pair,
+                   int domain,
+                   int type,
+                   int protocol,
+                   VRefParam fd) {
+  return socket_create_pair_impl(domain, type, protocol, fd, false);
 }
 
 const StaticString
@@ -768,7 +825,7 @@ bool HHVM_FUNCTION(socket_set_option,
       }
       optlen = sizeof(tv);
       opt_ptr = &tv;
-      sock->setTimeout(tv);
+      sock->internalSetTimeout(tv);
     }
     break;
 
@@ -989,7 +1046,7 @@ Variant socket_server_impl(
   int flags, /* = STREAM_SERVER_BIND|STREAM_SERVER_LISTEN */
   VRefParam errnum /* = null */,
   VRefParam errstr /* = null */,
-  const Variant& context /* = null_variant */
+  const Variant& context /* = uninit_variant */
 ) {
   errnum.assignIfRef(0);
   errstr.assignIfRef(empty_string());
@@ -1025,7 +1082,7 @@ Variant HHVM_FUNCTION(socket_accept,
   auto sock = cast<Socket>(socket);
   struct sockaddr sa;
   socklen_t salen = sizeof(sa);
-  auto new_sock = req::make<Socket>(
+  auto new_sock = req::make<ConcreteSocket>(
     accept(sock->fd(), &sa, &salen), sock->getType());
   if (!new_sock->valid()) {
     SOCKET_ERROR(new_sock, "unable to accept incoming connection", errno);
@@ -1359,7 +1416,7 @@ String HHVM_FUNCTION(socket_strerror,
    */
   if (errnum < -10000) {
     errnum = (-errnum) - 10000;
-#ifdef HAVE_HSTRERROR
+#if HAVE_HSTRERROR
     return String(hstrerror(errnum), CopyString);
 #endif
     return folly::format("Host lookup error {}", errnum).str();
@@ -1413,7 +1470,7 @@ Variant sockopen_impl(const HostURL &hosturl, VRefParam errnum,
           std::dynamic_pointer_cast<SSLSocketData>(sockItr->second)) {
         sock = req::make<SSLSocket>(sslSocketData);
       } else {
-        sock = req::make<Socket>(sockItr->second);
+        sock = req::make<StreamSocket>(sockItr->second);
       }
 
       if (sock->getError() == 0 && sock->checkLiveness()) {
@@ -1458,7 +1515,7 @@ Variant HHVM_FUNCTION(fsockopen,
                       VRefParam errstr /* = null */,
                       double timeout /* = -1.0 */) {
   HostURL hosturl(static_cast<const std::string>(hostname), port);
-  return sockopen_impl(hosturl, errnum, errstr, timeout, false, null_variant);
+  return sockopen_impl(hosturl, errnum, errstr, timeout, false, uninit_variant);
 }
 
 Variant HHVM_FUNCTION(pfsockopen,
@@ -1468,7 +1525,7 @@ Variant HHVM_FUNCTION(pfsockopen,
                       VRefParam errstr /* = null */,
                       double timeout /* = -1.0 */) {
   HostURL hosturl(static_cast<const std::string>(hostname), port);
-  return sockopen_impl(hosturl, errnum, errstr, timeout, true, null_variant);
+  return sockopen_impl(hosturl, errnum, errstr, timeout, true, uninit_variant);
 }
 
 String ipaddr_convert(struct sockaddr *addr, int addrlen) {

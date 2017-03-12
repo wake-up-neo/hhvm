@@ -472,14 +472,14 @@ end = struct
       (* Same idea as Dep.FunName, see below. *)
       (fun x -> Typing_deps.Dep.GConstName x)
       genv
-      GEnv.gconst_pos
+      (GEnv.gconst_pos genv.tcopt)
       x
 
   let type_name (genv, _) x ~allow_typedef =
     (* Generic names are not allowed to shadow class names *)
     check_no_runtime_generic genv x;
     let (pos, name) as x = Namespaces.elaborate_id genv.namespace NSClass x in
-    match GEnv.type_info name with
+    match GEnv.type_info genv.tcopt name with
     | Some (_def_pos, `Class) ->
       (* Don't let people use strictly internal classes
        * (except when they are being declared in .hhi files) *)
@@ -492,7 +492,9 @@ end = struct
       pos, name
     | Some (_def_pos, `Typedef) -> pos, name
     | None ->
-      handle_unbound_name genv GEnv.type_pos GEnv.type_canon_name x `cls
+      handle_unbound_name genv
+        (GEnv.type_pos genv.tcopt)
+        GEnv.type_canon_name x `cls
 
   let fun_id (genv, _) x =
     elaborate_and_get_name_with_canonicalized_fallback
@@ -503,7 +505,7 @@ end = struct
        * to retypecheck. *)
       (fun x -> Typing_deps.Dep.FunName x)
       genv
-      GEnv.fun_pos
+      (GEnv.fun_pos genv.tcopt)
       GEnv.fun_canon_name
       x
 
@@ -621,7 +623,7 @@ let check_repetition s param =
   if x <> SN.SpecialIdents.placeholder then SSet.add x s else s
 
 let convert_shape_name env = function
-  | SFlit (pos, s) -> (pos, N.SFlit (pos, s))
+  | SFlit (pos, s) -> (pos, SFlit (pos, s))
   | SFclass_const (x, (pos, y)) ->
     let class_name =
       if (snd x) = SN.Classes.cSelf then
@@ -629,7 +631,7 @@ let convert_shape_name env = function
         | Some (cid, _) -> cid
         | None -> Errors.self_outside_class pos; (pos, SN.Classes.cUnknown)
       else Env.type_name env x ~allow_typedef:false in
-    (pos, N.SFclass_const (class_name, (pos, y)))
+    (pos, SFclass_const (class_name, (pos, y)))
 
 let arg_unpack_unexpected = function
   | [] -> ()
@@ -679,11 +681,21 @@ module Make (GetLocals : GetLocals) = struct
       ?(forbid_this=false)
       ?(allow_retonly=false)
       ?(allow_typedef=true)
+      ?(allow_wildcard=false)
       env (p, h) =
-    p, hint_ ~forbid_this ~allow_retonly ~allow_typedef is_static_var env h
+    p, hint_ ~forbid_this ~allow_retonly ~allow_typedef ~allow_wildcard
+      is_static_var env h
 
-  and hint_ ~forbid_this ~allow_retonly ~allow_typedef is_static_var env x =
-    let hint = hint ~is_static_var ~forbid_this ~allow_typedef in
+  and shape_field_to_shape_field_info env { sf_optional; sf_name=_; sf_hint } =
+    {
+      N.sfi_optional=sf_optional;
+      sfi_hint=hint env sf_hint;
+    }
+
+  and hint_ ~forbid_this ~allow_retonly ~allow_typedef ~allow_wildcard
+        is_static_var env x =
+    let hint =
+      hint ~is_static_var ~forbid_this ~allow_typedef ~allow_wildcard in
     match x with
     | Htuple hl ->
       N.Htuple (List.map hl (hint ~allow_retonly env))
@@ -695,7 +707,8 @@ module Make (GetLocals : GetLocals) = struct
               hint ~allow_retonly:true env h)
     | Happly ((p, _x) as id, hl) ->
       let hint_id =
-        hint_id ~forbid_this ~allow_retonly ~allow_typedef env is_static_var id
+        hint_id ~forbid_this ~allow_retonly ~allow_typedef ~allow_wildcard
+          env is_static_var id
           hl in
       (match hint_id with
       | N.Hprim _ | N.Hmixed ->
@@ -718,8 +731,8 @@ module Make (GetLocals : GetLocals) = struct
             Errors.invalid_type_access_root root; N.Hany
         | _ ->
           let h =
-            hint_id ~forbid_this ~allow_retonly ~allow_typedef env is_static_var
-              root [] in
+            hint_id ~forbid_this ~allow_retonly
+              ~allow_typedef ~allow_wildcard:false env is_static_var root [] in
           (match h with
           | N.Hthis | N.Happly _ as h -> h
           | _ -> Errors.invalid_type_access_root root; N.Hany
@@ -728,16 +741,17 @@ module Make (GetLocals : GetLocals) = struct
       N.Haccess ((pos, root_ty), id :: ids)
     | Hshape fdl -> N.Hshape
       begin
-        List.fold_left fdl ~init:ShapeMap.empty ~f:begin fun fdm (pname, h) ->
-          let pos, name = convert_shape_name env pname in
+        List.fold_left fdl ~init:ShapeMap.empty ~f:begin fun fdm shape_field ->
+          let pos, name = convert_shape_name env shape_field.sf_name in
           if ShapeMap.mem name fdm
           then Errors.fd_name_already_bound pos;
-          ShapeMap.add name (hint env h) fdm
+          ShapeMap.add
+            name (shape_field_to_shape_field_info env shape_field) fdm
         end
     end
 
-  and hint_id ~forbid_this ~allow_retonly ~allow_typedef env is_static_var
-      (p, x as id) hl =
+  and hint_id ~forbid_this ~allow_retonly ~allow_typedef ~allow_wildcard
+    env is_static_var (p, x as id) hl =
     Naming_hooks.dispatch_hint_hook id;
     let params = (fst env).type_params in
     if   is_alok_type_name id && not (SMap.mem x params)
@@ -751,6 +765,12 @@ module Make (GetLocals : GetLocals) = struct
     | Some h -> h
     | None -> begin
       match x with
+        | x when x = "_" && allow_wildcard ->
+          if hl <> [] then
+            (Errors.tparam_with_tparam p x;
+            N.Hany)
+          else
+            N.Happly(id, [])
         | x when x.[0] = '\\' &&
           ( x = ("\\"^SN.Typehints.void)
           || x = ("\\"^SN.Typehints.noreturn)
@@ -809,13 +829,13 @@ module Make (GetLocals : GetLocals) = struct
       | _ when SMap.mem x params ->
           if hl <> [] then
           Errors.tparam_with_tparam p x;
-          N.Habstr (x, get_constraint env x)
+          N.Habstr x
       | _ ->
         let name = Env.type_name env id ~allow_typedef in
         (* Note that we are intentionally setting allow_typedef to `true` here.
          * In general, generics arguments can be typedefs -- there is no
          * runtime restriction. *)
-        N.Happly (name, hintl ~forbid_this ~allow_typedef:true
+        N.Happly (name, hintl ~allow_wildcard ~forbid_this ~allow_typedef:true
           ~allow_retonly:true env hl)
     end
 
@@ -855,20 +875,11 @@ module Make (GetLocals : GetLocals) = struct
       | _ -> ()
     in opt_hint
 
-  and get_constraint env tparam =
-    let params = (fst env).type_params in
-    let gen_constraint = SMap.find_unsafe tparam params in
-    let genv, lenv = env in
-    (* this prevents an infinite loop from occurring since hint invokes
-     * get_constraint *)
-    let genv = { genv with type_params = SMap.add tparam [] params } in
-    let env = genv, lenv in
-    List.map gen_constraint (constraint_ env)
-
   and constraint_ ?(forbid_this=false) env (ck, h) = ck, hint ~forbid_this env h
 
-  and hintl ~forbid_this ~allow_retonly ~allow_typedef env l =
-    List.map l (hint ~forbid_this ~allow_retonly ~allow_typedef env)
+  and hintl ~forbid_this ~allow_retonly ~allow_typedef ~allow_wildcard env l =
+    List.map l
+      (hint ~forbid_this ~allow_retonly ~allow_typedef ~allow_wildcard env)
 
   (**************************************************************************)
   (* All the methods and static methods of an interface are "implicitly"
@@ -1046,6 +1057,12 @@ module Make (GetLocals : GetLocals) = struct
     variance,
     param_name,
     List.map cstr_list (constraint_ ~forbid_this env)
+
+  and type_where_constraints env locl_cstrl =
+    List.map locl_cstrl (fun (h1, ck, h2) ->
+          let ty1 = hint env h1 in
+          let ty2 = hint env h2 in
+          (ty1, ck, ty2))
 
   and class_use env x acc =
     match x with
@@ -1389,6 +1406,7 @@ module Make (GetLocals : GetLocals) = struct
     let final, abs, vis = List.fold_left ~f:kind ~init:acc m.m_kind in
     List.iter m.m_tparams check_constraint;
     let tparam_l = type_paraml env m.m_tparams in
+    let where_constraints = type_where_constraints env m.m_constrs in
     let ret = Option.map m.m_ret (hint ~allow_retonly:true env) in
     let f_kind = m.m_fun_kind in
     let body = (match genv.in_mode with
@@ -1410,6 +1428,7 @@ module Make (GetLocals : GetLocals) = struct
       N.m_abstract        = abs         ;
       N.m_name            = m.Ast.m_name;
       N.m_tparams         = tparam_l    ;
+      N.m_where_constraints = where_constraints ;
       N.m_params          = paraml      ;
       N.m_body            = body        ;
       N.m_fun_kind        = f_kind      ;
@@ -1711,14 +1730,10 @@ module Make (GetLocals : GetLocals) = struct
     | Collection (id, l) -> begin
       let p, cn = Namespaces.elaborate_id ((fst env).namespace) NSClass id in
       match cn with
-        | x when N.is_vc_kind
-            (TypecheckerOptions.experimental_feature_enabled (fst env).tcopt
-               TypecheckerOptions.experimental_dict) p x ->
+        | x when N.is_vc_kind x ->
           N.ValCollection ((N.get_vc_kind cn),
             (List.map l (afield_value env cn)))
-        | x when N.is_kvc_kind
-            (TypecheckerOptions.experimental_feature_enabled (fst env).tcopt
-               TypecheckerOptions.experimental_dict) p x ->
+        | x when N.is_kvc_kind x ->
           N.KeyValCollection ((N.get_kvc_kind cn),
             (List.map l (afield_kvalue env cn)))
         | x when x = SN.Collections.cPair ->
@@ -1746,6 +1761,9 @@ module Make (GetLocals : GetLocals) = struct
     | String s -> N.String s
     | String2 idl -> N.String2 (string2 env idl)
     | Id x -> N.Id (Env.global_const env x)
+    | Id_type_arguments (_x, _hl) ->
+      (* Shouldn't happen: parser only allows this in New *)
+      failwith "Unexpected Id with type arguments"
     | Lvar (_, x) when x = SN.SpecialIdents.this -> N.This
     | Dollardollar ->
       N.Dollardollar (Env.found_dollardollar env p)
@@ -1769,14 +1787,14 @@ module Make (GetLocals : GetLocals) = struct
         N.Array_get (id, None)
     | Array_get (e1, e2) -> N.Array_get (expr env e1, oexpr env e2)
     | Class_get (x1, x2) ->
-        N.Class_get (make_class_id env x1, x2)
+        N.Class_get (make_class_id env x1 [], x2)
     | Class_const (x1, x2) ->
       let (genv, _) = env in
       let (_, name) = Namespaces.elaborate_id genv.namespace NSClass x1 in
-      if GEnv.typedef_pos name <> None && (snd x2) = "class" then
+      if GEnv.typedef_pos (genv.tcopt) name <> None && (snd x2) = "class" then
         N.Typename (Env.type_name env x1 ~allow_typedef:true)
       else
-        N.Class_const (make_class_id env x1, x2)
+        N.Class_const (make_class_id env x1 [], x2)
     | Call ((_, Id (p, pseudo_func)), el, uel)
         when pseudo_func = SN.SpecialFunctions.echo ->
         arg_unpack_unexpected uel ;
@@ -1823,7 +1841,7 @@ module Make (GetLocals : GetLocals) = struct
             (match (expr env e1), (expr env e2) with
             | (_, N.String cl), (_, N.String meth) ->
               N.Method_caller (Env.type_name env cl ~allow_typedef:false, meth)
-            | (_, N.Class_const (N.CI cl, (_, mem))), (_, N.String meth)
+            | (_, N.Class_const (N.CI (cl, _), (_, mem))), (_, N.String meth)
               when mem = SN.Members.mClass ->
               N.Method_caller (Env.type_name env cl ~allow_typedef:false, meth)
             | (p, _), (_) ->
@@ -1853,7 +1871,7 @@ module Make (GetLocals : GetLocals) = struct
               (match (fst env).current_cls with
                 | Some (cid, _) -> N.Smethod_id (cid, meth)
                 | None -> Errors.illegal_class_meth p; N.Any)
-            | (_, N.Class_const (N.CI cl, (_, mem))), (_, N.String meth)
+            | (_, N.Class_const (N.CI (cl, _), (_, mem))), (_, N.String meth)
               when mem = SN.Members.mClass ->
               N.Smethod_id (Env.type_name env cl ~allow_typedef:false, meth)
             | (p, N.Class_const ((N.CIself|N.CIstatic), (_, mem))),
@@ -1895,7 +1913,7 @@ module Make (GetLocals : GetLocals) = struct
           | [e] -> N.Special_func (N.Gena (expr env e))
           | _ -> Errors.gena_arity p; N.Any
           )
-        end else if cn = SN.FB.fgenva then begin
+        end else if cn = SN.FB.fgenva || cn = SN.HH.asio_va then begin
           arg_unpack_unexpected uel ;
           if List.length el < 1
           then (Errors.genva_arity p; N.Any)
@@ -1999,20 +2017,20 @@ module Make (GetLocals : GetLocals) = struct
         | px, n when n = SN.Classes.cParent ->
           if (fst env).current_cls = None then
             let () = Errors.parent_outside_class p in
-            N.CI (px, SN.Classes.cUnknown)
+            N.CI ((px, SN.Classes.cUnknown), [])
           else N.CIparent
         | px, n when n = SN.Classes.cSelf ->
           if (fst env).current_cls = None then
             let () = Errors.self_outside_class p in
-            N.CI (px, SN.Classes.cUnknown)
+            N.CI ((px, SN.Classes.cUnknown), [])
           else N.CIself
         | px, n when n = SN.Classes.cStatic ->
           if (fst env).current_cls = None then
             let () = Errors.static_outside_class p in
-            N.CI (px, SN.Classes.cUnknown)
+            N.CI ((px, SN.Classes.cUnknown), [])
           else N.CIstatic
         | _ ->
-          N.CI (Env.type_name env x ~allow_typedef:false)
+          N.CI (Env.type_name env x ~allow_typedef:false, [])
       in
       N.InstanceOf (expr env e, id)
     | InstanceOf (e1, (_,
@@ -2022,14 +2040,21 @@ module Make (GetLocals : GetLocals) = struct
     | InstanceOf (_e1, (p, _)) ->
       Errors.invalid_instanceof p;
       N.Any
+    | New ((_, Id_type_arguments (x, hl)), el, uel) ->
+      N.New (make_class_id env x hl,
+        exprl env el,
+        exprl env uel)
     | New ((_, Id x), el, uel)
     | New ((_, Lvar x), el, uel) ->
-      N.New (make_class_id env x, exprl env el, exprl env uel)
+      N.New (make_class_id env x [],
+        exprl env el,
+        exprl env uel)
     | New ((p, _e), el, uel) ->
       if (fst env).in_mode = FileInfo.Mstrict
       then Errors.dynamic_new_in_strict_mode p;
-      N.New (make_class_id env (p, SN.Classes.cUnknown),
-             exprl env el, exprl env uel)
+      N.New (make_class_id env (p, SN.Classes.cUnknown) [],
+        exprl env el,
+        exprl env uel)
     | Efun (f, idl) ->
         let idl = List.map idl fst in
         let idl = List.filter idl
@@ -2100,25 +2125,36 @@ module Make (GetLocals : GetLocals) = struct
       f_user_attributes = user_attributes env f.f_user_attributes;
     }
 
-  and make_class_id env (p, x as cid) =
+  and make_class_id env (p, x as cid) hl =
     match x with
       | x when x = SN.Classes.cParent ->
         if (fst env).current_cls = None then
           let () = Errors.parent_outside_class p in
-          N.CI (p, SN.Classes.cUnknown)
+          N.CI ((p, SN.Classes.cUnknown), [])
         else N.CIparent
       | x when x = SN.Classes.cSelf ->
         if (fst env).current_cls = None then
           let () = Errors.self_outside_class p in
-          N.CI (p, SN.Classes.cUnknown)
+          N.CI ((p, SN.Classes.cUnknown), [])
         else N.CIself
       | x when x = SN.Classes.cStatic -> if (fst env).current_cls = None then
           let () = Errors.static_outside_class p in
-          N.CI (p, SN.Classes.cUnknown)
+          N.CI ((p, SN.Classes.cUnknown), [])
         else N.CIstatic
       | x when x = SN.SpecialIdents.this -> N.CIexpr (p, N.This)
+      | x when x = SN.SpecialIdents.dollardollar ->
+          (* We won't reach here for "new $$" because the parser creates a
+           * proper Ast.Dollardollar node, so make_class_id won't be called with
+           * that node. In fact, the parser creates an Ast.Dollardollar for all
+           * "$$" except in positions where a classname is expected, like in
+           * static member access. So, we only reach here for things
+           * like "$$::someMethod()". *)
+          N.CIexpr(p, N.Lvar (Env.found_dollardollar env p))
       | x when x.[0] = '$' -> N.CIexpr (p, N.Lvar (Env.lvar env cid))
-      | _ -> N.CI (Env.type_name env cid ~allow_typedef:false)
+      | _ -> N.CI (Env.type_name env cid ~allow_typedef:false,
+        hintl ~allow_wildcard:true ~forbid_this:false
+          ~allow_typedef:true ~allow_retonly:true env hl
+        )
 
   and casel env l =
     List.map_env [] l (case env)
@@ -2217,7 +2253,8 @@ module Make (GetLocals : GetLocals) = struct
   let class_meth_bodies nenv nc =
     let _n_tparams, cstrs = nc.N.c_tparams in
     let genv  = Env.make_class_genv nenv cstrs
-      nc.N.c_mode (nc.N.c_name, nc.N.c_kind) Namespace_env.empty
+      nc.N.c_mode (nc.N.c_name, nc.N.c_kind)
+      Namespace_env.empty_with_default_popt
     in
     let inst_meths = List.map nc.N.c_methods (meth_body genv) in
     let opt_constructor = match nc.N.c_constructor with
@@ -2300,7 +2337,7 @@ module Make (GetLocals : GetLocals) = struct
       to_capture := x :: !to_capture;
       p, Local_id.tmp()
     in
-    let tcopt = TypecheckerOptions.permissive in
+    let tcopt = TypecheckerOptions.make_permissive TypecheckerOptions.default in
     let genv = Env.make_fun_decl_genv tcopt SMap.empty f in
     let lenv = Env.empty_local @@ UBMFunc handle_unbound in
     let env = genv, lenv in

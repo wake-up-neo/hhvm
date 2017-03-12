@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -61,12 +61,18 @@ std::atomic<pthread_t> s_initThread;
 //////////////////////////////////////////////////////////////////////
 
 ReadWriteMutex g_clsInitLock(RankInstanceBitsClsInit);
+// True if initialization has been finished
 std::atomic<bool> g_initFlag{false};
+// True if profiling should no longer be done
+std::atomic<bool> g_profileDoneFlag{false};
 
 //////////////////////////////////////////////////////////////////////
 
 void profile(const StringData* name) {
-  if (g_initFlag.load(std::memory_order_acquire)) return;
+  if (g_profileDoneFlag.load(std::memory_order_acquire) ||
+      !RuntimeOption::RepoAuthoritative) {
+    return;
+  }
 
   assert(name->isStatic());
   unsigned inc = 1;
@@ -90,6 +96,21 @@ void init() {
 
   Lock l(s_initLock);
   if (g_initFlag.load(std::memory_order_acquire)) return;
+
+  // Stop profiling before attempting to acquire the instance-counts lock. The
+  // reason for having two flags is because ReadWriteLock can in certain
+  // implementations favor readers over writers. Thus if there's a steady stream
+  // of calls to profile(), we'll block indefinitely waiting to acquire the
+  // instance-counts lock. Since this function is called from JITing threads,
+  // this can eventually lead to starvation. So, set this flag to stop other
+  // threads from attempting to acquire the instance-counts lock, and avoid
+  // starvation.
+  g_profileDoneFlag.store(true, std::memory_order_release);
+
+  if (!RuntimeOption::RepoAuthoritative) {
+    g_initFlag.store(true, std::memory_order_release);
+    return;
+  }
   if (do_assert) s_initThread.store(pthread_self(), std::memory_order_release);
 
   // First, grab a write lock on s_instanceCounts and grab the current set of

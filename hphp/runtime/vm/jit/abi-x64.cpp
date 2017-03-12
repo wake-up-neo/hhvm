@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -27,7 +27,7 @@ namespace {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-#if defined(__CYGWIN__) || defined(__MINGW__) || defined(_MSC_VER)
+#ifdef _MSC_VER
 const RegSet kGPCallerSaved =
   reg::rax | reg::rcx | reg::rdx |
   reg::r8  | reg::r9  | reg::r10 | reg::r11;
@@ -75,7 +75,7 @@ const RegSet kScratchCrossTraceRegs =
 /*
  * Helper code ABI registers.
  */
-const RegSet kGPHelperRegs = x64::rAsm | reg::r11;
+const RegSet kGPHelperRegs = reg::r10 | reg::r11;
 const RegSet kXMMHelperRegs = reg::xmm5 | reg::xmm6 | reg::xmm7;
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -114,7 +114,7 @@ const Abi helper_abi {
 
 // x64 INTEGER class argument registers.
 constexpr PhysReg gp_args[] = {
-#if defined(__CYGWIN__) || defined(__MINGW__) || defined(_MSC_VER)
+#ifdef _MSC_VER
   reg::rcx, reg::rdx, reg::r8, reg::r9
 #else
   reg::rdi, reg::rsi, reg::rdx, reg::rcx, reg::r8, reg::r9
@@ -123,7 +123,7 @@ constexpr PhysReg gp_args[] = {
 
 // x64 SSE class argument registers.
 constexpr PhysReg simd_args[] = {
-#if defined(__CYGWIN__) || defined(__MINGW__) || defined(_MSC_VER)
+#ifdef _MSC_VER
   reg::xmm0, reg::xmm1, reg::xmm2, reg::xmm3,
 #else
   reg::xmm0, reg::xmm1, reg::xmm2, reg::xmm3,
@@ -173,6 +173,10 @@ PhysReg rarg_simd(size_t i) {
   assertx(i < num_arg_regs_simd());
   return simd_args[i];
 }
+PhysReg rarg_ind_ret(size_t i) {
+  assertx(i < num_arg_regs_ind_ret());
+  return PhysReg();
+}
 
 size_t num_arg_regs() {
   return sizeof(gp_args) / sizeof(PhysReg);
@@ -180,12 +184,18 @@ size_t num_arg_regs() {
 size_t num_arg_regs_simd() {
   return sizeof(simd_args) / sizeof(PhysReg);
 }
+size_t num_arg_regs_ind_ret() {
+  return 0;
+}
 
 RegSet arg_regs(size_t n) {
   return jit::arg_regs(n);
 }
 RegSet arg_regs_simd(size_t n) {
   return jit::arg_regs_simd(n);
+}
+RegSet arg_regs_ind_ret(size_t n) {
+  return jit::arg_regs_ind_ret(n);
 }
 
 PhysReg r_svcreq_sf() {

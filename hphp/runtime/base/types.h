@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -29,7 +29,7 @@ struct Array;
 struct Variant;
 struct VarNR;
 
-extern const Variant null_variant;      // uninitialized variant
+extern const Variant uninit_variant;    // uninitialized variant
 extern const Variant init_null_variant; // php null
 extern const VarNR null_varNR;
 extern const VarNR true_varNR;
@@ -59,8 +59,8 @@ using LowStringPtr = LowPtr<const StringData>;
 using VRefParam = const struct VRefParamValue&;
 using RefResult = const struct RefResultValue&;
 
-inline const Variant& variant(RefResult v)      {
-  return *(Variant*)&v;
+inline const Variant& variant(RefResult v) {
+  return reinterpret_cast<const Variant&>(v);
 }
 
 inline const Variant& variant(const Variant& v) {

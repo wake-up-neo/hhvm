@@ -42,8 +42,7 @@ let lexing_slice_to_string
 let parse_file file =
   let abs_fn = Relative_path.to_absolute file in
   let content = cat abs_fn in
-  let parser_out = (Parser_hack.program file content) in
-  parser_out
+  Parser_hack.program_with_default_popt file content
 
 (* required keywords we want to stop before *)
 let hack_keywords =

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -49,16 +49,16 @@ void req::root_handle::delRootHandle() {
   handles.pop_back();
 }
 
-template<class T> void root<T>::vscan(IMarker& mark) const {
-  T::scan(mark);
+template<class T> void root<T>::scan(type_scan::Scanner& scanner) const {
+  scanner.scan(*static_cast<const T*>(this));
 }
 
 template<class T> void root<T>::detach() {
   T::detach();
 }
 
-template<> void req::root<TypedValue>::vscan(IMarker& mark) const {
-  mark(*static_cast<const TypedValue*>(this));
+template<> void req::root<TypedValue>::scan(type_scan::Scanner& scanner) const {
+  scanner.scan(*static_cast<const TypedValue*>(this));
 }
 
 template<> void req::root<TypedValue>::detach() {

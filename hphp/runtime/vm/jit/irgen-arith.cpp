@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -295,10 +295,10 @@ Opcode toDictCmpOpcode(Op op) {
 
 Opcode toKeysetCmpOpcode(Op op) {
   switch (op) {
-    case Op::Eq:
-    case Op::Same:  return EqKeyset;
-    case Op::Neq:
-    case Op::NSame: return NeqKeyset;
+    case Op::Eq:    return EqKeyset;
+    case Op::Same:  return SameKeyset;
+    case Op::Neq:   return NeqKeyset;
+    case Op::NSame: return NSameKeyset;
     default: always_assert(false);
   }
 }
@@ -569,7 +569,7 @@ void implIntCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
       emitCommutedOp(
         env,
         op,
-        [&](Op op){ return gen(env, toStrIntCmpOpcode(op), right, left); }
+        [&](Op op2){ return gen(env, toStrIntCmpOpcode(op2), right, left); }
       )
     );
   } else if (rightTy.subtypeOfAny(TNull, TBool)) {
@@ -1006,6 +1006,42 @@ void implCmp(IRGS& env, Op op) {
     PUNT(cmpUnknownDataType);
   }
 
+  if (RuntimeOption::EvalHackArrCompatNotices) {
+    // With EvalHackArrCompatNotices enabled, we'll raise a notice on ===, !==,
+    // ==, or != between a PHP array and a Hack array. On relational compares,
+    // we'll raise a notice between a PHP array and any other type.
+    switch (op) {
+      case Op::Same:
+      case Op::NSame:
+      case Op::Eq:
+      case Op::Neq:
+        if ((leftTy <= TArr && rightTy <= (TVec|TDict|TKeyset)) ||
+            (leftTy <= (TVec|TDict|TKeyset) && rightTy <= TArr)) {
+          gen(
+            env,
+            RaiseHackArrCompatNotice,
+            cns(env, makeStaticString(Strings::HACKARR_COMPAT_ARR_MIXEDCMP))
+          );
+        }
+        break;
+      case Op::Lt:
+      case Op::Lte:
+      case Op::Gt:
+      case Op::Gte:
+      case Op::Cmp:
+        if ((leftTy <= TArr) != (rightTy <= TArr)) {
+          gen(
+            env,
+            RaiseHackArrCompatNotice,
+            cns(env, makeStaticString(Strings::HACKARR_COMPAT_ARR_MIXEDCMP))
+          );
+        }
+        break;
+      default:
+        always_assert(false);
+    }
+  }
+
   // If it's a same-ish comparison and the types don't match (taking into
   // account Str and StaticStr), lower to a bool comparison of
   // constants. Otherwise, switch on the type of the left operand to emit the
@@ -1339,6 +1375,34 @@ void emitShr(IRGS& env) {
 }
 
 void emitPow(IRGS& env) {
+  // Special-case exponent of 2 or 3, i.e.
+  // $x**2 becomes $x*$x,
+  // $x**3 becomes ($x*$x)*$x
+  // TODO(t14096669) if input will result in integer overflow,
+  // compute double result and return instead of slow exit path.
+  auto exponent = topC(env);
+  auto base = topC(env, BCSPRelOffset{1});
+  if ((exponent->hasConstVal(2) || exponent->hasConstVal(3)) &&
+      (base->isA(TDbl) || base->isA(TInt))) {
+    auto intVal = exponent->intVal();
+    SSATmp* genPowResult;
+    auto const exitSlow = makeExitSlow(env);
+    if (base->isA(TInt)) {
+      genPowResult = gen(env, MulIntO, exitSlow, base, base);
+    } else {
+      genPowResult = gen(env, MulDbl, base, base);
+    }
+    if (intVal == 3) {
+      if (genPowResult->isA(TInt)) {
+        genPowResult = gen(env, MulIntO, exitSlow, genPowResult, base);
+      } else {
+        genPowResult = gen(env, MulDbl, genPowResult, base);
+      }
+    }
+    discard(env, 2);
+    push(env, genPowResult);
+    return;
+  }
   interpOne(env, TUncountedInit, 2);
 }
 

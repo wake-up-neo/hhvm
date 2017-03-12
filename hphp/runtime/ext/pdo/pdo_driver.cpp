@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -29,6 +29,7 @@
 #endif
 #include "hphp/runtime/ext/std/ext_std_variable.h"
 #include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/base/zend-string.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -84,10 +85,6 @@ req::ptr<PDOResource> PDODriver::createResource(const String& datasource,
   return rsrc;
 }
 
-void PDOResource::vscan(IMarker& mark) const {
-  mark(def_stmt_ctor_args);
-}
-
 ///////////////////////////////////////////////////////////////////////////////
 // PDOConnection
 
@@ -98,13 +95,20 @@ bool PDOConnection::support(SupportedMethod method) {
 int PDOConnection::parseDataSource(const char *data_source,
                                    int data_source_len,
                                    struct pdo_data_src_parser *parsed,
-                                   int nparams) {
+                                   int nparams,
+                                   folly::StringPiece separators/* = ";" */) {
   int i, j;
   int valstart = -1;
   int semi = -1;
   int optstart = 0;
   int nlen;
   int n_matches = 0;
+
+  char flags[256];
+  string_charmask(separators.data(), separators.size(), flags);
+
+  // Can always end with \0
+  flags[0] = 1;
 
   i = 0;
   while (i < data_source_len) {
@@ -121,14 +125,10 @@ int PDOConnection::parseDataSource(const char *data_source,
 
     valstart = ++i;
 
-    /* now we're looking for VALUE; or just VALUE<NUL> */
+    /* now we're looking for VALUE<separator> or just VALUE<NUL> */
     semi = -1;
     while (i < data_source_len) {
-      if (data_source[i] == '\0') {
-        semi = i++;
-        break;
-      }
-      if (data_source[i] == ';') {
+      if (flags[(unsigned char)data_source[i]]) {
         semi = i++;
         break;
       }

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,38 +16,45 @@
 
 #include "hphp/runtime/base/builtin-functions.h"
 
-#include "hphp/runtime/base/type-conversions.h"
+#include "hphp/runtime/base/backtrace.h"
 #include "hphp/runtime/base/code-coverage.h"
+#include "hphp/runtime/base/container-functions.h"
+#include "hphp/runtime/base/execution-context.h"
 #include "hphp/runtime/base/externals.h"
+#include "hphp/runtime/base/file-util.h"
+#include "hphp/runtime/base/request-injection-data.h"
+#include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/strings.h"
+#include "hphp/runtime/base/type-conversions.h"
+#include "hphp/runtime/base/unit-cache.h"
 #include "hphp/runtime/base/variable-serializer.h"
 #include "hphp/runtime/base/variable-unserializer.h"
-#include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/base/execution-context.h"
-#include "hphp/runtime/base/strings.h"
-#include "hphp/runtime/base/unit-cache.h"
+
 #include "hphp/runtime/debugger/debugger.h"
-#include "hphp/runtime/ext/std/ext_std_function.h"
+
 #include "hphp/runtime/ext/std/ext_std_closure.h"
+#include "hphp/runtime/ext/std/ext_std_function.h"
 #include "hphp/runtime/ext/string/ext_string.h"
+
+#include "hphp/runtime/vm/event-hook.h"
+#include "hphp/runtime/vm/jit/translator-inline.h"
+#include "hphp/runtime/vm/jit/translator.h"
+#include "hphp/runtime/vm/method-lookup.h"
+#include "hphp/runtime/vm/repo.h"
+#include "hphp/runtime/vm/unit-util.h"
+#include "hphp/runtime/vm/unit.h"
+
+#include "hphp/system/systemlib.h"
+
 #include "hphp/util/logger.h"
 #include "hphp/util/process.h"
-#include "hphp/runtime/vm/repo.h"
-#include "hphp/runtime/vm/jit/translator.h"
-#include "hphp/runtime/vm/jit/translator-inline.h"
-#include "hphp/runtime/vm/unit.h"
-#include "hphp/runtime/vm/unit-util.h"
-#include "hphp/runtime/vm/event-hook.h"
-#include "hphp/system/systemlib.h"
-#include <folly/Format.h>
-#include "hphp/util/text-util.h"
 #include "hphp/util/string-vsnprintf.h"
-#include "hphp/runtime/base/file-util.h"
-#include "hphp/runtime/base/container-functions.h"
-#include "hphp/runtime/base/request-injection-data.h"
-#include "hphp/runtime/base/backtrace.h"
+#include "hphp/util/text-util.h"
+
+#include <folly/Format.h>
 
 #include <boost/format.hpp>
-#include <limits>
+
 #include <algorithm>
 
 namespace HPHP {
@@ -135,7 +142,7 @@ bool is_callable(const Variant& v, bool syntax_only, RefData* name) {
     const Variant& clsname = arr.rvalAtRef(int64_t(0));
     const Variant& mthname = arr.rvalAtRef(int64_t(1));
     if (arr.size() != 2 ||
-        &clsname == &null_variant ||
+        &clsname == &uninit_variant ||
         !mthname.isString()) {
       if (name) *name->var() = array_string;
       return false;
@@ -326,8 +333,9 @@ vm_decode_function(const Variant& function,
         cls = cc;
       }
     }
+
     if (!cls) {
-      HPHP::Func* f = HPHP::Unit::loadFunc(name.get());
+      HPHP::Func* f = HPHP::Unit::loadDynCallFunc(name.get());
       if (!f) {
         if (flags == DecodeFlags::Warn) {
           throw_invalid_argument("function: method '%s' not found",
@@ -340,8 +348,7 @@ vm_decode_function(const Variant& function,
     }
     assert(cls);
     CallType lookupType = this_ ? CallType::ObjMethod : CallType::ClsMethod;
-    const HPHP::Func* f =
-      g_context->lookupMethodCtx(cc, name.get(), ctx, lookupType);
+    auto f = lookupMethodCtx(cc, name.get(), ctx, lookupType);
     if (f && (f->attrs() & AttrStatic)) {
       // If we found a method and its static, null out this_
       this_ = nullptr;
@@ -383,7 +390,7 @@ vm_decode_function(const Variant& function,
       }
     }
 
-    if (!this_ && !f->isStaticInProlog()) {
+    if (!this_ && !f->isStaticInPrologue()) {
       if (flags == DecodeFlags::Warn) raise_missing_this(f);
       if (flags != DecodeFlags::LookupOnly && f->attrs() & AttrRequiresThis) {
         return nullptr;
@@ -406,13 +413,15 @@ vm_decode_function(const Variant& function,
         cls = fwdCls;
       }
     }
+
+    assertx(!f->dynCallWrapper());
     return f;
   }
   if (function.isObject()) {
     this_ = function.asCObjRef().get();
     cls = nullptr;
     const HPHP::Func *f = this_->getVMClass()->lookupMethod(s___invoke.get());
-    if (f != nullptr && f->isStaticInProlog()) {
+    if (f != nullptr && f->isStaticInPrologue()) {
       // If __invoke is static, invoke it as such
       cls = this_->getVMClass();
       this_ = nullptr;
@@ -441,9 +450,10 @@ Variant vm_call_user_func(const Variant& function, const Variant& params,
   if (f == nullptr || (!isContainer(params) && !params.isNull())) {
     return uninit_null();
   }
-  Variant ret;
-  g_context->invokeFunc((TypedValue*)&ret, f, params, obj, cls,
-                          nullptr, invName, ExecutionContext::InvokeCuf);
+  auto ret = Variant::attach(
+    g_context->invokeFunc(f, params, obj, cls,
+                          nullptr, invName, ExecutionContext::InvokeCuf)
+  );
   if (UNLIKELY(ret.getRawType()) == KindOfRef) {
     tvUnbox(ret.asTypedValue());
   }
@@ -468,10 +478,11 @@ static Variant invoke(const String& function, const Variant& params,
                       bool fatal, bool useWeakTypes = false) {
   Func* func = Unit::loadFunc(function.get());
   if (func && (isContainer(params) || params.isNull())) {
-    Variant ret;
-    g_context->invokeFunc(ret.asTypedValue(), func, params, nullptr, nullptr,
-                          nullptr, nullptr, ExecutionContext::InvokeNormal,
-                          useWeakTypes);
+    auto ret = Variant::attach(
+      g_context->invokeFunc(func, params, nullptr, nullptr,
+                            nullptr, nullptr, ExecutionContext::InvokeNormal,
+                            useWeakTypes)
+    );
     if (UNLIKELY(ret.getRawType()) == KindOfRef) {
       tvUnbox(ret.asTypedValue());
     }
@@ -502,8 +513,9 @@ Variant invoke_static_method(const String& s, const String& method,
     o_invoke_failed(s.data(), method.data(), fatal);
     return uninit_null();
   }
-  Variant ret;
-  g_context->invokeFunc((TypedValue*)&ret, f, params, nullptr, class_);
+  auto ret = Variant::attach(
+    g_context->invokeFunc(f, params, nullptr, class_)
+  );
   if (UNLIKELY(ret.getRawType()) == KindOfRef) {
     tvUnbox(ret.asTypedValue());
   }
@@ -838,6 +850,11 @@ Variant unserialize_ex(const char* str, int len,
     v = vu.unserialize();
   } catch (FatalErrorException &e) {
     throw;
+  } catch (InvalidAllowedClassesException &e) {
+    raise_warning(
+      "unserialize(): allowed_classes option should be array or boolean"
+    );
+    return false;
   } catch (Exception &e) {
     raise_notice("Unable to unserialize: [%.1000s]. %s.", str,
                  e.getMessage().c_str());
@@ -889,7 +906,7 @@ static bool invoke_file_impl(Variant& res, const String& path, bool once,
   auto const u = lookupUnit(path.get(), currentDir, &initial);
   if (u == nullptr) return false;
   if (!once || initial) {
-    g_context->invokeUnit(res.asTypedValue(), u);
+    *res.asTypedValue() = g_context->invokeUnit(u);
   }
   return true;
 }

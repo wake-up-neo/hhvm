@@ -1,2 +1,3 @@
-App \dict<[1]intersect(Tint), [2]intersect(Tint), >
+File "construct_dict_from_array.php", line 7, characters 3-13:
+  dict<^(int), ^(int)>
 No errors

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -55,7 +55,6 @@ const std::unordered_set<std::string> forbidden_template = {
   "std::priority_queue",
   "std::queue",
   "std::set",
-  "std::shared_ptr",
   "std::stack",
   "std::unique_ptr",
   "std::unordered_map",
@@ -63,6 +62,14 @@ const std::unordered_set<std::string> forbidden_template = {
   "std::unordered_multiset",
   "std::unordered_set",
   "std::vector"
+};
+
+const std::unordered_set<std::string> forced_conservative = {
+  "boost::variant",
+  "folly::Optional",
+  "std::optional",
+  "std::shared_ptr",
+  "std::function"
 };
 
 std::string stripTemplateArgs(std::string name) {
@@ -119,6 +126,10 @@ bool isForbiddenTemplate(const std::string& name) {
   return forbidden_template.count(stripTemplateArgs(name));
 }
 
+bool isForcedConservativeTemplate(const std::string& name) {
+  return forced_conservative.count(stripTemplateArgs(name));
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 }
@@ -138,7 +149,8 @@ void init() {
   // Find the shared object embedded within a custom section.
   embedded_data data;
   if (!get_embedded_data("type_scanners", &data)) {
-    throw InitException{"Unable to find embedded data"};
+    // no embedded data was built; fall back to conservative scan.
+    return;
   }
 
   // Link in the embedded object.

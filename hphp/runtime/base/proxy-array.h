@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -135,7 +135,7 @@ public:
   static void Release(ArrayData*);
 
   static size_t Vsize(const ArrayData*);
-  static void NvGetKey(const ArrayData* ad, TypedValue* out, ssize_t pos);
+  static Cell NvGetKey(const ArrayData* ad, ssize_t pos);
   static const Variant& GetValueRef(const ArrayData*, ssize_t pos);
 
   static bool ExistsInt(const ArrayData* ad, int64_t k);
@@ -146,14 +146,12 @@ public:
   static const TypedValue* NvGetStr(const ArrayData*, const StringData* k);
   static const TypedValue* NvTryGetStr(const ArrayData*, const StringData* k);
 
-  static ArrayData* LvalInt(ArrayData*, int64_t k, Variant*& ret, bool copy);
-  static ArrayData* LvalIntRef(ArrayData*, int64_t k, Variant*& ret, bool copy);
-  static ArrayData* LvalStr(ArrayData*, StringData* k, Variant*& ret,
-                            bool copy);
-  static ArrayData* LvalStrRef(ArrayData*, StringData* k, Variant*& ret,
-                               bool copy);
-  static ArrayData* LvalNew(ArrayData*, Variant*& ret, bool copy);
-  static ArrayData* LvalNewRef(ArrayData*, Variant*& ret, bool copy);
+  static ArrayLval LvalInt(ArrayData*, int64_t k, bool copy);
+  static ArrayLval LvalIntRef(ArrayData*, int64_t k, bool copy);
+  static ArrayLval LvalStr(ArrayData*, StringData* k, bool copy);
+  static ArrayLval LvalStrRef(ArrayData*, StringData* k, bool copy);
+  static ArrayLval LvalNew(ArrayData*, bool copy);
+  static ArrayLval LvalNewRef(ArrayData*, bool copy);
 
   static ArrayData* SetInt(ArrayData*, int64_t k, Cell v, bool copy);
   static ArrayData* SetStr(ArrayData*, StringData* k, Cell v, bool copy);
@@ -219,8 +217,8 @@ private:
   friend Object HHVM_STATIC_METHOD(AwaitAllWaitHandle, fromArray,
                                    const Array& dependencies);
 public:
-  template<class F> void scan(F& mark) const {
-    mark(m_ref);
+  void scan(type_scan::Scanner& scanner) const {
+    scanner.scan(m_ref);
   }
 
 private:
@@ -228,7 +226,7 @@ private:
   // const ProxyArray* as a parameter, but we need to modify the inner array
   // to box and proxy the return values, so making this mutable avoids a
   // const_cast.
-  mutable RefData *m_ref;
+  mutable RefData* m_ref;
 };
 
 //////////////////////////////////////////////////////////////////////

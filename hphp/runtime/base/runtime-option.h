@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -57,15 +57,11 @@ struct RuntimeOption {
     std::vector<std::string>* messages = nullptr);
 
   static bool ServerExecutionMode() {
-    return strcmp(ExecutionMode, "srv") == 0;
-  }
-
-  static bool ClientExecutionMode() {
-    return strcmp(ExecutionMode, "cli") == 0;
+    return ServerMode;
   }
 
   static bool GcSamplingEnabled() {
-    return EvalEnableGC && EvalGCSampleRate > 0;
+    return EvalGCSampleRate > 0;
   }
 
   static bool JitSamplingEnabled() {
@@ -80,7 +76,7 @@ struct RuntimeOption {
     std::set<std::string>& xboxPasswords
   );
 
-  static const char *ExecutionMode;
+  static bool ServerMode;
   static std::string BuildId;
   static std::string InstanceId;
   static std::string DeploymentId; // ID for set of instances deployed at once
@@ -89,6 +85,7 @@ struct RuntimeOption {
 #ifdef FACEBOOK
   static bool UseThriftLogger;
   static size_t LoggerBatchSize;
+  static size_t LoggerFlushTimeout;
 #endif
   static std::map<std::string, ErrorLogFileData> ErrorLogs;
   static std::string LogFile;
@@ -147,6 +144,7 @@ struct RuntimeOption {
   static bool ServerStatCache;
   static bool ServerFixPathInfo;
   static bool ServerAddVaryEncoding;
+  static bool ServerLogSettingsOnStartup;
   static std::vector<std::string> ServerWarmupRequests;
   static std::string ServerCleanupRequest;
   static int ServerInternalWarmupThreads;
@@ -182,6 +180,9 @@ struct RuntimeOption {
   // server is made.
   static bool StopOldServer;
   static int64_t ServerRSSNeededMb;
+  // Threshold of free memory below which the old server is shutdown immediately
+  // upon a memory pressure check.
+  static int64_t ServerCriticalFreeMb;
   static int OldServerWait;
   // The percentage of page caches that can be considered as free (0 -
   // 100).  This is experimental.
@@ -298,8 +299,10 @@ struct RuntimeOption {
   static int64_t UnserializationBigMapThreshold;
 
   static std::string TakeoverFilename;
+  static std::string AdminServerIP;
   static int AdminServerPort;
   static int AdminThreadCount;
+  static int AdminServerQueueToWorkerRatio;
   static std::string AdminPassword;
   static std::set<std::string> AdminPasswords;
 
@@ -382,6 +385,7 @@ struct RuntimeOption {
   static bool EnableIntrinsicsExtension;
   static bool CheckSymLink;
   static bool EnableArgsInBacktraces;
+  static bool EnableContextInErrorHandler;
   static bool EnableZendCompat;
   static bool EnableZendSorting;
   static bool EnableZendIniCompat;
@@ -402,12 +406,13 @@ struct RuntimeOption {
   static bool PHP7_IntSemantics;
   static bool PHP7_LTR_assign;
   static bool PHP7_NoHexNumerics;
-  static bool PHP7_ReportVersion;
+  static bool PHP7_Builtins;
   static bool PHP7_ScalarTypes;
   static bool PHP7_EngineExceptions;
   static bool PHP7_Substr;
   static bool PHP7_InfNanFloatParse;
   static bool PHP7_UVS;
+  static bool PHP7_DisallowUnsafeCurlUploads;
 
   static int64_t HeapSizeMB;
   static int64_t HeapResetCountBase;
@@ -429,6 +434,8 @@ struct RuntimeOption {
   // Namespace aliases for the compiler
   static std::map<std::string, std::string> AliasedNamespaces;
 
+  static std::vector<std::string> TzdataSearchPaths;
+
 #define EVALFLAGS()                                                     \
   /* F(type, name, defaultVal) */                                       \
   /*                                                                    \
@@ -446,9 +453,11 @@ struct RuntimeOption {
   F(bool, JitRequireWriteLease,        false)                           \
   F(uint64_t, JitRelocationSize,       kJitRelocationSizeDefault)       \
   F(uint64_t, JitMatureSize,           25 << 20)                        \
+  F(double, JitMaturityExponent,       1.)                              \
   F(bool, JitTimer,                    kJitTimerDefault)                \
   F(int, JitConcurrently,              1)                               \
   F(int, JitThreads,                   4)                               \
+  F(int, JitWorkerThreads,             Process::GetCPUCount() / 2)      \
   F(bool, RecordSubprocessTimes,       false)                           \
   F(bool, AllowHhas,                   false)                           \
   F(string, UseExternalEmitter,        "")                              \
@@ -478,6 +487,7 @@ struct RuntimeOption {
          with Option::HardReturnTypeHints). */                          \
   F(int32_t, CheckReturnTypeHints,     2)                               \
   F(bool, SoftClosureReturnTypeHints,  false)                           \
+  F(bool, PromoteEmptyObject,          !EnableHipHopSyntax)             \
   F(bool, AllowScopeBinding,           true)                            \
   F(bool, JitNoGdb,                    true)                            \
   F(bool, SpinOnCrash,                 false)                           \
@@ -488,58 +498,66 @@ struct RuntimeOption {
   F(bool, PerfDataMap,                 false)                           \
   F(bool, KeepPerfPidMap,              false)                           \
   F(int32_t, PerfRelocate,             0)                               \
+  F(uint32_t, ThreadTCMainBufferSize,  6 << 20)                         \
+  F(uint32_t, ThreadTCColdBufferSize,  6 << 20)                         \
+  F(uint32_t, ThreadTCFrozenBufferSize,4 << 20)                         \
+  F(uint32_t, ThreadTCDataBufferSize,  256 << 10)                       \
   F(uint32_t, JitTargetCacheSize,      64 << 20)                        \
   F(uint32_t, HHBCArenaChunkSize,      10 << 20)                        \
   F(bool, ProfileBC,                   false)                           \
   F(bool, ProfileHeapAcrossRequests,   false)                           \
   F(bool, ProfileHWEnable,             true)                            \
   F(string, ProfileHWEvents,           std::string(""))                 \
+  F(bool, ProfileHWExcludeKernel,      false)                           \
   F(bool, JitAlwaysInterpOne,          false)                           \
   F(int32_t, JitNopInterval,           0)                               \
-  F(uint32_t, JitMaxTranslations,      12)                              \
+  F(uint32_t, JitMaxTranslations,      10)                              \
+  F(uint32_t, JitMaxProfileTranslations, 30)                            \
   F(uint64_t, JitGlobalTranslationLimit, -1)                            \
-  F(uint32_t, JitMaxRegionInstrs,      1000)                            \
+  F(uint32_t, JitMaxRegionInstrs,      1347)                            \
   F(uint32_t, JitProfileInterpRequests, kDefaultProfileInterpRequests)  \
   F(bool, JitProfileWarmupRequests,    false)                           \
   F(uint32_t, NumSingleJitRequests,    nsjrDefault())                   \
   F(uint32_t, JitProfileRequests,      profileRequestsDefault())        \
   F(uint32_t, JitProfileBCSize,        profileBCSizeDefault())          \
   F(uint32_t, JitResetProfCountersRequest, resetProfCountersDefault())  \
+  F(uint32_t, JitRetranslateAllRequest, retranslateAllRequestDefault()) \
+  F(double,   JitLayoutHotThreshold,   0.05)                            \
+  F(int32_t,  JitLayoutMainFactor,     1000)                            \
+  F(int32_t,  JitLayoutColdFactor,     5)                               \
   F(bool, JitProfileRecord,            false)                           \
   F(uint32_t, GdbSyncChunks,           128)                             \
   F(bool, JitKeepDbgFiles,             false)                           \
   /* despite the unfortunate name, this enables function renaming and
    * interception in the interpreter as well as the jit, and also
    * implies all functions may be used with fb_intercept */             \
-  F(bool, JitEnableRenameFunction,     false)                           \
+  F(bool, JitEnableRenameFunction,     EvalJitEnableRenameFunction)     \
   F(bool, JitUseVtuneAPI,              false)                           \
                                                                         \
   F(bool, JitDisabledByHphpd,          false)                           \
-  F(bool, JitTransCounters,            false)                           \
   F(bool, JitPseudomain,               true)                            \
   F(uint32_t, JitWarmupStatusBytes,    ((25 << 10) + 1))                \
   F(uint32_t, JitWriteLeaseExpiration, 1500) /* in microseconds */      \
+  F(int, JitRetargetJumps,             1)                               \
   F(bool, HHIRLICM,                    false)                           \
   F(bool, HHIRSimplification,          true)                            \
   F(bool, HHIRGenOpts,                 true)                            \
   F(bool, HHIRRefcountOpts,            true)                            \
   F(bool, HHIREnableGenTimeInlining,   true)                            \
-  F(uint32_t, HHIRInliningMaxVasmCost, 400)                             \
-  F(uint32_t, HHIRInliningMaxReturnDecRefs, 6)                          \
+  F(uint32_t, HHIRInliningMaxVasmCost, 370)                             \
+  F(uint32_t, HHIRInliningMaxReturnDecRefs, 12)                         \
   F(bool, HHIRInlineFrameOpts,         true)                            \
   F(bool, HHIRPartialInlineFrameOpts,  true)                            \
   F(bool, HHIRInlineSingletons,        true)                            \
   F(std::string, InlineRegionMode,     "both")                          \
-  F(bool, HHIRGenerateAsserts,         debug)                           \
-  F(bool, HHIRDirectExit,              true)                            \
+  F(bool, HHIRGenerateAsserts,         false)                           \
   F(bool, HHIRDeadCodeElim,            true)                            \
   F(bool, HHIRGlobalValueNumbering,    true)                            \
-  F(bool, HHIRTypeCheckHoisting,       false) /* Task: 7568599 */       \
   F(bool, HHIRPredictionOpts,          true)                            \
   F(bool, HHIRMemoryOpts,              true)                            \
   F(bool, HHIRStorePRE,                true)                            \
   F(bool, HHIROutlineGenericIncDecRef, true)                            \
-  F(double, HHIRMixedArrayProfileThreshold, 0.8)                        \
+  F(double, HHIRMixedArrayProfileThreshold, 0.8554)                     \
   /* Register allocation flags */                                       \
   F(bool, HHIREnablePreColoring,       true)                            \
   F(bool, HHIREnableCoalescing,        true)                            \
@@ -552,13 +570,16 @@ struct RuntimeOption {
   F(uint64_t, JitPGOThreshold,         pgoThresholdDefault())           \
   F(bool,     JitPGOHotOnly,           false)                           \
   F(bool,     JitPGOUsePostConditions, true)                            \
-  F(uint32_t, JitUnlikelyDecRefPercent,10)                              \
-  F(uint32_t, JitPGOReleaseVVMinPercent, 10)                            \
+  F(uint32_t, JitUnlikelyDecRefPercent, 5)                              \
+  F(uint32_t, JitPGOReleaseVVMinPercent, 8)                             \
   F(bool,     JitPGOArrayGetStress,    false)                           \
   F(uint32_t, JitPGOMinBlockCountPercent, 0)                            \
   F(double,   JitPGOMinArcProbability, 0.0)                             \
   F(uint32_t, JitPGOMaxFuncSizeDupBody, 80)                             \
   F(uint32_t, JitPGORelaxPercent,      100)                             \
+  F(uint32_t, JitPGORelaxUncountedToGenPercent, 20)                     \
+  F(uint32_t, JitPGORelaxCountedToGenPercent, 75)                       \
+  F(bool,     JitPGODumpCallGraph,     false)                           \
   F(uint64_t, FuncCountHint,           10000)                           \
   F(uint64_t, PGOFuncCountHint,        1000)                            \
   F(uint32_t, HotFuncCount,            4100)                            \
@@ -567,6 +588,7 @@ struct RuntimeOption {
   F(int32_t, DumpBytecode,             0)                               \
   F(bool, DumpHhas,                    false)                           \
   F(bool, DumpTC,                      false)                           \
+  F(string, DumpTCPath,                "/tmp")                          \
   F(bool, DumpTCAnchors,               false)                           \
   F(uint32_t, DumpIR,                  0)                               \
   F(bool, DumpTCAnnotationsForAllTrans,debug)                           \
@@ -576,18 +598,22 @@ struct RuntimeOption {
   F(bool, MapTgtCacheHuge,             false)                           \
   F(uint32_t, MaxHotTextHugePages,     hugePagesSoundNice() ? 1 : 0)    \
   F(int32_t, MaxLowMemHugePages,       hugePagesSoundNice() ? 8 : 0)    \
+  F(bool, LowStaticArrays,             true)                            \
   F(bool, RandomHotFuncs,              false)                           \
-  F(bool, EnableGC,                    false)                           \
+  F(bool, EnableGC,                    eagerGcDefault())                \
   /* Run GC eagerly at each surprise point. */                          \
-  F(bool, EagerGC,                     false)                           \
+  F(bool, EagerGC,                     eagerGcDefault())                \
   /* only run eager-gc once at each surprise point (much faster) */     \
   F(bool, FilterGCPoints,              true)                            \
-  F(bool, Quarantine,                  false)                           \
-  F(bool, EnableGCTypeScan,            false)                           \
+  F(bool, Quarantine,                  eagerGcDefault())                \
+  F(uint32_t, GCSampleRate,            0)                               \
+  F(int64_t, GCMinTrigger,             64L<<20)                         \
+  F(double, GCTriggerPct,              0.5)                             \
   F(bool, RaiseMissingThis,            !EnableHipHopSyntax)             \
   F(bool, QuoteEmptyShellArg,          !EnableHipHopSyntax)             \
-  F(uint32_t, GCSampleRate,                1)                           \
+  F(uint32_t, StaticContentsLogRate,   100)                             \
   F(uint32_t, SerDesSampleRate,            0)                           \
+  F(int, SimpleJsonMaxLength,        2 << 20)                           \
   F(uint32_t, JitSampleRate,               0)                           \
   F(uint32_t, JitFilterLease,              1)                           \
   F(bool, DisableSomeRepoAuthNotices,  true)                            \
@@ -601,11 +627,54 @@ struct RuntimeOption {
   F(bool, EnableNumaLocal, ServerExecutionMode())                       \
   F(bool, EnableCallBuiltin, true)                                      \
   F(bool, EnableReusableTC,   reuseTCDefault())                         \
+  F(bool, LogServerRestartStats, false)                                 \
+  F(bool, EnableOptTCBuffer,  false)                                    \
   F(uint32_t, ReusableTCPadding, 128)                                   \
   F(int64_t,  StressUnitCacheFreq, 0)                                   \
   F(int64_t, PerfWarningSampleRate, 1)                                  \
-  /* Profiling flags */                                                 \
-  F(bool, EnableReverseDataMap, false)                                  \
+  F(double, InitialLoadFactor, 1.0)                                     \
+  /* Raise notices on various array operations which may present        \
+   * compatibility issues with Hack arrays. */                          \
+  F(bool, HackArrCompatNotices, false)                                  \
+  F(std::vector<std::string>, IniGetHide, std::vector<std::string>())   \
+  F(std::string, UseRemoteUnixServer, "no")                             \
+  F(std::string, UnixServerPath, "")                                    \
+  F(uint32_t, UnixServerWorkers, Process::GetCPUCount())                \
+  F(bool, UnixServerQuarantineApc, false)                               \
+  F(bool, UnixServerQuarantineUnits, false)                             \
+  F(bool, UnixServerVerifyExeAccess, false)                             \
+  F(bool, UnixServerFailWhenBusy, false)                                \
+  F(std::vector<std::string>, UnixServerAllowedUsers,                   \
+                                            std::vector<std::string>()) \
+  F(std::vector<std::string>, UnixServerAllowedGroups,                  \
+                                            std::vector<std::string>()) \
+  /******************                                                   \
+   | PPC64 Options. |                                                   \
+   *****************/                                                   \
+  /* Minimum immediate size to use TOC */                               \
+  F(uint16_t, PPC64MinTOCImmSize, 64)                                   \
+  /* Relocation features. Use with care on production */                \
+  /*  Allow a Far branch be converted to a Near branch. */              \
+  F(bool, PPC64RelocationShrinkFarBranches, false)                      \
+  /*  Remove nops from a Far branch. */                                 \
+  F(bool, PPC64RelocationRemoveFarBranchesNops, true)                   \
+  /********************                                                 \
+   | Profiling flags. |                                                 \
+   ********************/                                                \
+  /* Whether to maintain the address-to-VM-object mapping. */           \
+  F(bool, EnableReverseDataMap, true)                                   \
+  /* Turn on perf-mem-event sampling roughly every this many requests.  \
+   * To maintain the same overall sampling rate, the ratio between the  \
+   * request and sample frequencies should be kept constant. */         \
+  F(uint32_t, PerfMemEventRequestFreq, 0)                               \
+  /* Sample this many memory instructions per second.  This should be   \
+   * kept low to avoid the risk of collecting a sample while we're      \
+   * processing a previous sample. */                                   \
+  F(uint32_t, PerfMemEventSampleFreq, 80)                               \
+  /* Sampling frequency for TC branch profiling. */                     \
+  F(uint32_t, ProfBranchSampleFreq, 0)                                  \
+  /* Sampling frequency for profiling packed array accesses. */         \
+  F(uint32_t, ProfPackedArraySampleFreq, 0)                             \
   /* */
 
 private:
@@ -631,6 +700,7 @@ public:
   static int32_t RepoCentralFileMode;
   static std::string RepoCentralFileUser;
   static std::string RepoCentralFileGroup;
+  static bool RepoAllowFallbackPath;
   static std::string RepoEvalMode;
   static std::string RepoJournal;
   static bool RepoCommit;
@@ -665,6 +735,7 @@ public:
   static bool EnableDebuggerServer;
   static bool EnableDebuggerUsageLog;
   static bool DebuggerDisableIPv6;
+  static std::string DebuggerServerIP;
   static int DebuggerServerPort;
   static int DebuggerDefaultRpcPort;
   static std::string DebuggerDefaultRpcAuth;
@@ -673,7 +744,7 @@ public:
   static std::string DebuggerDefaultSandboxPath;
   static std::string DebuggerStartupDocument;
   static int DebuggerSignalTimeout;
-  static std::string DebuggerAuthTokenScript;
+  static std::string DebuggerAuthTokenScriptBin;
 
   // Mail options
   static std::string SendmailPath;
@@ -702,6 +773,8 @@ public:
   // Xenon options
   static double XenonPeriodSeconds;
   static bool XenonForceAlwaysOn;
+  static bool XenonTraceUnitLoad;
+  static std::string XenonStructLogDest;
 };
 static_assert(sizeof(RuntimeOption) == 1, "no instance variables");
 

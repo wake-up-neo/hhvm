@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -75,6 +75,7 @@ ProfData::ProfData()
                  : RuntimeOption::EvalJitPGOThreshold)
   , m_profilingFuncs(RuntimeOption::EvalFuncCountHint, false)
   , m_optimizedFuncs(RuntimeOption::EvalFuncCountHint, false)
+  , m_queuedFuncs(RuntimeOption::EvalFuncCountHint, false)
   , m_optimizedSKs(RuntimeOption::EvalPGOFuncCountHint,
                    makeAHMConfig<decltype(m_optimizedSKs)>())
   , m_proflogueDB(RuntimeOption::EvalPGOFuncCountHint * 2,
@@ -104,10 +105,10 @@ TransID ProfData::proflogueTransId(const Func* func, int nArgs) const {
   );
 }
 
-TransID ProfData::dvFuncletTransId(const Func* func, int nArgs) const {
+TransID ProfData::dvFuncletTransId(SrcKey sk) const {
   return folly::get_default(
     m_dvFuncletDB,
-    PrologueID{func->getFuncId(), nArgs},
+    sk.toAtomicInt(),
     kInvalidTransID
   );
 }
@@ -132,13 +133,12 @@ void ProfData::addTransProfile(TransID transID,
   auto const bcOffset = startSk.offset();
 
   if (func->isDVEntry(bcOffset)) {
-    auto const nParams = func->getDVEntryNumParams(bcOffset);
     // Normal DV funclets don't have type guards, and thus have a single
     // translation.  However, some special functions written in hhas
     // (e.g. array_map) have complex DV funclets that get retranslated for
     // different types.  For those functions, m_dvFuncletDB keeps the TransID
     // for their first translation.
-    m_dvFuncletDB.emplace(PrologueID{funcId, nParams}, transID);
+    m_dvFuncletDB.emplace(startSk.toAtomicInt(), transID);
   }
 
   {
@@ -267,5 +267,13 @@ std::vector<ProfData::TargetProfileInfo> ProfData::getTargetProfiles(
     return std::vector<TargetProfileInfo>{};
   }
 }
+
+////////////////////////////////////////////////////////////////////////////////
+
+bool hasEnoughProfDataToRetranslateAll() {
+  return requestCount() >= RuntimeOption::EvalJitRetranslateAllRequest;
+}
+
+////////////////////////////////////////////////////////////////////////////////
 
 }}

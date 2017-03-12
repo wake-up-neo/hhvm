@@ -82,7 +82,7 @@ let parse_file file : match_ret * string * Parser_hack.parser_return =
     Errors.do_
       (fun () ->
        let rp = path_to_relative file in
-       Parser_hack.program rp content) in
+       Parser_hack.program_with_default_popt rp content) in
   let pr =
     (* if the file is php, we can't search it *)
     if parser_output.Parser_hack.file_mode = None
@@ -166,7 +166,7 @@ let hh_match_job
 let directory ~handle dir fn =
   let path = Path.make dir in
   let next = Utils.compose
-    (List.map ~f:Path.make)
+    (fun paths -> paths |> List.map ~f:Path.make |> Bucket.of_list)
     (Find.make_next_files ~filter:FindUtils.is_php path) in
   let workers = ServerWorker.make GlobalConfig.gc_control handle in
   (* Information for the patcher to figure out what transformations to do *)

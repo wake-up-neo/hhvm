@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -52,16 +52,8 @@ String HHVM_FUNCTION(zlib_get_coding_type);
 Variant HHVM_FUNCTION(qlzcompress, const String& data, int level = 1);
 Variant HHVM_FUNCTION(qlzuncompress, const String& data, int level = 1);
 #endif
-#ifdef HAVE_SNAPPY
-Variant HHVM_FUNCTION(snappy_compress, const String& data);
-Variant HHVM_FUNCTION(snappy_uncompress, const String& data);
-#endif
 Variant HHVM_FUNCTION(nzcompress, const String& uncompressed);
 Variant HHVM_FUNCTION(nzuncompress, const String& compressed);
-Variant HHVM_FUNCTION(lz4_compress, const String& uncompressed,
-                                    bool high = false);
-Variant HHVM_FUNCTION(lz4_hccompress, const String& uncompressed);
-Variant HHVM_FUNCTION(lz4_uncompress, const String& compressed);
 
 ///////////////////////////////////////////////////////////////////////////////
 // stream functions

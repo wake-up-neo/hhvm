@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -126,7 +126,7 @@ static inline bool array_column_coerce_key(Variant &key, const char *name) {
 TypedValue HHVM_FUNCTION(array_column,
                          const Variant& input,
                          const Variant& val_key,
-                         const Variant& idx_key /* = null_variant */) {
+                         const Variant& idx_key /* = uninit_variant */) {
 
   getCheckedContainer(input);
   Variant val = val_key, idx = idx_key;
@@ -136,10 +136,14 @@ TypedValue HHVM_FUNCTION(array_column,
   }
   ArrayInit ret(arr_input.size(), ArrayInit::Map{});
   for (ArrayIter it(arr_input); it; ++it) {
-    if (!it.second().isArray()) {
+    Array sub;
+    if (UNLIKELY(RuntimeOption::PHP7_Builtins && it.second().isObject())) {
+      sub = it.second().toObject().toArray();
+    } else if (it.second().isArray()) {
+      sub = it.second().toArray();
+    } else {
       continue;
     }
-    Array sub = it.second().toArray();
 
     Variant elem;
     if (val.isNull()) {
@@ -237,6 +241,8 @@ TypedValue HHVM_FUNCTION(array_fill,
   if (num < 0) {
     throw_invalid_argument("Number of elements can't be negative");
     return make_tv<KindOfBoolean>(false);
+  } else if (num == 0) {
+    return tvReturn(empty_array());
   }
 
   if (start_index == 0) {
@@ -301,6 +307,9 @@ bool HHVM_FUNCTION(array_key_exists,
   switch (cell->m_type) {
     case KindOfUninit:
     case KindOfNull:
+      if (RuntimeOption::EvalHackArrCompatNotices && ad->useWeakKeys()) {
+        raiseHackArrCompatImplicitArrayKey(cell);
+      }
       return ad->useWeakKeys() && ad->exists(staticEmptyString());
 
     case KindOfBoolean:
@@ -316,6 +325,9 @@ bool HHVM_FUNCTION(array_key_exists,
     case KindOfObject:
     case KindOfResource:
       if (!ad->useWeakKeys()) throwInvalidArrayKeyException(cell, ad);
+      if (RuntimeOption::EvalHackArrCompatNotices) {
+        raiseHackArrCompatImplicitArrayKey(cell);
+      }
       raise_warning("Array key should be either a string or an integer");
       return false;
 
@@ -330,7 +342,6 @@ bool HHVM_FUNCTION(array_key_exists,
     case KindOfInt64:
       return ad->exists(cell->m_data.num);
     case KindOfRef:
-    case KindOfClass:
       break;
   }
   not_reached();
@@ -377,7 +388,7 @@ Variant HHVM_FUNCTION(array_keys, int64_t argc,
                                   bool strict /*=false*/) {
   return array_keys_helper(
     input,
-    argc < 2 ? null_variant : search_value,
+    argc < 2 ? uninit_variant : search_value,
     strict
   );
 }
@@ -456,9 +467,9 @@ TypedValue HHVM_FUNCTION(array_map,
       keyConverted = !collectionAllowsIntStringKeys(col_type);
     }
     for (ArrayIter iter(arr1); iter; ++iter) {
-      Variant result;
-      g_context->invokeFuncFew((TypedValue*)&result, ctx, 1,
-                               iter.secondRefPlus().asCell());
+      auto result = Variant::attach(
+        g_context->invokeFuncFew(ctx, 1, iter.secondRefPlus().asCell())
+      );
       // if keyConverted is false, it's possible that ret will have fewer
       // elements than cell_arr1; keys int(1) and string('1') may both be
       // present
@@ -498,10 +509,10 @@ TypedValue HHVM_FUNCTION(array_map,
     }
     Array params = params_ai.toArray();
     if (ctx.func) {
-      Variant result;
-      g_context->invokeFunc((TypedValue*)&result,
-                              ctx.func, params, ctx.this_,
-                              ctx.cls, nullptr, ctx.invName);
+      auto result = Variant::attach(
+        g_context->invokeFunc(ctx.func, params, ctx.this_,
+                              ctx.cls, nullptr, ctx.invName)
+      );
       ret_ai.append(result);
     } else {
       ret_ai.append(params);
@@ -513,7 +524,7 @@ TypedValue HHVM_FUNCTION(array_map,
 TypedValue HHVM_FUNCTION(array_merge,
                          int64_t numArgs,
                          const Variant& array1,
-                         const Variant& array2 /* = null_variant */,
+                         const Variant& array2 /* = uninit_variant */,
                          const Array& args /* = null array */) {
   getCheckedContainer(array1);
   Array ret = Array::Create();
@@ -539,7 +550,7 @@ TypedValue HHVM_FUNCTION(array_merge,
 TypedValue HHVM_FUNCTION(array_merge_recursive,
                          int64_t numArgs,
                          const Variant& array1,
-                         const Variant& array2 /* = null_variant */,
+                         const Variant& array2 /* = uninit_variant */,
                          const Array& args /* = null array */) {
   getCheckedArray(array1);
   auto in1 = array1.asCArrRef();
@@ -621,7 +632,7 @@ static void php_array_replace_recursive(PointerSet &seen, bool check,
 
 TypedValue HHVM_FUNCTION(array_replace,
                          const Variant& array1,
-                         const Variant& array2 /* = null_variant */,
+                         const Variant& array2 /* = uninit_variant */,
                          const Array& args /* = null array */) {
   getCheckedArray(array1);
   Array ret = Array::Create();
@@ -644,7 +655,7 @@ TypedValue HHVM_FUNCTION(array_replace,
 
 TypedValue HHVM_FUNCTION(array_replace_recursive,
                          const Variant& array1,
-                         const Variant& array2 /* = null_variant */,
+                         const Variant& array2 /* = uninit_variant */,
                          const Array& args /* = null array */) {
   getCheckedArray(array1);
   Array ret = Array::Create();
@@ -759,9 +770,6 @@ TypedValue HHVM_FUNCTION(array_product,
       case KindOfObject:
       case KindOfResource:
         continue;
-
-      case KindOfClass:
-        break;
     }
     not_reached();
   }
@@ -784,9 +792,6 @@ DOUBLE:
       case KindOfObject:
       case KindOfResource:
         continue;
-
-      case KindOfClass:
-        break;
     }
     not_reached();
   }
@@ -900,7 +905,7 @@ TypedValue HHVM_FUNCTION(array_shift,
 TypedValue HHVM_FUNCTION(array_slice,
                          TypedValue cell_input,
                          int64_t offset,
-                         const Variant& length /* = null_variant */,
+                         const Variant& length /* = uninit_variant */,
                          bool preserve_keys /* = false */) {
   if (UNLIKELY(!isContainer(cell_input))) {
     raise_warning("Invalid operand type was used: %s expects "
@@ -1039,9 +1044,6 @@ TypedValue HHVM_FUNCTION(array_sum,
       case KindOfObject:
       case KindOfResource:
         continue;
-
-      case KindOfClass:
-        break;
     }
     not_reached();
   }
@@ -1064,9 +1066,6 @@ DOUBLE:
       case KindOfObject:
       case KindOfResource:
         continue;
-
-      case KindOfClass:
-        break;
     }
     not_reached();
   }
@@ -1214,16 +1213,17 @@ static void walk_func(Variant& value,
                       const Variant& userdata,
                       const void *data) {
   CallCtx* ctx = (CallCtx*)data;
-  Variant sink;
   int nargs = userdata.isInitialized() ? 3 : 2;
   TypedValue args[3] = { *value.asRef(), *key.asCell(), *userdata.asCell() };
-  g_context->invokeFuncFew(sink.asTypedValue(), *ctx, nargs, args);
+  tvRefcountedDecRef(
+    g_context->invokeFuncFew(*ctx, nargs, args)
+  );
 }
 
 bool HHVM_FUNCTION(array_walk_recursive,
                    VRefParam input,
                    const Variant& funcname,
-                   const Variant& userdata /* = null_variant */) {
+                   const Variant& userdata /* = uninit_variant */) {
   if (!input.isPHPArray()) {
     throw_expected_array_exception("array_walk_recursive");
     return false;
@@ -1243,7 +1243,7 @@ bool HHVM_FUNCTION(array_walk_recursive,
 bool HHVM_FUNCTION(array_walk,
                    VRefParam input,
                    const Variant& funcname,
-                   const Variant& userdata /* = null_variant */) {
+                   const Variant& userdata /* = uninit_variant */) {
   if (!input.isPHPArray()) {
     throw_expected_array_exception("array_walk");
     return false;
@@ -1278,27 +1278,12 @@ static void compact(PointerSet& seen, VarEnv* v, Array &ret,
   } else {
     String varname = var.toString();
     if (!varname.empty() && v->lookup(varname.get()) != NULL) {
-      ret.set(varname, *reinterpret_cast<Variant*>(v->lookup(varname.get())));
+      ret.set(varname, tvAsVariant(v->lookup(varname.get())));
     }
   }
 }
 
 Array HHVM_FUNCTION(compact,
-                    const Variant& varname,
-                    const Array& args /* = null array */) {
-  raise_disallowed_dynamic_call("compact should not be called dynamically");
-  Array ret = Array::attach(PackedArray::MakeReserve(args.size() + 1));
-  VarEnv* v = g_context->getOrCreateVarEnv();
-  if (v) {
-    PointerSet seen;
-    compact(seen, v, ret, varname);
-    if (!args.empty()) compact(seen, v, ret, args);
-  }
-  return ret;
-}
-
-// __SystemLib\\compact_sl
-Array HHVM_FUNCTION(__SystemLib_compact_sl,
                     const Variant& varname,
                     const Array& args /* = null array */) {
   Array ret = Array::attach(PackedArray::MakeReserve(args.size() + 1));
@@ -1382,7 +1367,6 @@ int64_t HHVM_FUNCTION(count,
       return 1;
 
     case KindOfRef:
-    case KindOfClass:
       break;
   }
   not_reached();
@@ -1638,7 +1622,7 @@ TypedValue HHVM_FUNCTION(range,
       if (type1 == KindOfInt64 || type2 == KindOfInt64) {
         if (type1 != KindOfInt64) n1 = slow.toInt64();
         if (type2 != KindOfInt64) n2 = shigh.toInt64();
-        return tvReturn(ArrayUtil::Range((double)n1, (double)n2, lstep));
+        return tvReturn(ArrayUtil::Range(n1, n2, lstep));
       }
 
       return tvReturn(ArrayUtil::Range((unsigned char)slow.charAt(0),
@@ -1651,13 +1635,13 @@ TypedValue HHVM_FUNCTION(range,
   }
 
   int64_t lstep = toInt64(dstep);
-  return tvReturn(ArrayUtil::Range(low.toDouble(), high.toDouble(), lstep));
+  return tvReturn(ArrayUtil::Range(toInt64(low), toInt64(high), lstep));
 }
 ///////////////////////////////////////////////////////////////////////////////
 // diff/intersect helpers
 
 static int cmp_func(const Variant& v1, const Variant& v2, const void *data) {
-  Variant *callback = (Variant *)data;
+  auto callback = static_cast<const Variant*>(data);
   return vm_call_user_func(*callback, make_packed_array(v1, v2)).toInt32();
 }
 
@@ -2455,10 +2439,6 @@ struct Collator final : RequestEventHandler {
     }
   }
 
-  void vscan(IMarker& mark) const override {
-    mark(m_locale);
-  }
-
 private:
   String     m_locale;
   UCollator *m_ucoll;
@@ -2812,7 +2792,7 @@ TypedValue HHVM_FUNCTION(hphp_array_idx,
       VarNR index = key.toKey(arr);
       if (!index.isNull()) {
         const Variant& ret = arr->get(index, false);
-        return tvReturn((&ret != &null_variant) ? ret : def);
+        return tvReturn((&ret != &uninit_variant) ? ret : def);
       }
     } else {
       raise_error("hphp_array_idx: search must be an array");
@@ -2903,10 +2883,20 @@ Array HHVM_FUNCTION(HH_dict, const Variant& input) {
     return ArrNR{inputCell->m_data.parr}.asArray().toDict();
   } else if (inputCell->m_type == KindOfObject &&
              inputCell->m_data.pobj->isCollection()) {
+    if (auto ad = collections::asArray(inputCell->m_data.pobj)) {
+      return ArrNR{ad}.asArray().toDict();
+    }
     return HHVM_FN(HH_dict)(toArray(inputCell->m_data.pobj));
+  } else if (inputCell->m_type == KindOfObject &&
+             inputCell->m_data.pobj->instanceof(SystemLib::s_IteratorClass)) {
+    auto arr = Array::CreateDict();
+    for (ArrayIter iter(input.toObject()); iter; ++iter) {
+      arr.set(iter.first(), iter.second());
+    }
+    return arr;
   } else {
     raise_warning(
-      "Only arrays, vecs, keysets, and collections can be converted into dicts"
+      "Only arrays, vecs, keysets, and iterables can be converted into dicts"
     );
     return Array::CreateDict();
   }
@@ -2919,10 +2909,20 @@ Array HHVM_FUNCTION(HH_keyset, const Variant& input) {
     return ArrNR{inputCell->m_data.parr}.asArray().toKeyset();
   } else if (inputCell->m_type == KindOfObject &&
              inputCell->m_data.pobj->isCollection()) {
+    if (auto ad = collections::asArray(inputCell->m_data.pobj)) {
+      return ArrNR{ad}.asArray().toKeyset();
+    }
     return HHVM_FN(HH_keyset)(toArray(inputCell->m_data.pobj));
+  } else if (inputCell->m_type == KindOfObject &&
+             inputCell->m_data.pobj->instanceof(SystemLib::s_IteratorClass)) {
+    auto arr = Array::CreateKeyset();
+    for (ArrayIter iter(input.toObject()); iter; ++iter) {
+      arr.append(iter.first());
+    }
+    return arr;
   } else {
     raise_warning(
-      "Only arrays, vecs, dicts, and collections can be converted into keysets"
+      "Only arrays, vecs, dicts, and iterables can be converted into keysets"
     );
     return Array::CreateKeyset();
   }
@@ -2935,10 +2935,20 @@ Array HHVM_FUNCTION(HH_vec, const Variant& input) {
     return ArrNR{inputCell->m_data.parr}.asArray().toVec();
   } else if (inputCell->m_type == KindOfObject &&
              inputCell->m_data.pobj->isCollection()) {
+    if (auto ad = collections::asArray(inputCell->m_data.pobj)) {
+      return ArrNR{ad}.asArray().toVec();
+    }
     return HHVM_FN(HH_vec)(toArray(inputCell->m_data.pobj));
+  } else if (inputCell->m_type == KindOfObject &&
+             inputCell->m_data.pobj->instanceof(SystemLib::s_IteratorClass)) {
+    auto arr = Array::CreateVec();
+    for (ArrayIter iter(input.toObject()); iter; ++iter) {
+      arr.append(iter.second());
+    }
+    return arr;
   } else {
     raise_warning(
-      "Only arrays, dicts, keysets, and collections can be converted into vecs"
+      "Only arrays, dicts, keysets, and iterables can be converted into vecs"
     );
     return Array::CreateVec();
   }
@@ -2979,11 +2989,11 @@ struct ArrayExtension final : Extension {
     HHVM_RC_INT(ARRAY_FILTER_USE_BOTH, 1);
     HHVM_RC_INT(ARRAY_FILTER_USE_KEY, 2);
 
-    HHVM_RC_INT(CASE_LOWER,      CaseMode::LOWER);
-    HHVM_RC_INT(CASE_UPPER,      CaseMode::UPPER);
+    HHVM_RC_INT(CASE_LOWER, static_cast<int64_t>(CaseMode::LOWER));
+    HHVM_RC_INT(CASE_UPPER, static_cast<int64_t>(CaseMode::UPPER));
 
-    HHVM_RC_INT(COUNT_NORMAL,    CountMode::NORMAL);
-    HHVM_RC_INT(COUNT_RECURSIVE, CountMode::RECURSIVE);
+    HHVM_RC_INT(COUNT_NORMAL, static_cast<int64_t>(CountMode::NORMAL));
+    HHVM_RC_INT(COUNT_RECURSIVE, static_cast<int64_t>(CountMode::RECURSIVE));
 
     HHVM_RC_INT_SAME(SORT_ASC);
     HHVM_RC_INT_SAME(SORT_DESC);
@@ -3027,7 +3037,6 @@ struct ArrayExtension final : Extension {
     HHVM_FE(array_walk_recursive);
     HHVM_FE(array_walk);
     HHVM_FE(compact);
-    HHVM_FALIAS(__SystemLib\\compact_sl, __SystemLib_compact_sl);
     HHVM_FE(shuffle);
     HHVM_FE(count);
     HHVM_FE(sizeof);

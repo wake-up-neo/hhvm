@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -39,20 +39,22 @@
 #include "hphp/runtime/base/file.h"
 #include "hphp/runtime/base/ini-setting.h"
 #include "hphp/runtime/base/object-data.h"
+#include "hphp/runtime/base/php-globals.h"
 #include "hphp/runtime/base/request-local.h"
 #include "hphp/runtime/base/string-buffer.h"
 #include "hphp/runtime/base/variable-serializer.h"
 #include "hphp/runtime/base/variable-unserializer.h"
-#include "hphp/runtime/base/php-globals.h"
 #include "hphp/runtime/base/zend-math.h"
-#include "hphp/runtime/ext/std/ext_std_function.h"
-#include "hphp/runtime/ext/hash/ext_hash.h"
+
 #include "hphp/runtime/ext/extension-registry.h"
+#include "hphp/runtime/ext/hash/ext_hash.h"
+#include "hphp/runtime/ext/std/ext_std_function.h"
 #include "hphp/runtime/ext/std/ext_std_misc.h"
 #include "hphp/runtime/ext/std/ext_std_options.h"
 #include "hphp/runtime/ext/wddx/ext_wddx.h"
+
 #include "hphp/runtime/vm/jit/translator-inline.h"
-#include "hphp/runtime/base/request-event-handler.h"
+#include "hphp/runtime/vm/method-lookup.h"
 
 namespace HPHP {
 
@@ -78,10 +80,6 @@ struct Session {
     None,
     Active
   };
-
-  template<class F> void scan(F& mark) const {
-    mark(ps_session_handler);
-  }
 
   std::string save_path;
   bool        reset_save_path{false};
@@ -145,16 +143,11 @@ struct SessionRequestData final : Session {
 
   void requestShutdownImpl();
 
-  template<class F> void scan(F& mark) const {
-    Session::scan(mark);
-    mark(id);
-  }
-
 public:
   String id;
 };
 
-static __thread SessionRequestData* s_session;
+IMPLEMENT_THREAD_LOCAL_NO_CHECK(SessionRequestData, s_session);
 
 void SessionRequestData::requestShutdownImpl() {
   if (mod_is_open()) {
@@ -345,7 +338,7 @@ void SystemlibSessionModule::lookupClass() {
   }
 
   if (LookupResult::MethodFoundWithThis !=
-      g_context->lookupCtorMethod(m_ctor, cls)) {
+      lookupCtorMethod(m_ctor, cls, arGetContextClass(vmfp()))) {
     raise_error("Unable to call %s's constructor", m_classname);
   }
 
@@ -364,14 +357,14 @@ const Object& SystemlibSessionModule::getObject() {
   }
 
   VMRegAnchor _;
-  Variant ret;
-
   if (!m_cls) {
     lookupClass();
   }
   s_obj->setObject(Object{m_cls});
   const auto& obj = s_obj->getObject();
-  g_context->invokeFuncFew(ret.asTypedValue(), m_ctor, obj.get());
+  tvRefcountedDecRef(
+    g_context->invokeFuncFew(m_ctor, obj.get())
+  );
   return obj;
 }
 
@@ -381,10 +374,10 @@ bool SystemlibSessionModule::open(const char *save_path,
 
   Variant savePath = String(save_path, CopyString);
   Variant sessionName = String(session_name, CopyString);
-  Variant ret;
   TypedValue args[2] = { *savePath.asCell(), *sessionName.asCell() };
-  g_context->invokeFuncFew(ret.asTypedValue(), m_open, obj.get(),
-                           nullptr, 2, args);
+  auto ret = Variant::attach(
+      g_context->invokeFuncFew(m_open, obj.get(), nullptr, 2, args)
+  );
 
   if (ret.isBoolean() && ret.toBoolean()) {
     s_session->mod_data = true;
@@ -403,8 +396,9 @@ bool SystemlibSessionModule::close() {
     return true;
   }
 
-  Variant ret;
-  g_context->invokeFuncFew(ret.asTypedValue(), m_close, obj.get());
+  auto ret = Variant::attach(
+    g_context->invokeFuncFew(m_close, obj.get())
+  );
   s_obj->destroy();
 
   if (ret.isBoolean() && ret.toBoolean()) {
@@ -419,9 +413,10 @@ bool SystemlibSessionModule::read(const char *key, String &value) {
   const auto& obj = getObject();
 
   Variant sessionKey = String(key, CopyString);
-  Variant ret;
-  g_context->invokeFuncFew(ret.asTypedValue(), m_read, obj.get(),
-                             nullptr, 1, sessionKey.asCell());
+  auto ret = Variant::attach(
+    g_context->invokeFuncFew(m_read, obj.get(),
+                             nullptr, 1, sessionKey.asCell())
+  );
 
   if (ret.isString()) {
     value = ret.toString();
@@ -437,10 +432,10 @@ bool SystemlibSessionModule::write(const char *key, const String& value) {
 
   Variant sessionKey = String(key, CopyString);
   Variant sessionVal = value;
-  Variant ret;
   TypedValue args[2] = { *sessionKey.asCell(), *sessionVal.asCell() };
-  g_context->invokeFuncFew(ret.asTypedValue(), m_write, obj.get(),
-                             nullptr, 2, args);
+  auto ret = Variant::attach(
+    g_context->invokeFuncFew(m_write, obj.get(), nullptr, 2, args)
+  );
 
   if (ret.isBoolean() && ret.toBoolean()) {
     return true;
@@ -454,9 +449,10 @@ bool SystemlibSessionModule::destroy(const char *key) {
   const auto& obj = getObject();
 
   Variant sessionKey = String(key, CopyString);
-  Variant ret;
-  g_context->invokeFuncFew(ret.asTypedValue(), m_destroy, obj.get(),
-                             nullptr, 1, sessionKey.asCell());
+  auto ret = Variant::attach(
+    g_context->invokeFuncFew(m_destroy, obj.get(),
+                             nullptr, 1, sessionKey.asCell())
+  );
 
   if (ret.isBoolean() && ret.toBoolean()) {
     return true;
@@ -470,9 +466,10 @@ bool SystemlibSessionModule::gc(int maxlifetime, int *nrdels) {
   const auto& obj = getObject();
 
   Variant maxLifeTime = maxlifetime;
-  Variant ret;
-  g_context->invokeFuncFew(ret.asTypedValue(), m_gc, obj.get(),
-                             nullptr, 1, maxLifeTime.asCell());
+  auto ret = Variant::attach(
+    g_context->invokeFuncFew(m_gc, obj.get(),
+                             nullptr, 1, maxLifeTime.asCell())
+  );
 
   if (ret.isInteger()) {
     if (nrdels) {
@@ -1883,10 +1880,8 @@ static struct SessionExtension final : Extension {
   }
 
   void threadInit() override {
-    // TODO: t5226715 We shouldn't need to check s_session here, but right now
-    // this is called for every request.
-    if (s_session) return;
-    s_session = new SessionRequestData;
+    assert(s_session.isNull());
+    s_session.getCheck();
     Extension* ext = ExtensionRegistry::get(s_session_ext_name);
     assert(ext);
     IniSetting::Bind(ext, IniSetting::PHP_INI_ALL,
@@ -1976,16 +1971,11 @@ static struct SessionExtension final : Extension {
   }
 
   void threadShutdown() override {
-    delete s_session;
-    s_session = nullptr;
+    s_session.destroy();
   }
 
   void requestInit() override {
     s_session->init();
-  }
-
-  void vscan(IMarker& mark) const override {
-    if (s_session) s_session->scan(mark);
   }
 
   /*

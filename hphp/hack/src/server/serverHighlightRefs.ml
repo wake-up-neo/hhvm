@@ -9,7 +9,6 @@
  *)
 
 open Core
-open ServerEnv
 
 let get_target symbol =
   let open SymbolOccurrence in
@@ -36,16 +35,16 @@ let highlight_symbol tcopt (line, char) path file_info symbol =
   let res = match get_target symbol with
     | Some target ->
       let results = FindRefsService.find_refs
-        (Some tcopt) target [] [(path, file_info)] in
+         tcopt target [] [(path, file_info)] in
       List.rev (List.map results snd)
     | None when symbol.SymbolOccurrence.type_ = SymbolOccurrence.LocalVar ->
       begin match Parser_heap.ParserHeap.get path with
-      | Some ast -> ServerFindLocals.go_from_ast ast line char
+      | Some (ast, _) -> ServerFindLocals.go_from_ast ast line char
       | None -> []
       end
     | None -> []
   in
-  List.map res Pos.to_absolute
+  List.map res Ide_api_types.pos_to_range
 
 let filter_result symbols result =
   let result = List.fold symbols ~init:result ~f:(fun result symbol ->
@@ -56,13 +55,13 @@ let filter_result symbols result =
   List.filter symbols ~f:(fun symbol ->
     symbol.SymbolOccurrence.pos = result.SymbolOccurrence.pos)
 
-let compare p1 p2 =
-  let line1, start1, _ = Pos.info_pos p1 in
-  let line2, start2, _ = Pos.info_pos p2 in
-  if line1 < line2 then -1
-  else if line1 > line2 then 1
-  else if start1 < start2 then -1
-  else if start1 > start2 then 1
+let compare r1 r2 =
+  let open Ide_api_types in
+  let s1, s2 = r1.st, r2.st in
+  if s1.line < s2.line then -1
+  else if s1.line > s2.line then 1
+  else if s1.column < s2.column then -1
+  else if s1.column > s2.column then 1
   else 0
 
 let rec combine_result l l1 l2 =
@@ -80,26 +79,8 @@ let rec combine_result l l1 l2 =
       | _ -> l
     end
 
-let go_from_file (p, line, column) env =
-  let (path, file_info, ast, symbols) = SMap.find_unsafe p env.symbols_cache in
-  let symbols = List.filter symbols (fun symbol ->
-    IdentifySymbolService.is_target line column symbol.SymbolOccurrence.pos) in
-  match symbols with
-  | symbol::_ ->
-    ServerIdeUtils.oldify_file_info path file_info;
-    Parser_heap.ParserHeap.add path ast;
-    let {FileInfo.funs; classes; typedefs;_} = file_info in
-    NamingGlobal.make_env ~funs ~classes ~typedefs ~consts:[];
-    let symbols = filter_result symbols symbol in
-    let res = List.fold symbols ~init:[] ~f:(fun acc symbol ->
-      combine_result [] acc
-        (highlight_symbol env.tcopt (line, column) path file_info symbol)) in
-    ServerIdeUtils.revive_file_info path file_info;
-    res
-  | _ -> []
-
 let go (content, line, char) tcopt =
-  ServerIdentifyFunction.get_occurrence_and_map content line char
+  ServerIdentifyFunction.get_occurrence_and_map tcopt content line char
     ~f:begin fun path file_info symbols ->
       match symbols with
       | symbol::_ ->

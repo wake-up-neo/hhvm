@@ -22,12 +22,18 @@ type monitor_config =
     load_script_log_file: string;
   }
 
-(**
- * Function that initializes the common state and returns a list of individual
- * processes starters.
- *)
-type monitor_starter =
-   (unit -> (ServerProcess.process_data list))
+module type Server_config = sig
+
+  type server_start_options
+
+  (** Start the server. Optionally takes in the exit code of the previously
+   * running server that exited. *)
+  val start_server : server_start_options -> int option ->
+    ServerProcess.process_data
+
+  (** Callback to run when server exits *)
+  val on_server_exit : monitor_config -> unit
+end
 
 type connection_error =
   | Server_missing

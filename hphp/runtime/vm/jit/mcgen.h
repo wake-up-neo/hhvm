@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,6 +17,7 @@
 #ifndef incl_HPHP_JIT_MCGEN_H_
 #define incl_HPHP_JIT_MCGEN_H_
 
+#include "hphp/runtime/vm/jit/code-cache.h"
 #include "hphp/runtime/vm/jit/ir-unit.h"
 #include "hphp/runtime/vm/jit/region-selection.h"
 #include "hphp/runtime/vm/jit/types.h"
@@ -31,6 +32,8 @@ namespace jit {
 
 struct IRUnit;
 struct Vunit;
+
+namespace tc { struct ThreadTCBuffer; }
 
 /*
  * Arguments for the translate() entry points in Translator.
@@ -86,25 +89,40 @@ struct TransEnv {
 
 namespace mcgen {
 
+struct UseThreadLocalTC {
+  UseThreadLocalTC(UseThreadLocalTC&&) = delete;
+  UseThreadLocalTC& operator=(UseThreadLocalTC&&) = delete;
+
+#ifdef NDEBUG
+  explicit UseThreadLocalTC(tc::ThreadTCBuffer&) {}
+#else
+  explicit UseThreadLocalTC(tc::ThreadTCBuffer& buf);
+  ~UseThreadLocalTC();
+
+private:
+  tc::ThreadTCBuffer& m_buf;
+#endif
+};
+
+struct ReadThreadLocalTC {
+  ReadThreadLocalTC(ReadThreadLocalTC&&) = delete;
+  ReadThreadLocalTC& operator=(ReadThreadLocalTC&&) = delete;
+
+#ifdef NDEBUG
+  explicit ReadThreadLocalTC(const tc::ThreadTCBuffer&) {}
+#else
+  explicit ReadThreadLocalTC(const tc::ThreadTCBuffer& m_buf);
+  ~ReadThreadLocalTC();
+
+private:
+  const tc::ThreadTCBuffer& m_buf;
+#endif
+};
+
 /*
  * Look up or translate a func prologue or func body.
  */
-TCA getFuncPrologue(Func* func, int nPassed, ActRec* ar = nullptr,
-                    bool forRegeneratePrologue = false);
-
-/*
- * Get the entry point for the body of func. The returned address will be for
- * a func-body dispatch should the function contain DV initializers, otherwise
- * it will correspond to the translation for the entry src-key of func.
- */
-TCA getFuncBody(Func* func);
-
-/*
- * Find or create a translation for `args'. Returns TCA of "best" current
- * translation. May return nullptr if it is currently impossible to create a
- * translation.
- */
-TCA getTranslation(const TransArgs& args);
+TCA getFuncPrologue(Func* func, int nPassed);
 
 /*
  * Create a live or profile retranslation based on args.
@@ -112,17 +130,31 @@ TCA getTranslation(const TransArgs& args);
  * Will return null if the write-lease could not be obtained or a translation
  * could not be generated.
  */
-TCA retranslate(TransArgs args);
+TCA retranslate(TransArgs args, const RegionContext& ctx);
 
 /*
- * Generate an optimized translation for sk using profile data from transId.
+ * Regionize and optimize the given function using profile data.
+ *
+ * Returns true iff the function has been successfully optimized.
  */
-TCA retranslateOpt(SrcKey sk, TransID transId);
+bool retranslateOpt(FuncId funcId);
+
+/*
+ * In JitPGO mode, check whether enough profile data has been collected and,
+ * if we haven't retranslated
+ */
+void checkRetranslateAll();
 
 /*
  * Called once when the JIT is activated to initialize internal mcgen structures
  */
 void processInit();
+
+/*
+ * Called once before process shutdown. May block to wait for any pending JIT
+ * worker threads.
+ */
+void processExit();
 
 /*
  * True iff mcgen::processInit() has been called
@@ -139,6 +171,26 @@ int64_t jitInitTime();
  * `transKind'.
  */
 bool dumpTCAnnotation(const Func& func, TransKind transKind);
+
+/*
+ * Is the thread local TC in use
+ */
+bool isLocalTCEnabled();
+
+/*
+ * Expected size of all thread local TC buffers
+ */
+size_t localTCSize();
+
+/*
+ * Per-thread cached TC buffer
+ */
+TCA cachedLocalTCBuffer();
+
+/*
+ * Is still a pending call to retranslateAll()
+ */
+bool retranslateAllPending();
 
 }}}
 

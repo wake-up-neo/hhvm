@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -92,8 +92,11 @@ int64_t BZ2File::readImpl(char * buf, int64_t length) {
    * to BZ_STREAM_END, but it's not actually EOF, and you can keep reading from
    * the file - so, only set EOF after a failed read. This matches PHP5.
    */
-  if (len == 0) {
+  if (len <= 0) {
     setEof(true);
+    if (len < 0) {
+      return -1;
+    }
   }
   return len;
 }

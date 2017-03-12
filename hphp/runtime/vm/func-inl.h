@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -25,7 +25,7 @@ namespace HPHP {
 template<class SerDe>
 void FPIEnt::serde(SerDe& sd) {
   sd(m_fpushOff)
-    (m_fcallOff)
+    (m_fpiEndOff)
     (m_fpOff)
     // These fields are recomputed by sortFPITab:
     // (m_parentIndex)
@@ -137,6 +137,16 @@ inline StrNR Func::fullNameStr() const {
   return StrNR(m_fullName);
 }
 
+inline const StringData* Func::displayName() const {
+  auto const target = dynCallTarget();
+  return LIKELY(!target) ? name() : target->name();
+}
+
+inline const StringData* Func::fullDisplayName() const {
+  auto const target = dynCallTarget();
+  return LIKELY(!target) ? fullName() : target->fullName();
+}
+
 inline const NamedEntity* Func::getNamedEntity() const {
   assert(!shared()->m_preClass);
   return *reinterpret_cast<const LowPtr<const NamedEntity>*>(&m_namedEntity);
@@ -220,8 +230,17 @@ inline bool Func::contains(Offset offset) const {
 ///////////////////////////////////////////////////////////////////////////////
 // Return type.
 
-inline MaybeDataType Func::returnType() const {
-  return shared()->m_returnType;
+inline MaybeDataType Func::hniReturnType() const {
+  auto const ex = extShared();
+  return ex ? ex->m_hniReturnType : folly::none;
+}
+
+inline RepoAuthType Func::repoReturnType() const {
+  return shared()->m_repoReturnType;
+}
+
+inline RepoAuthType Func::repoAwaitedReturnType() const {
+  return shared()->m_repoAwaitedReturnType;
 }
 
 inline bool Func::isReturnByValue() const {
@@ -282,6 +301,12 @@ inline int Func::numIterators() const {
   return shared()->m_numIterators;
 }
 
+inline int Func::numClsRefSlots() const {
+  auto const ex = extShared();
+  if (LIKELY(!ex)) return shared()->m_numClsRefSlots;
+  return ex->m_actualNumClsRefSlots;
+}
+
 inline Id Func::numNamedLocals() const {
   return shared()->m_localNames.size();
 }
@@ -297,6 +322,12 @@ inline LowStringPtr const* Func::localNames() const {
 
 inline int Func::maxStackCells() const {
   return m_maxStackCells;
+}
+
+inline int Func::numSlotsInFrame() const {
+  return shared()->m_numLocals +
+    shared()->m_numIterators * (sizeof(Iter) / sizeof(Cell)) +
+    (numClsRefSlots() * sizeof(Class*) + sizeof(Cell) - 1) / sizeof(Cell);
 }
 
 inline bool Func::hasForeignThis() const {
@@ -329,9 +360,8 @@ inline bool Func::isMethod() const {
   return !isPseudoMain() && (bool)baseCls();
 }
 
-inline bool Func::isTraitMethod() const {
-  const PreClass* pcls = preClass();
-  return pcls && (pcls->attrs() & AttrTrait);
+inline bool Func::isFromTrait() const {
+  return m_attrs & AttrTrait;
 }
 
 inline bool Func::isPublic() const {
@@ -342,13 +372,16 @@ inline bool Func::isStatic() const {
   return m_attrs & AttrStatic;
 }
 
-inline bool Func::isStaticInProlog() const {
-  return
-    (m_attrs & (AttrStatic | AttrRequiresThis)) == AttrStatic;
+inline bool Func::isStaticInPrologue() const {
+  return (m_attrs & (AttrStatic | AttrRequiresThis)) == AttrStatic;
 }
 
 inline bool Func::requiresThisInBody() const {
   return (m_attrs & AttrRequiresThis) && !isClosureBody();
+}
+
+inline bool Func::hasThisVaries() const {
+  return mayHaveThis() && !requiresThisInBody();
 }
 
 inline bool Func::isAbstract() const {
@@ -363,6 +396,15 @@ inline bool Func::isPreFunc() const {
   return m_isPreFunc;
 }
 
+inline bool Func::isMemoizeWrapper() const {
+  return shared()->m_isMemoizeWrapper;
+}
+
+inline const StringData* Func::memoizeImplName() const {
+  assertx(isMemoizeWrapper());
+  return genMemoizeImplName(name());
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // Builtins.
 
@@ -375,8 +417,23 @@ inline bool Func::isCPPBuiltin() const {
   return UNLIKELY(!!ex) && ex->m_builtinFuncPtr;
 }
 
+inline bool Func::readsCallerFrame() const {
+  return m_attrs & AttrReadsCallerFrame;
+}
+
+inline bool Func::writesCallerFrame() const {
+  return m_attrs & AttrWritesCallerFrame;
+}
+
+inline bool Func::accessesCallerFrame() const {
+  return m_attrs & (AttrReadsCallerFrame | AttrWritesCallerFrame);
+}
+
 inline BuiltinFunction Func::builtinFuncPtr() const {
   if (auto const ex = extShared()) {
+    if (UNLIKELY(ex->m_dynCallTarget != nullptr)) {
+      return ex->m_dynCallTarget->builtinFuncPtr();
+    }
     return ex->m_builtinFuncPtr;
   }
   return nullptr;
@@ -384,7 +441,24 @@ inline BuiltinFunction Func::builtinFuncPtr() const {
 
 inline BuiltinFunction Func::nativeFuncPtr() const {
   if (auto const ex = extShared()) {
+    if (UNLIKELY(ex->m_dynCallTarget != nullptr)) {
+      return ex->m_dynCallTarget->nativeFuncPtr();
+    }
     return ex->m_nativeFuncPtr;
+  }
+  return nullptr;
+}
+
+inline Func* Func::dynCallWrapper() const {
+  if (auto const ex = extShared()) {
+    return ex->m_dynCallWrapper;
+  }
+  return nullptr;
+}
+
+inline Func* Func::dynCallTarget() const {
+  if (auto const ex = extShared()) {
+    return ex->m_dynCallTarget;
   }
   return nullptr;
 }
@@ -512,6 +586,29 @@ inline const Func::FPIEntVec& Func::fpitab() const {
   return shared()->m_fpitab;
 }
 
+inline const EHEnt* Func::findEH(Offset o) const {
+  assert(o >= base() && o < past());
+  return findEH(shared()->m_ehtab, o);
+}
+
+template<class Container>
+const typename Container::value_type*
+Func::findEH(const Container& ehtab, Offset o) {
+  const typename Container::value_type* eh = nullptr;
+
+  for (uint32_t i = 0, sz = ehtab.size(); i < sz; ++i) {
+    if (ehtab[i].m_base <= o && o < ehtab[i].m_past) {
+      eh = &ehtab[i];
+    }
+  }
+  return eh;
+}
+
+inline const FPIEnt* Func::findFPI(Offset o) const {
+  assertx(o >= base() && o < past());
+  return findFPI(fpitab().begin(), fpitab().end(), o);
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // JIT data.
 
@@ -535,13 +632,6 @@ inline void Func::setPrologue(int index, unsigned char* tca) {
   m_prologueTable[index] = tca;
 }
 
-inline int Func::getMaxNumPrologues(int numParams) {
-  // Maximum number of prologues is numParams + 2. The extra 2 are for the case
-  // where the number of actual params equals numParams and the case where the
-  // number of actual params is greater than numParams.
-  return numParams + 2;
-}
-
 ///////////////////////////////////////////////////////////////////////////////
 // Other methods.
 
@@ -554,6 +644,7 @@ inline int8_t& Func::maybeIntercepted() const {
 
 inline void Func::setAttrs(Attr attrs) {
   m_attrs = attrs;
+  assertx(IMPLIES(accessesCallerFrame(), isBuiltin() && !isMethod()));
 }
 
 inline void Func::setBaseCls(Class* baseCls) {
@@ -574,6 +665,28 @@ inline void Func::setHasPrivateAncestor(bool b) {
 inline void Func::setMethodSlot(Slot s) {
   assert(isMethod());
   m_methodSlot = s;
+}
+
+inline void Func::setDynCallWrapper(Func* f) {
+  assert(accessesCallerFrame());
+  assert(f->accessesCallerFrame());
+  assert(!f->dynCallWrapper());
+  assert(extShared());
+  assert(!dynCallWrapper() || dynCallWrapper() == f);
+  assert(!dynCallTarget());
+  assert(!f->dynCallTarget() || f->dynCallTarget() == this);
+  extShared()->m_dynCallWrapper = f;
+}
+
+inline void Func::setDynCallTarget(Func* f) {
+  assert(accessesCallerFrame());
+  assert(f->accessesCallerFrame());
+  assert(!f->dynCallTarget());
+  assert(extShared());
+  assert(!dynCallTarget() || dynCallTarget() == f);
+  assert(!dynCallWrapper());
+  assert(!f->dynCallWrapper() || f->dynCallWrapper() == this);
+  extShared()->m_dynCallTarget = f;
 }
 
 //////////////////////////////////////////////////////////////////////

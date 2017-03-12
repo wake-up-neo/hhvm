@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,22 +24,28 @@ namespace HPHP {
 struct Func;
 struct SrcKey;
 
-namespace jit { namespace mcgen {
+namespace jit {
+
+namespace tc {
+
+struct FuncMetaInfo;
+
+}
+
+namespace mcgen {
 
 /*
- * Regenerate all prologues of func that were previously generated.
- * The prologues are sorted in ascending order of profile counters.
- * For prologues with corresponding DV funclets, their corresponding
- * DV funclet will be regenerated right after them.  The idea is to
- * generate the function body right after calling this function, so
- * that all prologues are placed right before it, and with the hottest
- * prologues closer to it.
+ * Regenerate all prologues of func that were previously generated.  The
+ * prologues are sorted in ascending order of profile counters.  For prologues
+ * with corresponding DV funclets, their corresponding DV funclet will be
+ * regenerated right after them.  The idea is to generate the function body
+ * right after calling this function, so that all prologues are placed right
+ * before it, and with the hottest prologues closer to it.
  *
- * Returns the starting address for the translation corresponding to
- * triggerSk, if such translation is generated; otherwise returns
- * nullptr.
+ * Returns true iff the body of the function was included in at least one
+ * dvInit translation.
  */
-TCA regeneratePrologues(Func* func, SrcKey triggerSk, bool& includedBody);
+bool regeneratePrologues(Func* func, tc::FuncMetaInfo&);
 
 }}}
 

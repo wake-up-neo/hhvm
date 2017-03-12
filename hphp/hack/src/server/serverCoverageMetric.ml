@@ -29,8 +29,9 @@ let count_exprs fn type_acc =
     SMap.add acc ~key:kind ~data:(incr_counter lvl (r, p, counter))
   ) type_acc SMap.empty
 
-let accumulate_types fn defs =
+let accumulate_types fn defs tcopt =
   let type_acc = Hashtbl.create 0 in
+  let tcopt = TypecheckerOptions.make_permissive tcopt in
   Typing.with_expr_hook (fun (p, e) ty ->
     let expr_kind_opt = match e with
       | Nast.Array_get _ -> Some "array_get"
@@ -44,7 +45,6 @@ let accumulate_types fn defs =
     Option.iter expr_kind_opt (fun kind ->
       Hashtbl.replace type_acc (p, kind) ty))
     (fun () ->
-      let tcopt = TypecheckerOptions.permissive in
       ignore (Typing_check_utils.check_defs tcopt fn defs));
   type_acc
 
@@ -90,34 +90,36 @@ let relativize root path =
   else None
 
 (* Returns a list of (file_name, assoc list of counts) *)
-let get_coverage root neutral fnl =
+let get_coverage root tcopt neutral fnl  =
   SharedMem.invalidate_caches();
   let files_info = FileInfoStore.load () in
   let file_counts = List.rev_filter_map fnl begin fun fn ->
-    match Relative_path.Map.get files_info fn with
+    let relativized_fn = relativize root (Relative_path.to_absolute fn) in
+    match relativized_fn with
     | None -> None
-    | Some defs ->
-        let type_acc = accumulate_types fn defs in
-        let counts = count_exprs fn type_acc in
-        Some (fn, counts)
+    | Some relativized_fn ->
+      match Relative_path.Map.get files_info fn with
+      | None -> None
+      | Some defs ->
+          let type_acc = accumulate_types fn defs tcopt in
+          let counts = count_exprs fn type_acc in
+          Some (relativized_fn, counts)
   end in
-  let relativize_list = List.map ~f:(fun (p, c) ->
-    (relativize root (Relative_path.to_absolute p) |> unsafe_opt, c)) in
-  let result = relativize_list file_counts in
-  mk_trie neutral result
+  mk_trie neutral file_counts
 
 let go_ fn genv env =
   let root = Path.make fn in
   let module RP = Relative_path in
   let next_files = compose
-    (List.map ~f:(RP.create RP.Root))
+    (fun paths -> paths |> List.map ~f:(RP.create RP.Root) |> Bucket.of_list)
     (genv.ServerEnv.indexer FindUtils.is_php)
   in
   FileInfoStore.store env.ServerEnv.files_info;
+  let tcopt = env.ServerEnv.tcopt in
   let result =
     MultiWorker.call
       genv.ServerEnv.workers
-      ~job:(get_coverage root)
+      ~job:(get_coverage root tcopt)
       ~neutral:None
       ~merge:merge_trie_opt
       ~next:next_files
@@ -128,5 +130,5 @@ let go_ fn genv env =
 let go fn genv env =
   try go_ fn genv env
   with Failure _ | Invalid_argument _ ->
-    print_string "Coverage collection failed!";
+    Hh_logger.log "Coverage collection failed!";
     None

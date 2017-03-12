@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -75,11 +75,11 @@ struct apcExtension final : Extension {
 
 Variant HHVM_FUNCTION(apc_add,
                       const Variant& key_or_array,
-                      const Variant& var = null_variant,
+                      const Variant& var = uninit_variant,
                       int64_t ttl = 0);
 Variant HHVM_FUNCTION(apc_store,
                       const Variant& key_or_array,
-                      const Variant& var = null_variant,
+                      const Variant& var = uninit_variant,
                       int64_t ttl = 0);
 bool HHVM_FUNCTION(apc_store_as_primed_do_not_use,
                    const String& key,

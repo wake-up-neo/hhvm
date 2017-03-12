@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -38,7 +38,6 @@
 #include "hphp/runtime/vm/jit/ir-opcode.h"
 #include "hphp/runtime/vm/jit/ssa-tmp.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
-#include "hphp/runtime/vm/jit/translator-runtime.h"
 #include "hphp/runtime/vm/jit/type.h"
 #include "hphp/runtime/vm/jit/vasm-gen.h"
 #include "hphp/runtime/vm/jit/vasm-instr.h"
@@ -60,10 +59,32 @@ void cgLdCns(IRLS& env, const IRInstruction* inst) {
   auto& v = vmain(env);
   assertx(inst->taken());
 
+  auto checkUninit = [&] {
+    auto const sf = v.makeReg();
+    irlower::emitTypeTest(
+      v, env, TUninit, dst.reg(1), dst.reg(0), sf,
+      [&] (ConditionCode cc, Vreg sfr) {
+        fwdJcc(v, env, cc, sfr, inst->taken());
+      }
+    );
+  };
+
   if (rds::isNormalHandle(ch)) {
     auto const sf = checkRDSHandleInitialized(v, ch);
     fwdJcc(v, env, CC_NE, sf, inst->taken());
     loadTV(v, inst->dst(), dst, rvmtl()[ch]);
+
+    // When a CLIServer is active requests running in script mode will define
+    // the stdio constants which require lookup via special callbacks. To not
+    // interfere with the server these constants will be defined as
+    // non-persistent.
+    if (!RuntimeOption::RepoAuthoritative) {
+      if (strcasecmp(cnsName->data(), "stdin") == 0 ||
+          strcasecmp(cnsName->data(), "stdout") == 0 ||
+          strcasecmp(cnsName->data(), "stderr") == 0) {
+        checkUninit();
+      }
+    }
     return;
   }
   assertx(rds::isPersistentHandle(ch));
@@ -72,13 +93,7 @@ void cgLdCns(IRLS& env, const IRInstruction* inst) {
 
   if (cns.m_type == KindOfUninit) {
     loadTV(v, inst->dst(), dst, rvmtl()[ch]);
-    auto const sf = v.makeReg();
-    irlower::emitTypeTest(
-      v, env, TUninit, dst.reg(1), dst.reg(0), sf,
-      [&] (ConditionCode cc, Vreg sf) {
-        fwdJcc(v, env, cc, sf, inst->taken());
-      }
-    );
+    checkUninit();
   } else {
     // Statically known constant.
     assertx(!dst.isFullSIMD());
@@ -109,7 +124,6 @@ void cgLdCns(IRLS& env, const IRInstruction* inst) {
         v << copy{v.cns(cns.m_data.dbl), dst.reg(0)};
         break;
       case KindOfUninit:
-      case KindOfClass:
         not_reached();
     }
     v << copy{v.cns(cns.m_type), dst.reg(1)};
@@ -117,8 +131,6 @@ void cgLdCns(IRLS& env, const IRInstruction* inst) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-
-namespace {
 
 ALWAYS_INLINE
 const Cell* lookupCnsImpl(StringData* nm) {
@@ -157,6 +169,18 @@ Cell lookupCnsHelper(StringData* nm, bool error) {
 Cell lookupCnsHelperNormal(rds::Handle tv_handle,
                            StringData* nm, bool error) {
   assertx(rds::isNormalHandle(tv_handle));
+  if (UNLIKELY(rds::isHandleInit(tv_handle))) {
+    auto const tv = &rds::handleToRef<TypedValue>(tv_handle);
+    if (tv->m_data.pref != nullptr) {
+      auto callback = (Unit::SystemConstantCallback)(tv->m_data.pref);
+      const Cell* cns = callback().asTypedValue();
+      if (LIKELY(cns->m_type != KindOfUninit)) {
+        Cell c1;
+        cellDup(*cns, c1);
+        return c1;
+      }
+    }
+  }
   assertx(!rds::isHandleInit(tv_handle));
 
   return lookupCnsHelper(nm, error);
@@ -226,6 +250,10 @@ Cell lookupCnsUHelperPersistent(rds::Handle tv_handle,
   return lookupCnsHelper(fallback, false);
 }
 
+///////////////////////////////////////////////////////////////////////////////
+
+namespace {
+
 void implLookupCns(IRLS& env, const IRInstruction* inst) {
   auto const cnsName = inst->src(0)->strVal();
   auto const ch = makeCnsHandle(cnsName, false);
@@ -280,17 +308,6 @@ void cgLookupCnsU(IRLS& env, const IRInstruction* inst) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-namespace {
-
-Cell lookupClsCnsHelper(TypedValue* cache, const NamedEntity* ne,
-                        const StringData* cls, const StringData* cns) {
-  auto const clsCns = g_context->lookupClsCns(ne, cls, cns);
-  cellDup(clsCns, *cache);
-  return clsCns;
-}
-
-}
-
 void cgLdClsCns(IRLS& env, const IRInstruction* inst) {
   auto const extra = inst->extra<LdClsCns>();
   auto const link = rds::bindClassConstant(extra->clsName, extra->cnsName);
@@ -300,6 +317,13 @@ void cgLdClsCns(IRLS& env, const IRInstruction* inst) {
   auto const sf = checkRDSHandleInitialized(v, link.handle());
   fwdJcc(v, env, CC_NE, sf, inst->taken());
   v << lea{rvmtl()[link.handle()], dst};
+}
+
+Cell lookupClsCnsHelper(TypedValue* cache, const NamedEntity* ne,
+                        const StringData* cls, const StringData* cns) {
+  auto const clsCns = g_context->lookupClsCns(ne, cls, cns);
+  cellDup(clsCns, *cache);
+  return clsCns;
 }
 
 void cgInitClsCns(IRLS& env, const IRInstruction* inst) {

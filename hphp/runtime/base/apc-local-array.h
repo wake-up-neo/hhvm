@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -40,7 +40,7 @@ struct MArrayIter;
  * via APC. It has a pointer to the APCArray that it represents and it may
  * cache values locally depending on the type accessed and/or the operation.
  */
-struct APCLocalArray final : private ArrayData,
+struct APCLocalArray final : ArrayData,
                              type_scan::MarkCountable<APCLocalArray> {
   template<class... Args> static APCLocalArray* Make(Args&&...);
 
@@ -48,14 +48,12 @@ struct APCLocalArray final : private ArrayData,
   static const Variant& GetValueRef(const ArrayData* ad, ssize_t pos);
   static bool ExistsInt(const ArrayData* ad, int64_t k);
   static bool ExistsStr(const ArrayData* ad, const StringData* k);
-  static ArrayData* LvalInt(ArrayData*, int64_t k, Variant *&ret,
-                            bool copy);
-  static constexpr auto LvalIntRef = &LvalInt;
-  static ArrayData* LvalStr(ArrayData*, StringData* k, Variant *&ret,
-                            bool copy);
-  static constexpr auto LvalStrRef = &LvalStr;
-  static ArrayData* LvalNew(ArrayData*, Variant *&ret, bool copy);
-  static constexpr auto LvalNewRef = &LvalNew;
+  static ArrayLval LvalInt(ArrayData*, int64_t k, bool copy);
+  static ArrayLval LvalIntRef(ArrayData*, int64_t k, bool copy);
+  static ArrayLval LvalStr(ArrayData*, StringData* k, bool copy);
+  static ArrayLval LvalStrRef(ArrayData*, StringData* k, bool copy);
+  static ArrayLval LvalNew(ArrayData*, bool copy);
+  static ArrayLval LvalNewRef(ArrayData*, bool copy);
   static ArrayData* SetInt(ArrayData*, int64_t k, Cell v, bool copy);
   static ArrayData* SetStr(ArrayData*, StringData* k, Cell v, bool copy);
   static ArrayData* SetRefInt(ArrayData*, int64_t k, Variant& v, bool copy);
@@ -77,7 +75,7 @@ struct APCLocalArray final : private ArrayData,
   static constexpr auto NvTryGetInt = &NvGetInt;
   static const TypedValue* NvGetStr(const ArrayData*, const StringData* k);
   static constexpr auto NvTryGetStr = &NvGetStr;
-  static void NvGetKey(const ArrayData*, TypedValue* out, ssize_t pos);
+  static Cell NvGetKey(const ArrayData*, ssize_t pos);
   static bool IsVectorData(const ArrayData* ad);
   static ssize_t IterBegin(const ArrayData*);
   static ssize_t IterLast(const ArrayData*);
@@ -141,13 +139,8 @@ private:
 
 public:
   void reap();
-  template<class F> void scan(F& mark) const {
-    //mark(m_arr);
-    if (m_localCache) {
-      for (unsigned i = 0, n = m_arr->capacity(); i < n; ++i) {
-        mark(m_localCache[i]);
-      }
-    }
+  void scan(type_scan::Scanner& scanner) const {
+    scanner.scan(m_localCache);
   }
 
 private:

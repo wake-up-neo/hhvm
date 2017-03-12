@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,7 +21,10 @@
 #include "hphp/runtime/base/string-data.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/req-containers.h"
+#include "hphp/runtime/base/tv-helpers.h"
 #include "hphp/runtime/vm/class.h"
+
+#include <boost/noncopyable.hpp>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -47,15 +50,13 @@ struct VariableSerializer {
     PHPOutput, //used by compiler to output scalar values into byte code
   };
 
-  enum class ArrayKind { PHP, Dict, Vec, Keyset };
-
   /**
    * Constructor and destructor.
    */
   explicit VariableSerializer(Type type, int option = 0, int maxRecur = 3);
-  ~VariableSerializer() {
-    if (m_arrayIds) req::destroy_raw(m_arrayIds);
-  }
+  ~VariableSerializer();
+  VariableSerializer(const VariableSerializer&) = delete;
+  VariableSerializer& operator=(const VariableSerializer&) = delete;
 
   // Use UnlimitSerializationScope to suspend this temporarily.
   static __thread int64_t serializationSizeLimit;
@@ -70,26 +71,16 @@ struct VariableSerializer {
   // It does not work with Serialize, JSON, APCSerialize, DebuggerSerialize.
   String serializeWithLimit(const Variant& v, int limit);
 
-  // Generic wrapper around pointers to various countable types. Used instead of
-  // void* because it preserves enough type information for the type scanners to
-  // understand it.
-  union PtrWrapper {
-    PtrWrapper(const StringData* p): pstr{p} {}
-    PtrWrapper(const ArrayData* p): parr{p} {}
-    PtrWrapper(const ObjectData* p): pobj{p} {}
-    PtrWrapper(const RefData* p): pref{p} {}
-    PtrWrapper(const ResourceData* p): pres{p} {}
-    PtrWrapper(const Variant* p): pvar{p} {}
-    // So pointer_hash<void> works
-    /* implicit */operator const void*() const { return pstr; }
-    const StringData* pstr;
-    const ArrayData* parr;
-    const ObjectData* pobj;
-    const RefData* pref;
-    const ResourceData* pres;
-    const Variant* pvar;
-  };
+  // for ext_json
+  void setDepthLimit(size_t depthLimit) { m_maxDepth = depthLimit; }
+  // for ext_std_variable
+  void incMaxCount() { m_maxCount++; }
 
+  Type getType() const { return m_type; }
+
+  enum class ArrayKind { PHP, Dict, Vec, Keyset };
+
+private:
   /**
    * Type specialized output functions.
    */
@@ -109,42 +100,78 @@ struct VariableSerializer {
 
   void writeNull();
   // what to write if recursive level is over limit?
-  void writeOverflow(PtrWrapper ptr, bool isObject = false);
+  void writeOverflow(const TypedValue& tv);
   void writeRefCount(); // for DebugDump only
 
   void writeArrayHeader(int size, bool isVectorData, ArrayKind kind);
-  void writeArrayKey(const Variant& key);
-  void writeArrayValue(const Variant& value);
-  void writeCollectionKey(const Variant& key);
-  void writeCollectionKeylessPrefix();
-  void writeArrayFooter();
+  void writeArrayKey(const Variant& key, ArrayKind kind);
+  void writeArrayValue(
+    const Variant& value,
+    ArrayKind kind
+  );
+  void writeCollectionKey(
+    const Variant& key,
+    ArrayKind kind
+  );
+  void writeArrayFooter(ArrayKind kind);
   void writeSerializableObject(const String& clsname, const String& serialized);
 
   /**
    * Helpers.
    */
   void indent();
-  void setDepthLimit(size_t depthLimit) { m_maxDepth = depthLimit; }
   void setReferenced(bool referenced) { m_referenced = referenced;}
   void setRefCount(int count) { m_refCount = count;}
-  void incMaxCount() { m_maxCount++; }
-  bool incNestedLevel(PtrWrapper ptr, bool isObject = false);
-  void decNestedLevel(PtrWrapper ptr);
+  bool incNestedLevel(const TypedValue& tv);
+  void decNestedLevel(const TypedValue& tv);
   void pushObjectInfo(const String& objClass, int objId, char objCode);
   void popObjectInfo();
   void pushResourceInfo(const String& rsrcName, int rsrcId);
   void popResourceInfo();
-  Type getType() const { return m_type; }
 
-private:
+  // Sentinel used to indicate that a member of SavedRefMap has a count but no ID.
+  static constexpr int NO_ID = -1;
 
-  using ReqPtrCtrMap = req::hash_map<PtrWrapper, int, pointer_hash<void>>;
+  struct SavedRefMap {
+    ~SavedRefMap();
+
+    struct MapData : boost::noncopyable {
+      MapData() : m_count(0), m_id(-1) { }
+      int m_count;
+      int m_id;
+    };
+
+    MapData& operator[](const TypedValue& tv) {
+      auto& elm = m_mapping[tv];
+      if (!elm.m_count) tvRefcountedIncRef(&tv);
+      return elm;
+    }
+
+    const MapData& operator[](const TypedValue& tv) const {
+      return m_mapping.at(tv);
+    }
+
+  private:
+    struct TvHash {
+      std::size_t operator()(const TypedValue& tv) const {
+        return pointer_hash<void>()(tv.m_data.parr);
+      }
+    };
+
+    struct TvEq {
+      bool operator()(const TypedValue& a, const TypedValue& b) const {
+        return a.m_data.parr == b.m_data.parr;
+      }
+    };
+
+    req::hash_map<TypedValue, MapData, TvHash, TvEq> m_mapping;
+  };
+
   Type m_type;
   int m_option;                  // type specific extra options
   StringBuffer *m_buf;
   int m_indent;
-  ReqPtrCtrMap m_counts;         // counting seen arrays for recursive levels
-  ReqPtrCtrMap *m_arrayIds;      // reference ids for objs/arrays
+  SavedRefMap m_refs;            // reference ids and counts for objs/arrays
   int m_valueCount;              // Current ref index
   bool m_referenced;             // mark current array element as reference
   int m_refCount;                // current variable's reference count
@@ -181,6 +208,28 @@ private:
   // Otherwise, writeOverflow will be invoked instead.
   void preventOverflow(const Object& v, const std::function<void()>& func);
   void writePropertyKey(const String& prop);
+
+  void serializeRef(const TypedValue* tv, bool isArrayKey);
+  // Serialize a Variant recursively.
+  // The last param noQuotes indicates to serializer to not put the output in
+  // double quotes (used when printing the output of a __toDebugDisplay() of
+  // an object when it is a string.
+  void serializeVariant(const Variant&,
+                        bool isArrayKey = false,
+                        bool skipNestCheck = false,
+                        bool noQuotes = false);
+  void serializeObject(const Object&);
+  void serializeObject(const ObjectData*);
+  void serializeObjectImpl(const ObjectData* obj);
+  void serializeCollection(ObjectData* obj);
+  void serializeArray(const Array&, bool isObject = false);
+  void serializeArray(const ArrayData*, bool skipNestCheck = false);
+  void serializeArrayImpl(const ArrayData* arr);
+  void serializeResource(const ResourceData*);
+  void serializeResourceImpl(const ResourceData* res);
+  void serializeString(const String&);
+
+  Array getSerializeProps(const ObjectData* obj) const;
 };
 
 // TODO: Move to util/folly?

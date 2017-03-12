@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,11 +22,12 @@
 #include "hphp/runtime/vm/jit/perf-counters.h"
 #include "hphp/runtime/vm/jit/prof-data.h"
 #include "hphp/runtime/vm/jit/service-requests.h"
-#include "hphp/runtime/vm/jit/stub-alloc.h"
 #include "hphp/runtime/vm/jit/smashable-instr.h"
+#include "hphp/runtime/vm/jit/stub-alloc.h"
 #include "hphp/runtime/vm/jit/tc.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/unwind-itanium.h"
+#include "hphp/runtime/vm/jit/write-lease.h"
 
 #include "hphp/runtime/vm/runtime.h"
 #include "hphp/runtime/vm/treadmill.h"
@@ -44,6 +45,158 @@ namespace HPHP { namespace jit { namespace svcreq {
 
 namespace {
 
+///////////////////////////////////////////////////////////////////////////////
+
+RegionContext getContext(SrcKey sk) {
+  RegionContext ctx {
+    sk.func(), sk.offset(), liveSpOff(),
+    sk.resumed(), sk.hasThis()
+  };
+
+  auto const fp = vmfp();
+  auto const sp = vmsp();
+
+  always_assert(ctx.func == fp->m_func);
+
+  auto const ctxClass = ctx.func->cls();
+  // Track local types.
+  for (uint32_t i = 0; i < fp->m_func->numLocals(); ++i) {
+    ctx.liveTypes.push_back(
+      { Location::Local{i}, typeFromTV(frame_local(fp, i), ctxClass) }
+    );
+    FTRACE(2, "added live type {}\n", show(ctx.liveTypes.back()));
+  }
+
+  // Track stack types and pre-live ActRecs.
+  int32_t stackOff = 0;
+  visitStackElems(
+    fp, sp, ctx.bcOffset,
+    [&] (const ActRec* ar, Offset) {
+      auto const objOrCls =
+        !ar->func()->cls() ? TNullptr :
+        (ar->hasThis()  ?
+         Type::SubObj(ar->getThis()->getVMClass()) :
+         Type::SubCls(ar->getClass()));
+
+      ctx.preLiveARs.push_back({ stackOff, ar->func(), objOrCls });
+      FTRACE(2, "added prelive ActRec {}\n", show(ctx.preLiveARs.back()));
+      stackOff += kNumActRecCells;
+    },
+    [&] (const TypedValue* tv) {
+      ctx.liveTypes.push_back(
+        { Location::Stack{ctx.spOffset - stackOff}, typeFromTV(tv, ctxClass) }
+      );
+      stackOff++;
+      FTRACE(2, "added live type {}\n", show(ctx.liveTypes.back()));
+    }
+  );
+
+  // Get the bytecode for `ctx', skipping Asserts.
+  auto const op = [&] {
+    auto pc = ctx.func->unit()->at(ctx.bcOffset);
+    while (isTypeAssert(peek_op(pc))) {
+      pc += instrLen(pc);
+    }
+    return peek_op(pc);
+  }();
+  assertx(!isTypeAssert(op));
+
+  // Track the mbase type.  The member base register is only valid after a
+  // member base op and before a member final op---and only AssertRAT*'s are
+  // allowed to intervene in a sequence of bytecode member operations.
+  if (isMemberDimOp(op) || isMemberFinalOp(op)) {
+    auto const mbase = vmMInstrState().base;
+    assertx(mbase != nullptr);
+
+    ctx.liveTypes.push_back({ Location::MBase{}, typeFromTV(mbase, ctxClass) });
+    FTRACE(2, "added live type {}\n", show(ctx.liveTypes.back()));
+  }
+
+  return ctx;
+}
+
+bool liveFrameIsPseudoMain() {
+  auto const ar = vmfp();
+  if (!(ar->func()->attrs() & AttrMayUseVV)) return false;
+  return ar->hasVarEnv() && ar->getVarEnv()->isGlobalScope();
+}
+
+/*
+ * Create a translation for the SrcKey specified in args.
+ *
+ * If a translation for this SrcKey already exists it will be returned. The kind
+ * of translation created will be selected based on the SrcKey specified.
+ */
+TCA getTranslation(TransArgs args) {
+  auto sk = args.sk;
+  sk.func()->validate();
+
+  if (liveFrameIsPseudoMain() && !RuntimeOption::EvalJitPseudomain) {
+    SKTRACE(2, sk, "punting on pseudoMain\n");
+    return nullptr;
+  }
+
+  if (!RID().getJit()) {
+    SKTRACE(2, sk, "punting because jitting was disabled\n");
+    return nullptr;
+  }
+
+  if (auto const sr = tc::findSrcRec(sk)) {
+    if (auto const tca = sr->getTopTranslation()) {
+      SKTRACE(2, sk, "getTranslation: found %p\n", tca);
+      return tca;
+    }
+  }
+
+  args.kind = tc::profileFunc(args.sk.func()) ?
+    TransKind::Profile : TransKind::Live;
+
+  if (!tc::shouldTranslate(args.sk.func(), args.kind)) return nullptr;
+
+  LeaseHolder writer(sk.func(), args.kind);
+  if (!writer || !tc::shouldTranslate(sk.func(), args.kind)) return nullptr;
+
+  if (RuntimeOption::EvalFailJitPrologs && sk.op() == Op::FCallAwait) {
+    return nullptr;
+  }
+
+  tc::createSrcRec(sk, liveSpOff());
+
+  auto sr = tc::findSrcRec(sk);
+  always_assert(sr);
+
+  if (auto const tca = sr->getTopTranslation()) {
+    // Handle extremely unlikely race; someone may have just added the first
+    // translation for this SrcRec while we did a non-blocking wait on the
+    // write lease in createSrcRec().
+    return tca;
+  }
+
+  return mcgen::retranslate(args, getContext(args.sk));
+}
+
+TCA getFuncBody(Func* func) {
+  auto tca = func->getFuncBody();
+  if (tca != tc::ustubs().funcBodyHelperThunk) return tca;
+
+  LeaseHolder writer(func, TransKind::Profile);
+  if (!writer) return nullptr;
+
+  tca = func->getFuncBody();
+  if (tca != tc::ustubs().funcBodyHelperThunk) return tca;
+
+  auto const dvs = func->getDVFunclets();
+  if (dvs.size() || func->hasThisVaries()) {
+    tca = tc::emitFuncBodyDispatch(func, dvs);
+  } else {
+    SrcKey sk(func, func->base(), false, func->mayHaveThis());
+    tca = getTranslation(TransArgs{sk});
+    if (tca) func->setFuncBody(tca);
+  }
+
+  return tca;
+}
+
 /*
  * Runtime service handler that patches a jmp to the translation of u:dest from
  * toSmash.
@@ -52,10 +205,10 @@ TCA bindJmp(TCA toSmash, SrcKey destSk, ServiceRequest req, TransFlags trflags,
             bool& smashed) {
   auto args = TransArgs{destSk};
   args.flags = trflags;
-  auto tDest = mcgen::getTranslation(args);
+  auto tDest = getTranslation(args);
   if (!tDest) return nullptr;
 
-  LeaseHolder writer(GetWriteLease(), destSk.func(), TransKind::Profile);
+  LeaseHolder writer(destSk.func(), TransKind::Profile);
   if (!writer) return tDest;
 
   if (req == REQ_BIND_ADDR) {
@@ -65,7 +218,49 @@ TCA bindJmp(TCA toSmash, SrcKey destSk, ServiceRequest req, TransFlags trflags,
   return tc::bindJmp(toSmash, destSk, trflags, smashed);
 }
 
+void syncFuncBodyVMRegs(ActRec* fp, void* sp) {
+  auto& regs = vmRegsUnsafe();
+  regs.fp = fp;
+  regs.stack.top() = (Cell*)sp;
+
+  auto const nargs = fp->numArgs();
+  auto const nparams = fp->func()->numNonVariadicParams();
+  auto const& paramInfo = fp->func()->params();
+
+  auto firstDVI = InvalidAbsoluteOffset;
+
+  for (auto i = nargs; i < nparams; ++i) {
+    auto const dvi = paramInfo[i].funcletOff;
+    if (dvi != InvalidAbsoluteOffset) {
+      firstDVI = dvi;
+      break;
+    }
+  }
+  if (firstDVI != InvalidAbsoluteOffset) {
+    regs.pc = fp->m_func->unit()->entry() + firstDVI;
+  } else {
+    regs.pc = fp->m_func->getEntry();
+  }
+}
+
 ///////////////////////////////////////////////////////////////////////////////
+
+}
+
+TCA funcBodyHelper(ActRec* fp) {
+  assert_native_stack_aligned();
+  void* const sp = reinterpret_cast<Cell*>(fp) - fp->func()->numSlotsInFrame();
+  syncFuncBodyVMRegs(fp, sp);
+  tl_regState = VMRegState::CLEAN;
+
+  auto const func = const_cast<Func*>(fp->m_func);
+  auto tca = getFuncBody(func);
+  if (!tca) {
+    tca = tc::ustubs().resumeHelper;
+  }
+
+  tl_regState = VMRegState::DIRTY;
+  return tca;
 }
 
 TCA handleServiceRequest(ReqInfo& info) noexcept {
@@ -96,21 +291,30 @@ TCA handleServiceRequest(ReqInfo& info) noexcept {
 
     case REQ_RETRANSLATE: {
       INC_TPC(retranslate);
-      sk = SrcKey{liveFunc(), info.args[0].offset, liveResumed()};
+      sk = SrcKey{
+        liveFunc(), info.args[0].offset, liveResumed(), liveHasThis()
+      };
       auto trflags = info.args[1].trflags;
       auto args = TransArgs{sk};
       args.flags = trflags;
-      start = mcgen::retranslate(args);
+      start = mcgen::retranslate(args, getContext(args.sk));
       SKTRACE(2, sk, "retranslated @%p\n", start);
       break;
     }
 
     case REQ_RETRANSLATE_OPT: {
       sk = SrcKey::fromAtomicInt(info.args[0].sk);
-      auto transID = info.args[1].transID;
-      start = mcgen::retranslateOpt(sk, transID);
-      SKTRACE(2, sk, "retranslated-OPT: transId = %d  start: @%p\n", transID,
-              start);
+      if (mcgen::retranslateOpt(sk.funcID())) {
+        // Retranslation was successful. Resume execution at the new Optimize
+        // translation.
+        vmpc() = sk.unit()->at(sk.offset());
+        start = tc::ustubs().resumeHelper;
+      } else {
+        // Retranslation failed, probably because we couldn't get the write
+        // lease. Interpret a BB before running more Profile translations, to
+        // avoid spinning through this path repeatedly.
+        start = nullptr;
+      }
       break;
     }
 
@@ -118,7 +322,7 @@ TCA handleServiceRequest(ReqInfo& info) noexcept {
       // This is only responsible for the control-flow aspect of the Ret:
       // getting to the destination's translation, if any.
       auto ar = info.args[0].ar;
-      auto caller = info.args[1].ar;
+      auto const caller = info.args[1].ar;
       assertx(caller == vmfp());
       // If caller is a resumable (aka a generator) then whats likely happened
       // here is that we're resuming a yield from. That expression happens to
@@ -145,14 +349,15 @@ TCA handleServiceRequest(ReqInfo& info) noexcept {
       if (ar->isFCallAwait()) {
         // If there was an interped FCallAwait, and we return via the
         // jit, we need to deal with the suspend case here.
-        assert(ar->m_r.m_aux.u_fcallAwaitFlag < 2);
-        if (ar->m_r.m_aux.u_fcallAwaitFlag) {
+        assert(ar->retSlot()->m_aux.u_fcallAwaitFlag < 2);
+        if (ar->retSlot()->m_aux.u_fcallAwaitFlag) {
           start = tc::ustubs().fcallAwaitSuspendHelper;
           break;
         }
       }
-      sk = SrcKey{caller->func(), vmpc(), caller->resumed()};
-      start = mcgen::getTranslation(TransArgs{sk});
+      assertx(caller == vmfp());
+      sk = liveSK();
+      start = getTranslation(TransArgs{sk});
       TRACE(3, "REQ_POST_INTERP_RET: from %s to %s\n",
             ar->m_func->fullName()->data(),
             caller->m_func->fullName()->data());
@@ -167,14 +372,15 @@ TCA handleServiceRequest(ReqInfo& info) noexcept {
                                   g_unwind_rds->debuggerReturnOff);
       FTRACE(3, "REQ_DEBUGGER_RET: pc {} in {}\n",
              vmpc(), fp->func()->fullName()->data());
-      sk = SrcKey{fp->func(), vmpc(), fp->resumed()};
-      start = mcgen::getTranslation(TransArgs{sk});
+      sk = liveSK();
+      start = getTranslation(TransArgs{sk});
       break;
     }
   }
 
   if (smashed && info.stub) {
     auto const stub = info.stub;
+    FTRACE(3, "Freeing stub {} on treadmill\n", stub);
     Treadmill::enqueue([stub] { tc::freeTCStub(stub); });
   }
 
@@ -207,7 +413,7 @@ TCA handleBindCall(TCA toSmash, ActRec* calleeFrame, bool isImmutable) {
   }
 
   if (start && !RuntimeOption::EvalFailJitPrologs) {
-    LeaseHolder writer(GetWriteLease(), func, TransKind::Profile);
+    LeaseHolder writer(func, TransKind::Profile);
     if (!writer) return start;
 
     // Someone else may have changed the func prologue while we waited for
@@ -248,13 +454,13 @@ TCA handleResume(bool interpFirst) {
 
   tl_regState = VMRegState::CLEAN;
 
-  auto sk = SrcKey{liveFunc(), vmpc(), liveResumed()};
+  auto sk = liveSK();
   TCA start;
   if (interpFirst) {
     start = nullptr;
     INC_TPC(interp_bb_force);
   } else {
-    start = mcgen::getTranslation(TransArgs(sk));
+    start = getTranslation(TransArgs(sk));
   }
 
   vmJitCalledFrame() = vmfp();
@@ -271,8 +477,8 @@ TCA handleResume(bool interpFirst) {
     }
 
     assertx(vmpc());
-    sk = SrcKey{liveFunc(), vmpc(), liveResumed()};
-    start = mcgen::getTranslation(TransArgs{sk});
+    sk = liveSK();
+    start = getTranslation(TransArgs{sk});
   }
 
   if (Trace::moduleEnabled(Trace::ringbuffer, 1)) {
@@ -283,5 +489,7 @@ TCA handleResume(bool interpFirst) {
   tl_regState = VMRegState::DIRTY;
   return start;
 }
+
+///////////////////////////////////////////////////////////////////////////////
 
 }}}

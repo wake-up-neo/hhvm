@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,7 +21,6 @@
 #include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/srckey.h"
 
-#include "hphp/runtime/vm/jit/types.h"
 #include "hphp/runtime/vm/jit/abi.h"
 #include "hphp/runtime/vm/jit/arg-group.h"
 #include "hphp/runtime/vm/jit/bc-marker.h"
@@ -34,10 +33,12 @@
 #include "hphp/runtime/vm/jit/ssa-tmp.h"
 #include "hphp/runtime/vm/jit/tc.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
+#include "hphp/runtime/vm/jit/types.h"
 #include "hphp/runtime/vm/jit/unique-stubs.h"
 #include "hphp/runtime/vm/jit/vasm-gen.h"
 #include "hphp/runtime/vm/jit/vasm-instr.h"
 #include "hphp/runtime/vm/jit/vasm-reg.h"
+#include "hphp/runtime/vm/jit/write-lease.h"
 
 #include "hphp/util/trace.h"
 
@@ -87,7 +88,11 @@ void cgMov(IRLS& env, const IRInstruction* inst) {
   copyTV(vmain(env), src, dst, inst->dst()->type());
 }
 
-void cgHalt(IRLS& env, const IRInstruction* inst) {
+void cgUnreachable(IRLS& env, const IRInstruction* inst) {
+  vmain(env) << ud2{};
+}
+
+void cgEndBlock(IRLS& env, const IRInstruction* inst) {
   vmain(env) << ud2{};
 }
 
@@ -127,9 +132,15 @@ void cgInterpOneCF(IRLS& env, const IRInstruction* inst) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
+IMPL_OPCODE_CALL(GetTime);
+
+///////////////////////////////////////////////////////////////////////////////
+
 IMPL_OPCODE_CALL(PrintBool)
 IMPL_OPCODE_CALL(PrintInt)
 IMPL_OPCODE_CALL(PrintStr)
+
+IMPL_OPCODE_CALL(GetMemoKey)
 
 void cgRBTraceEntry(IRLS& env, const IRInstruction* inst) {
   auto const extra = inst->extra<RBTraceEntry>();
@@ -166,20 +177,12 @@ void cgIncStat(IRLS& env, const IRInstruction *inst) {
 
 IMPL_OPCODE_CALL(IncStatGrouped)
 
-void cgIncTransCounter(IRLS& env, const IRInstruction* inst) {
-  emitTransCounterInc(vmain(env));
-}
-
 void cgIncProfCounter(IRLS& env, const IRInstruction* inst) {
   auto const transID = inst->extra<TransIDData>()->transId;
   auto const counterAddr = profData()->transCounterAddr(transID);
   auto& v = vmain(env);
 
   v << decqmlock{v.cns(counterAddr)[0], v.makeReg()};
-}
-
-bool skipAttemptGlobal() {
-  return !GetWriteLease().couldBeOwner();
 }
 
 void cgCheckCold(IRLS& env, const IRInstruction* inst) {
@@ -189,17 +192,17 @@ void cgCheckCold(IRLS& env, const IRInstruction* inst) {
 
   auto const sf = v.makeReg();
   v << decqmlock{v.cns(counterAddr)[0], sf};
-  if (RuntimeOption::EvalJitFilterLease &&
-      LeaseHolder::NeedGlobal(TransKind::Optimize)) {
+  if (RuntimeOption::EvalJitFilterLease) {
     auto filter = v.makeBlock();
     v << jcc{CC_LE, sf, {label(env, inst->next()), filter}};
     v = filter;
     auto const res = v.makeReg();
-    cgCallHelper(v, env, CallSpec::direct(skipAttemptGlobal), callDest(res),
-                 SyncOptions::None, argGroup(env, inst));
+    cgCallHelper(v, env, CallSpec::direct(couldAcquireOptimizeLease),
+                 callDest(res), SyncOptions::None,
+                 argGroup(env, inst).immPtr(inst->func()));
     auto const sf2 = v.makeReg();
     v << testb{res, res, sf2};
-    v << jcc{CC_Z, sf2, {label(env, inst->next()), label(env, inst->taken())}};
+    v << jcc{CC_NZ, sf2, {label(env, inst->next()), label(env, inst->taken())}};
   } else {
     v << jcc{CC_LE, sf, {label(env, inst->next()), label(env, inst->taken())}};
   }

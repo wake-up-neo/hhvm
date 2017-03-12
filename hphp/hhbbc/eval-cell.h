@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -45,8 +45,8 @@ namespace HPHP { namespace HHBBC {
 template<class Pred>
 folly::Optional<Type> eval_cell(Pred p) {
   try {
-    g_context->setThrowAllErrors(true);
-    SCOPE_EXIT { g_context->setThrowAllErrors(false); };
+    assert(!RuntimeOption::EvalJit);
+    ThrowAllErrorsSetter taes;
 
     Cell c = p();
     if (isRefcountedType(c.m_type)) {
@@ -103,7 +103,6 @@ folly::Optional<Type> eval_cell(Pred p) {
       case KindOfObject:
       case KindOfResource:
       case KindOfRef:
-      case KindOfClass:
         always_assert(0 && "Impossible constant evaluation occurred");
       }
     }
@@ -127,6 +126,21 @@ folly::Optional<Type> eval_cell(Pred p) {
     return folly::none;
   } catch (...) {
     always_assert_flog(0, "a non-std::exception was thrown in eval_cell");
+  }
+}
+
+template<typename Pred>
+folly::Optional<typename std::result_of<Pred()>::type>
+eval_cell_value(Pred p) {
+  try {
+    ThrowAllErrorsSetter taes;
+    return p();
+  } catch (const Object&) {
+    return folly::none;
+  } catch (const std::exception&) {
+    return folly::none;
+  } catch (...) {
+    always_assert_flog(0, "a non-std::exception was thrown in eval_cell_value");
   }
 }
 

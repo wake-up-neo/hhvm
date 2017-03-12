@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -104,9 +104,6 @@ bool isCalleeInlinable(SrcKey callSK, const Func* callee) {
     if (numArgs >= numParams) {
       return refuse("callee has variadic capture with non-empty value");
     }
-  }
-  if (callee->numIterators() != 0) {
-    return refuse("callee has iterators");
   }
   if (callee->isMagic()) {
     return refuse("magic callee");
@@ -217,13 +214,8 @@ bool isInlinableCPPBuiltin(const Func* f) {
   }
 
   // ARM currently can't handle floating point returns.
-  if (f->returnType() == KindOfDouble &&
+  if (f->hniReturnType() == KindOfDouble &&
       !Native::allowFCallBuiltinDoubles()) {
-    return false;
-  }
-
-  // For now, don't inline when we'd need to adjust ObjectData pointers.
-  if (f->cls() && f->cls()->preClass()->builtinODOffset() != 0) {
     return false;
   }
 
@@ -332,13 +324,17 @@ using RegionKeySet = std::unordered_set<
   InlineRegionKey::Eq
 >;
 
-Vcost computeTranslationCostSlow(SrcKey at, const RegionDesc& region) {
+Vcost computeTranslationCostSlow(SrcKey at, Op callerFPushOp,
+                                 const RegionDesc& region) {
   TransContext ctx {
     kInvalidTransID,
     TransKind::Optimize,
     TransFlags{},
     at,
-    FPInvOffset{0}
+    // We can pretend the stack is empty, but we at least need to account for
+    // the locals, iters, and slots, etc.
+    FPInvOffset{at.func()->numSlotsInFrame()},
+    callerFPushOp
   };
 
   auto const unit = irGenInlineRegion(ctx, region);
@@ -350,14 +346,15 @@ Vcost computeTranslationCostSlow(SrcKey at, const RegionDesc& region) {
 
 folly::Synchronized<InlineCostCache, folly::RWSpinLock> s_inlCostCache;
 
-int computeTranslationCost(SrcKey at, const RegionDesc& region) {
+int computeTranslationCost(SrcKey at, Op callerFPushOp,
+                           const RegionDesc& region) {
   InlineRegionKey irk{region};
   SYNCHRONIZED_CONST(s_inlCostCache) {
     auto f = s_inlCostCache.find(irk);
     if (f != s_inlCostCache.end()) return f->second;
   }
 
-  auto const info = computeTranslationCostSlow(at, region);
+  auto const info = computeTranslationCostSlow(at, callerFPushOp, region);
   auto cost = info.cost;
 
   // If the region wasn't complete, don't cache the result, unless we already
@@ -384,9 +381,10 @@ int computeTranslationCost(SrcKey at, const RegionDesc& region) {
  * Update context for start of inlining.
  */
 void InliningDecider::accountForInlining(SrcKey callerSk,
+                                         Op callerFPushOp,
                                          const Func* callee,
                                          const RegionDesc& region) {
-  int cost = computeTranslationCost(callerSk, region);
+  int cost = computeTranslationCost(callerSk, callerFPushOp, region);
   m_costStack.push_back(cost);
   m_cost       += cost;
   m_callDepth  += 1;
@@ -400,6 +398,7 @@ void InliningDecider::initWithCallee(const Func* callee) {
 }
 
 bool InliningDecider::shouldInline(SrcKey callerSk,
+                                   Op callerFPushOp,
                                    const Func* callee,
                                    const RegionDesc& region,
                                    uint32_t maxTotalCost) {
@@ -489,7 +488,7 @@ bool InliningDecider::shouldInline(SrcKey callerSk,
   // certain threshold.  (Note that we do not measure the total cost of all the
   // inlined calls for a given caller---just the cost of each nested stack.)
   const int maxCost = maxTotalCost - m_cost;
-  const int cost = computeTranslationCost(callerSk, region);
+  const int cost = computeTranslationCost(callerSk, callerFPushOp, region);
   if (cost > maxCost) {
     return refuse("too expensive");
   }
@@ -516,16 +515,26 @@ RegionDescPtr selectCalleeTracelet(const Func* callee,
                                    int32_t maxBCInstrs) {
   auto const numParams = callee->numParams();
 
+  bool hasThis;
+  if (ctxType <= TObj || !ctxType.maybe(TObj)) {
+    hasThis = ctxType <= TObj;
+  } else if (!callee->hasThisVaries()) {
+    hasThis = callee->mayHaveThis();
+  } else {
+    return RegionDescPtr{};
+  }
+
   // Set up the RegionContext for the tracelet selector.
-  RegionContext ctx;
-  ctx.func = callee;
-  ctx.bcOffset = callee->getEntryForNumArgs(numArgs);
-  ctx.spOffset = FPInvOffset{safe_cast<int32_t>(callee->numSlotsInFrame())};
-  ctx.resumed = false;
+  RegionContext ctx{
+    callee, callee->getEntryForNumArgs(numArgs),
+    FPInvOffset{safe_cast<int32_t>(callee->numSlotsInFrame())},
+    false,
+    hasThis
+  };
 
   for (uint32_t i = 0; i < numArgs; ++i) {
     auto type = argTypes[i];
-    assertx((type <= TGen) || (type <= TCls));
+    assertx(type <= TGen);
     ctx.liveTypes.push_back({Location::Local{i}, type});
   }
 
@@ -550,16 +559,23 @@ RegionDescPtr selectCalleeTracelet(const Func* callee,
 
 TransID findTransIDForCallee(const ProfData* profData,
                              const Func* callee, const int numArgs,
-                             std::vector<Type>& argTypes) {
+                             Type ctxType, std::vector<Type>& argTypes) {
   auto const idvec = profData->funcProfTransIDs(callee->getFuncId());
 
   auto const offset = callee->getEntryForNumArgs(numArgs);
+  TransID ret = kInvalidTransID;
+  bool hasThisVaries = callee->hasThisVaries() &&
+    ctxType.maybe(TObj) && !(ctxType <= TObj);
   for (auto const id : idvec) {
     auto const rec = profData->transRec(id);
     if (rec->startBcOff() != offset) continue;
     auto const region = rec->region();
 
     auto const isvalid = [&] () {
+      if (!hasThisVaries &&
+          (rec->srcKey().hasThis() != ctxType.maybe(TObj))) {
+        return false;
+      }
       for (auto const& typeloc : region->entry()->typePreConditions()) {
         if (typeloc.location.tag() != LTag::Local) continue;
         auto const locId = typeloc.location.localId();
@@ -571,9 +587,14 @@ TransID findTransIDForCallee(const ProfData* profData,
       return true;
     }();
 
-    if (isvalid) return id;
+    if (!isvalid) continue;
+    if (!hasThisVaries) return id;
+    // The function may be called with or without $this, if we've seen
+    // both, give up.
+    if (ret != kInvalidTransID) return kInvalidTransID;
+    ret = id;
   }
-  return kInvalidTransID;
+  return ret;
 }
 
 RegionDescPtr selectCalleeCFG(const Func* callee, const int numArgs,
@@ -582,7 +603,9 @@ RegionDescPtr selectCalleeCFG(const Func* callee, const int numArgs,
   auto const profData = jit::profData();
   if (!profData || !profData->profiling(callee->getFuncId())) return nullptr;
 
-  auto const dvID = findTransIDForCallee(profData, callee, numArgs, argTypes);
+  auto const dvID = findTransIDForCallee(profData, callee,
+                                         numArgs, ctxType, argTypes);
+
   if (dvID == kInvalidTransID) {
     return nullptr;
   }
@@ -613,22 +636,33 @@ RegionDescPtr selectCalleeRegion(const SrcKey& sk,
   auto const op = sk.pc();
   auto const numArgs = getImm(op, 0).u_IVA;
 
-  auto const& fpi = irgs.irb->fs().fpiStack();
-  assertx(!fpi.empty());
-  auto const ctx = fpi.back().ctxType;
+  auto const& fpiStack = irgs.irb->fs().fpiStack();
+  assertx(!fpiStack.empty());
+  auto const& fpiInfo = fpiStack.back();
+  auto ctx = fpiInfo.ctxType;
 
   if (ctx == TBottom) return nullptr;
+  if (callee->isClosureBody()) {
+    if (!callee->cls()) {
+      ctx = TNullptr;
+    } else if (callee->mayHaveThis()) {
+      ctx = TCtx;
+    } else {
+      ctx = TCctx;
+    }
+  }
 
   std::vector<Type> argTypes;
   for (int i = numArgs - 1; i >= 0; --i) {
     // DataTypeGeneric is used because we're just passing the locals into the
     // callee.  It's up to the callee to constrain further if needed.
     auto type = irgen::publicTopType(irgs, BCSPRelOffset{i});
+    assertx(type <= TGen);
 
     // If we don't have sufficient type information to inline the region return
     // early
     if (type == TBottom) return nullptr;
-    if (!(type <= TCell) && !(type <= TBoxedCell) && !(type <= TCls)) {
+    if (!(type <= TCell) && !(type <= TBoxedCell)) {
       return nullptr;
     }
     argTypes.push_back(type);
@@ -644,14 +678,20 @@ RegionDescPtr selectCalleeRegion(const SrcKey& sk,
       maxBCInstrs
     );
     auto const maxCost = RuntimeOption::EvalHHIRInliningMaxVasmCost;
-    if (region && inl.shouldInline(sk, callee, *region, maxCost)) return region;
+    if (region && inl.shouldInline(sk, fpiInfo.fpushOpc,
+                                   callee, *region, maxCost)) {
+      return region;
+    }
     if (mode == "tracelet") return nullptr;
   }
 
   if (profData()) {
     auto region = selectCalleeCFG(callee, numArgs, ctx, argTypes, maxBCInstrs);
     auto const maxCost = RuntimeOption::EvalHHIRInliningMaxVasmCost;
-    if (region && inl.shouldInline(sk, callee, *region, maxCost)) return region;
+    if (region && inl.shouldInline(sk, fpiInfo.fpushOpc,
+                                   callee, *region, maxCost)) {
+      return region;
+    }
   }
 
   return nullptr;

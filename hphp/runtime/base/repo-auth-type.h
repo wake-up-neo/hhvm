@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -187,18 +187,6 @@ private:
 };
 
 //////////////////////////////////////////////////////////////////////
-
-/*
- * Return the DataType corresponding to a RepoAuthType, if the
- * RepoAuthType is refined enough to specify a DataType that
- * corresponds to a php value.  (I.e., this function won't return
- * things like KindOfUncounted.)
- *
- * Returns KindOfString for both SStr and Str.
- *
- * Otherwise returns folly::none.
- */
-folly::Optional<DataType> convertToDataType(RepoAuthType);
 
 /*
  * Return whether a TypedValue is a legal match for a RepoAuthType.

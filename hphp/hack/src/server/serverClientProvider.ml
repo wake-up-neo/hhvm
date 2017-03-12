@@ -10,6 +10,8 @@
 
 open ServerCommandTypes
 
+exception Client_went_away
+
 type t = Unix.file_descr
 type client =
   | Non_persistent_client of Timeout.in_channel * out_channel
@@ -17,6 +19,21 @@ type client =
 
 let provider_from_file_descriptor x = x
 let provider_for_test () = failwith "for use in tests only"
+
+(** Retrieve channels to client from monitor process. *)
+let accept_client parent_in_fd =
+  let socket = Libancillary.ancil_recv_fd parent_in_fd in
+  Non_persistent_client (
+    (Timeout.in_channel_of_descr socket), (Unix.out_channel_of_descr socket)
+  )
+
+let accept_client_opt parent_in_fd =
+  try Some (accept_client parent_in_fd) with
+  | e -> begin
+    HackEventLogger.get_client_channels_exception e;
+    Hh_logger.log "Getting Client FDs failed. Ignoring.";
+    None
+  end
 
 let sleep_and_check in_fd persistent_client_opt =
   let l = match persistent_client_opt with
@@ -28,18 +45,14 @@ let sleep_and_check in_fd persistent_client_opt =
         assert false
     | None -> [in_fd]
   in
-  let ready_fd_l, _, _ = Unix.select l [] [] (0.5) in
+  let ready_fd_l, _, _ = Unix.select l [] [] (0.1) in
   match ready_fd_l with
-  | [_; _] -> true, true
-  | [fd] -> if (fd <> in_fd) then false, true else true, false
-  | _ -> false, false
-
-(** Retrieve channels to client from monitor process. *)
-let accept_client parent_in_fd =
-  let socket = Libancillary.ancil_recv_fd parent_in_fd in
-  Non_persistent_client (
-    (Timeout.in_channel_of_descr socket), (Unix.out_channel_of_descr socket)
-  )
+    | [_; _] ->
+        (* Prioritize persistent client requests over command line ones *)
+        None, true
+    | [fd] when fd = in_fd -> accept_client_opt in_fd, false
+    | [fd] when fd <> in_fd -> None, true
+    | _ -> None, false
 
 let say_hello oc =
   let fd = Unix.descr_of_out_channel oc in
@@ -53,8 +66,14 @@ let read_connection_type ic =
 
 let read_connection_type = function
   | Non_persistent_client (ic, oc) ->
-    say_hello oc;
-    read_connection_type ic
+    begin try
+      say_hello oc;
+      read_connection_type ic
+    with
+    | Sys_error("Connection reset by peer")
+    | Unix.Unix_error(Unix.EPIPE, "write", _) ->
+      raise Client_went_away
+    end
   | Persistent_client _ ->
     (* Every client starts as Non_persistent_client, and after we read its
      * desired connection type, can be turned into Persistent_client
@@ -67,15 +86,25 @@ let send_response_to_client client response =
     let fd = Unix.descr_of_out_channel oc in
     Marshal_tools.to_fd_with_preamble fd response
   | Persistent_client fd ->
-    Marshal_tools.to_fd_with_preamble fd response
+    Marshal_tools.to_fd_with_preamble fd (ServerCommandTypes.Response response)
 
-let send_push_message_to_client = send_response_to_client
+let send_push_message_to_client client response =
+  match client with
+  | Non_persistent_client _ ->
+    failwith "non-persistent clients don't expect push messages "
+  | Persistent_client fd ->
+    try
+      Marshal_tools.to_fd_with_preamble fd (ServerCommandTypes.Push response)
+    with Unix.Unix_error(Unix.EPIPE, "write", "") ->
+      raise Client_went_away
 
 let read_client_msg ic =
-  Timeout.with_timeout
+  try
+    Timeout.with_timeout
     ~timeout:1
     ~on_timeout: (fun _ -> raise Read_command_timeout)
     ~do_: (fun timeout -> Timeout.input_value ~timeout ic)
+  with End_of_file -> raise Client_went_away
 
 let read_client_msg = function
   | Non_persistent_client (ic, _) -> read_client_msg ic

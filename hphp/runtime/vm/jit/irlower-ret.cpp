@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -39,7 +39,6 @@
 #include "hphp/runtime/vm/jit/tc.h"
 #include "hphp/runtime/vm/jit/target-profile.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
-#include "hphp/runtime/vm/jit/translator-runtime.h"
 #include "hphp/runtime/vm/jit/type.h"
 #include "hphp/runtime/vm/jit/unique-stubs.h"
 #include "hphp/runtime/vm/jit/vasm-gen.h"
@@ -60,12 +59,6 @@ namespace {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-void traceRet(ActRec* fp, Cell* sp, void* rip) {
-  if (rip == tc::ustubs().callToExit) return;
-  checkFrame(fp, sp, false /* fullCheck */, 0);
-  assertx(sp <= (Cell*)fp || fp->resumed());
-}
-
 Vreg adjustSPForReturn(IRLS& env, const IRInstruction* inst) {
   auto const sp = srcLoc(env, inst, 0).reg();
   auto const adjust = inst->extra<RetCtrlData>()->spOffset.offset;
@@ -84,7 +77,7 @@ Vreg adjustSPForReturn(IRLS& env, const IRInstruction* inst) {
  */
 void prepare_return_regs(Vout& v, SSATmp* retVal, Vloc retLoc,
                          folly::Optional<AuxUnion> aux) {
-  auto const type = [&] {
+  auto const tp = [&] {
     auto const mask = [&] { return uint64_t{(*aux).u_raw} << 32; };
 
     if (!retLoc.hasReg(1)) {
@@ -106,9 +99,9 @@ void prepare_return_regs(Vout& v, SSATmp* retVal, Vloc retLoc,
     v << orq{extended, v.cns(mask()), result, v.makeReg()};
     return result;
   }();
-  auto const data = zeroExtendIfBool(v, retVal, retLoc.reg(0));
+  auto const data = zeroExtendIfBool(v, retVal->type(), retLoc.reg(0));
 
-  v << syncvmret{data, type};
+  v << syncvmret{data, tp};
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -116,6 +109,12 @@ void prepare_return_regs(Vout& v, SSATmp* retVal, Vloc retLoc,
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+
+void traceRet(ActRec* fp, Cell* sp, void* rip) {
+  if (rip == tc::ustubs().callToExit) return;
+  checkFrame(fp, sp, false /* fullCheck */, 0);
+  assertx(sp <= (Cell*)fp || fp->resumed());
+}
 
 void cgRetCtrl(IRLS& env, const IRInstruction* inst) {
   auto const fp = srcLoc(env, inst, 1).reg();
@@ -176,12 +175,12 @@ void cgAsyncSwitchFast(IRLS& env, const IRInstruction* inst) {
 void cgLdRetVal(IRLS& env, const IRInstruction* inst) {
   auto const fp = srcLoc(env, inst, 0).reg();
   auto& v = vmain(env);
-  loadTV(v, inst->dst(), dstLoc(env, inst, 0), fp[AROFF(m_r)], true);
+  loadTV(v, inst->dst(), dstLoc(env, inst, 0), fp[kArRetOff], true);
 }
 
 void cgDbgTrashRetVal(IRLS& env, const IRInstruction* inst) {
   auto& v = vmain(env);
-  trashTV(v, srcLoc(env, inst, 0).reg(), AROFF(m_r), kTVTrashJITRetVal);
+  trashTV(v, srcLoc(env, inst, 0).reg(), kArRetOff, kTVTrashJITRetVal);
 }
 
 void cgFreeActRec(IRLS& env, const IRInstruction* inst) {
@@ -223,8 +222,6 @@ void cgGenericRetDecRefs(IRLS& env, const IRInstruction* inst) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-namespace {
-
 const StaticString s_ReleaseVV("ReleaseVV");
 
 struct ReleaseVVProfile {
@@ -245,8 +242,6 @@ struct ReleaseVVProfile {
   uint16_t executed;
   uint16_t released;
 };
-
-}
 
 void cgReleaseVVAndSkip(IRLS& env, const IRInstruction* inst) {
   auto const fp = srcLoc(env, inst, 0).reg();
@@ -290,7 +285,7 @@ void cgReleaseVVAndSkip(IRLS& env, const IRInstruction* inst) {
         cgCallHelper(
           v, env,
           CallSpec::direct(static_cast<void (*)(ActRec*)>(
-                            ExtraArgs::deallocate)),
+                           ExtraArgs::deallocate)),
           kVoidDest,
           SyncOptions::Sync,
           argGroup(env, inst).reg(fp)
@@ -300,7 +295,7 @@ void cgReleaseVVAndSkip(IRLS& env, const IRInstruction* inst) {
         cgCallHelper(
           v, env,
           CallSpec::direct(static_cast<void (*)(ActRec*)>(
-                            VarEnv::deallocate)),
+                           VarEnv::deallocate)),
           kVoidDest,
           SyncOptions::Sync,
           argGroup(env, inst).reg(fp)

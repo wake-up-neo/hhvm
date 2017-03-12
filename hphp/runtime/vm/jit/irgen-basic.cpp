@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -30,60 +30,44 @@ namespace {
 
 //////////////////////////////////////////////////////////////////////
 
-void implAGet(IRGS& env, SSATmp* classSrc) {
-  if (classSrc->type() <= TStr) {
-    push(env, ldCls(env, classSrc));
-    return;
-  }
-  push(env, gen(env, LdObjClass, classSrc));
+void implClsRefGet(IRGS& env, SSATmp* classSrc, uint32_t slot) {
+  auto const cls = (classSrc->type() <= TStr)
+    ? ldCls(env, classSrc)
+    : gen(env, LdObjClass, classSrc);
+  putClsRef(env, slot, cls);
 }
 
 const StaticString s_FATAL_NULL_THIS(Strings::FATAL_NULL_THIS);
 bool checkThis(IRGS& env, SSATmp* ctx) {
-  auto fail = [&] {
-    auto const err = cns(env, s_FATAL_NULL_THIS.get());
-    gen(env, RaiseError, err);
-  };
-  if (!ctx->type().maybe(TObj)) {
-    fail();
-    return false;
-  }
-  ifThen(
-    env,
-    [&] (Block* taken) {
-      gen(env, CheckCtxThis, taken, ctx);
-    },
-    [&] {
-      hint(env, Block::Hint::Unlikely);
-      fail();
-    }
-  );
-  return true;
+  if (hasThis(env)) return true;
+  auto const err = cns(env, s_FATAL_NULL_THIS.get());
+  gen(env, RaiseError, err);
+  return false;
 }
 
 //////////////////////////////////////////////////////////////////////
 
 }
 
-void emitAGetC(IRGS& env) {
+void emitClsRefGetC(IRGS& env, uint32_t slot) {
   auto const name = topC(env);
   if (name->type().subtypeOfAny(TObj, TStr)) {
     popC(env);
-    implAGet(env, name);
+    implClsRefGet(env, name, slot);
     decRef(env, name);
   } else {
-    interpOne(env, TCls, 1);
+    interpOne(env, *env.currentNormalizedInstruction);
   }
 }
 
-void emitAGetL(IRGS& env, int32_t id) {
+void emitClsRefGetL(IRGS& env, int32_t id, uint32_t slot) {
   auto const ldrefExit = makeExit(env);
   auto const ldPMExit = makePseudoMainExit(env);
   auto const src = ldLocInner(env, id, ldrefExit, ldPMExit, DataTypeSpecific);
   if (src->type().subtypeOfAny(TObj, TStr)) {
-    implAGet(env, src);
+    implClsRefGet(env, src, slot);
   } else {
-    PUNT(AGetL);
+    PUNT(ClsRefGetL);
   }
 }
 
@@ -95,7 +79,7 @@ void emitCGetL(IRGS& env, int32_t id) {
     id,
     ldrefExit,
     ldPMExit,
-    DataTypeCountnessInit
+    DataTypeBoxAndCountnessInit
   );
   pushIncRef(env, loc);
 }
@@ -108,7 +92,7 @@ void emitCGetQuietL(IRGS& env, int32_t id) {
     id,
     ldrefExit,
     ldPMExit,
-    DataTypeCountnessInit
+    DataTypeBoxAndCountnessInit
   );
   pushIncRef(env, loc);
 }
@@ -135,7 +119,7 @@ void emitCGetL2(IRGS& env, int32_t id) {
     id,
     ldrefExit,
     ldPMExit,
-    DataTypeCountnessInit
+    DataTypeBoxAndCountnessInit
   );
   pushIncRef(env, val);
   push(env, oldTop);
@@ -174,7 +158,7 @@ SSATmp* boxHelper(IRGS& env, SSATmp* value, F rewrite) {
 }
 
 void emitVGetL(IRGS& env, int32_t id) {
-  auto const value = ldLoc(env, id, makeExit(env), DataTypeCountnessInit);
+  auto const value = ldLoc(env, id, makeExit(env), DataTypeBoxAndCountnessInit);
   auto const boxed = boxHelper(
     env,
     gen(env, AssertType, TCell | TBoxedInitCell, value),
@@ -199,7 +183,7 @@ void emitBoxR(IRGS& env) {
 }
 
 void emitUnsetL(IRGS& env, int32_t id) {
-  auto const prev = ldLoc(env, id, makeExit(env), DataTypeCountness);
+  auto const prev = ldLoc(env, id, makeExit(env), DataTypeBoxAndCountness);
   stLocRaw(env, id, fp(env), cns(env, TUninit));
   decRef(env, prev);
 }
@@ -233,21 +217,17 @@ void emitSetL(IRGS& env, int32_t id) {
 }
 
 void emitInitThisLoc(IRGS& env, int32_t id) {
-  if (!curFunc(env)->mayHaveThis()) {
+  if (!hasThis(env)) {
     // Do nothing if this is null
     return;
   }
   auto const ldrefExit = makeExit(env);
   auto const ctx       = ldCtx(env);
-  ifElse(env,
-         [&] (Block* skip) { gen(env, CheckCtxThis, skip, ctx); },
-         [&] {
-           auto const oldLoc = ldLoc(env, id, ldrefExit, DataTypeCountness);
-           auto const this_  = gen(env, CastCtxThis, ctx);
-           gen(env, IncRef, this_);
-           stLocRaw(env, id, fp(env), this_);
-           decRef(env, oldLoc);
-         });
+  auto const oldLoc = ldLoc(env, id, ldrefExit, DataTypeBoxAndCountness);
+  auto const this_  = castCtxThis(env, ctx);
+  gen(env, IncRef, this_);
+  stLocRaw(env, id, fp(env), this_);
+  decRef(env, oldLoc);
 }
 
 void emitPrint(IRGS& env) {
@@ -292,7 +272,7 @@ void emitThis(IRGS& env) {
     push(env, cns(env, TInitNull));
     return;
   }
-  auto const this_ = gen(env, CastCtxThis, ctx);
+  auto const this_ = castCtxThis(env, ctx);
   pushIncRef(env, this_);
 }
 
@@ -303,7 +283,7 @@ void emitCheckThis(IRGS& env) {
 
 void emitBareThis(IRGS& env, BareThisOp subop) {
   auto const ctx = ldCtx(env);
-  if (!ctx->type().maybe(TObj)) {
+  if (!hasThis(env)) {
     if (subop == BareThisOp::NoNotice) {
       push(env, cns(env, TInitNull));
       return;
@@ -313,31 +293,7 @@ void emitBareThis(IRGS& env, BareThisOp subop) {
     return;
   }
 
-  if (subop == BareThisOp::NoNotice) {
-    auto thiz = cond(env,
-                     [&](Block* taken) {
-                       gen(env, CheckCtxThis, taken, ctx);
-                     },
-                     [&] {
-                       auto t = gen(env, CastCtxThis, ctx);
-                       gen(env, IncRef, t);
-                       return t;
-                     },
-                     [&] {
-                       hint(env, Block::Hint::Unlikely);
-                       return cns(env, TInitNull);
-                     });
-    push(env, thiz);
-    return;
-  }
-
-  if (subop == BareThisOp::NeverNull) {
-    env.irb->fs().setThisAvailable();
-  } else {
-    gen(env, CheckCtxThis, makeExitSlow(env), ctx);
-  }
-
-  pushIncRef(env, gen(env, CastCtxThis, ctx));
+  pushIncRef(env, castCtxThis(env, ctx));
 }
 
 void emitClone(IRGS& env) {
@@ -347,37 +303,38 @@ void emitClone(IRGS& env) {
   decRef(env, obj);
 }
 
-void emitLateBoundCls(IRGS& env) {
+void emitLateBoundCls(IRGS& env, uint32_t slot) {
   auto const clss = curClass(env);
   if (!clss) {
     // no static context class, so this will raise an error
-    interpOne(env, TCls, 0);
+    interpOne(env, *env.currentNormalizedInstruction);
     return;
   }
   auto const ctx = ldCtx(env);
-  push(env, gen(env, LdClsCtx, ctx));
+  putClsRef(env, slot, gen(env, LdClsCtx, ctx));
 }
 
-void emitSelf(IRGS& env) {
+void emitSelf(IRGS& env, uint32_t slot) {
   auto const clss = curClass(env);
   if (clss == nullptr) {
-    interpOne(env, TCls, 0);
+    interpOne(env, *env.currentNormalizedInstruction);
   } else {
-    push(env, cns(env, clss));
+    putClsRef(env, slot, cns(env, clss));
   }
 }
 
-void emitParent(IRGS& env) {
+void emitParent(IRGS& env, uint32_t slot) {
   auto const clss = curClass(env);
   if (clss == nullptr || clss->parent() == nullptr) {
-    interpOne(env, TCls, 0);
+    interpOne(env, *env.currentNormalizedInstruction);
   } else {
-    push(env, cns(env, clss->parent()));
+    putClsRef(env, slot, cns(env, clss->parent()));
   }
 }
 
-void emitNameA(IRGS& env) {
-  push(env, gen(env, LdClsName, popA(env)));
+void emitClsRefName(IRGS& env, uint32_t slot) {
+  auto const cls = takeClsRef(env, slot);
+  push(env, gen(env, LdClsName, cls));
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -452,7 +409,7 @@ void emitCastDict(IRGS& env) {
       if (src->isA(TDbl))     return raise("Double");
       if (src->isA(TStr))     return raise("String");
       if (src->isA(TRes))     return raise("Resource");
-      not_reached();
+      always_assert_flog(false, "Unexpected {} in emitCastDict", src->type());
     }()
   );
 }
@@ -528,15 +485,17 @@ void emitIncStat(IRGS& env, int32_t counter, int32_t value) {
 
 //////////////////////////////////////////////////////////////////////
 
-void emitPopA(IRGS& env) { popA(env); }
-void emitPopC(IRGS& env) { popDecRef(env, DataTypeGeneric); }
-void emitPopV(IRGS& env) { popDecRef(env, DataTypeGeneric); }
-void emitPopR(IRGS& env) { popDecRef(env, DataTypeGeneric); }
+void emitDiscardClsRef(IRGS& env, uint32_t slot)   { killClsRef(env, slot); }
 
-void emitDir(IRGS& env)  { push(env, cns(env, curUnit(env)->dirpath())); }
-void emitFile(IRGS& env) { push(env, cns(env, curUnit(env)->filepath())); }
+void emitPopC(IRGS& env)   { popDecRef(env, DataTypeGeneric); }
+void emitPopV(IRGS& env)   { popDecRef(env, DataTypeGeneric); }
+void emitPopR(IRGS& env)   { popDecRef(env, DataTypeGeneric); }
+void emitPopU(IRGS& env)   { popU(env); }
 
-void emitDup(IRGS& env) { pushIncRef(env, topC(env)); }
+void emitDir(IRGS& env)    { push(env, cns(env, curUnit(env)->dirpath())); }
+void emitFile(IRGS& env)   { push(env, cns(env, curUnit(env)->filepath())); }
+void emitMethod(IRGS& env) { push(env, cns(env, curFunc(env)->fullName())); }
+void emitDup(IRGS& env)    { pushIncRef(env, topC(env)); }
 
 //////////////////////////////////////////////////////////////////////
 
@@ -578,6 +537,14 @@ void emitBoxRNop(IRGS& env) {
 }
 void emitUnboxRNop(IRGS& env) {
   assertTypeStack(env, BCSPRelOffset{0}, TCell);
+}
+void emitCGetCUNop(IRGS& env) {
+  auto const offset = offsetFromIRSP(env, BCSPRelOffset{0});
+  auto const knownType = env.irb->stack(offset, DataTypeSpecific).type;
+  assertTypeStack(env, BCSPRelOffset{0}, knownType & TInitCell);
+}
+void emitUGetCUNop(IRGS& env) {
+  assertTypeStack(env, BCSPRelOffset{0}, TUninit);
 }
 void emitRGetCNop(IRGS&)           {}
 void emitFPassC(IRGS&, int32_t)    {}

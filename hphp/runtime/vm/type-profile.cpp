@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -27,6 +27,7 @@
 #include "hphp/util/logger.h"
 #include "hphp/util/trace.h"
 
+#include "hphp/runtime/base/init-fini-node.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/stats.h"
 #include "hphp/runtime/base/thread-info.h"
@@ -38,7 +39,7 @@
 #include "hphp/runtime/vm/jit/tc.h"
 
 #include "hphp/util/atomic-vector.h"
-#include "hphp/util/boot_timer.h"
+#include "hphp/util/boot-stats.h"
 #include "hphp/util/struct-log.h"
 
 namespace HPHP {
@@ -93,9 +94,10 @@ void setRelocateRequests(int32_t n) {
 
 namespace {
 AtomicVector<uint32_t> s_func_counters{0, 0};
-AtomicVectorInit s_func_counters_init{
-  s_func_counters, RuntimeOption::EvalFuncCountHint
-};
+static InitFiniNode s_func_counters_reinit([]{
+  UnsafeReinitEmptyAtomicVector(
+    s_func_counters, RuntimeOption::EvalFuncCountHint);
+}, InitFiniNode::When::PostRuntimeOptions, "s_func_counters reinit");
 }
 
 void profileWarmupStart() {
@@ -189,7 +191,7 @@ int singleJitRequestCount() {
 
 static inline bool doneProfiling() {
   return requestCount() >= RuntimeOption::EvalJitProfileInterpRequests ||
-    (RuntimeOption::ClientExecutionMode() &&
+    (!RuntimeOption::ServerExecutionMode() &&
      !RuntimeOption::EvalJitProfileRecord);
 }
 
@@ -206,8 +208,8 @@ void profileRequestStart() {
 
   bool okToJit = requestKind == RequestKind::Standard;
   if (okToJit) {
-    jit::Lease::mayLock(true);
-    jit::Lease::mayLockConcurrent(true);
+    jit::setMayAcquireLease(true);
+    jit::setMayAcquireConcurrentLease(true);
     assertx(!acquiredSingleJit);
     assertx(!acquiredSingleJitConcurrent);
 
@@ -215,7 +217,7 @@ void profileRequestStart() {
       if (!singleJitLock.exchange(true, std::memory_order_relaxed)) {
         acquiredSingleJit = true;
       } else {
-        jit::Lease::mayLock(false);
+        jit::setMayAcquireLease(false);
       }
 
       if (RuntimeOption::EvalJitConcurrently > 0) {
@@ -229,7 +231,7 @@ void profileRequestStart() {
               threads, threads + 1, std::memory_order_relaxed)) {
           acquiredSingleJitConcurrent = true;
         } else {
-          jit::Lease::mayLockConcurrent(false);
+          jit::setMayAcquireConcurrentLease(false);
         }
       }
     }

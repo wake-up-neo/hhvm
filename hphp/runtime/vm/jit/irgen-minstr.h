@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -28,6 +28,7 @@
 #include "hphp/runtime/vm/jit/array-offset-profile.h"
 #include "hphp/runtime/vm/jit/ssa-tmp.h"
 #include "hphp/runtime/vm/jit/target-profile.h"
+#include "hphp/runtime/vm/jit/type-profile.h"
 
 namespace HPHP { namespace jit { namespace irgen {
 
@@ -118,7 +119,7 @@ SSATmp* profiledArrayAccess(IRGS& env, SSATmp* arr, SSATmp* key,
           }
           return marr;
         },
-        [&] (SSATmp* arr) { return direct(arr, key, *pos); },
+        [&] (SSATmp* tmp) { return direct(tmp, key, *pos); },
         [&] { return generic(key); }
       );
     }
@@ -140,7 +141,7 @@ SSATmp* profiledArrayAccess(IRGS& env, SSATmp* arr, SSATmp* key,
  */
 template<class Finish>
 SSATmp* profiledType(IRGS& env, SSATmp* tmp, Finish finish) {
-  if (tmp->type() <= TStkElem && tmp->type().isKnownDataType()) {
+  if (tmp->type() <= TGen && tmp->type().isKnownDataType()) {
     return tmp;
   }
 
@@ -172,6 +173,10 @@ SSATmp* profiledType(IRGS& env, SSATmp* tmp, Finish finish) {
          },
          [&] {
            hint(env, Block::Hint::Unlikely);
+           auto const takenType = negativeCheckType(tmp->type(), typeToCheck);
+           if (takenType < tmp->type()) {
+             gen(env, AssertType, takenType, tmp);
+           }
            finish();
            gen(env, Jmp, makeExit(env, nextBcOff(env)));
          });

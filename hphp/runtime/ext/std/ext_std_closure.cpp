@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -102,7 +102,7 @@ void c_Closure::init(int numArgs, ActRec* ar, TypedValue* sp) {
       getThisUnchecked()->incRefCount();
     }
   } else {
-    m_ctx = nullptr;
+    hdr()->ctx = nullptr;
   }
 
   /*
@@ -256,41 +256,54 @@ static Variant HHVM_METHOD(Closure, call,
     return init_null_variant;
   }
 
-  Variant ret;
   // Could call vm_user_func(bound, params) here which goes through a
   // whole decode function process to get a Func*. But we know this
   // is a closure, and we can get a Func* via getInvokeFunc(), so just
   // bypass all that decode process to save time.
-  g_context->invokeFunc((TypedValue*)&ret,
-                        c_Closure::fromObject(this_)->getInvokeFunc(),
-                        params, bound.toObject().get(),
-                        nullptr, nullptr, nullptr,
-                        ExecutionContext::InvokeCuf);
-  return ret;
+  return Variant::attach(
+    g_context->invokeFunc(c_Closure::fromObject(this_)->getInvokeFunc(),
+                          params, bound.toObject().get(),
+                          nullptr, nullptr, nullptr,
+                          ExecutionContext::InvokeCuf)
+  );
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
 // Minified versions of nativeDataInstanceCtor/Dtor
 
-static ObjectData* closureInstanceCtor(Class* cls) {
+static ObjectData* closureInstanceCtorRepoAuth(Class* cls) {
   assertx(!(cls->attrs() & (AttrAbstract|AttrInterface|AttrTrait|AttrEnum)));
   assertx(!cls->needInitialization());
-  assertx(cls->builtinODTailSize() == sizeof(c_Closure) - sizeof(ObjectData));
+  assertx(cls->parent() == c_Closure::classof());
+  // ensure c_Closure and ClosureHdr ptrs are scanned inside other types
+  (void)type_scan::getIndexForMalloc<c_Closure>();
+  (void)type_scan::getIndexForMalloc<ClosureHdr>();
   auto const nProps = cls->numDeclProperties();
-  auto const size = ObjectData::sizeForNProps(nProps) +
-                    sizeof(c_Closure) - sizeof(ObjectData);
-  auto obj = new (MM().objMalloc(size))
-             c_Closure(cls, ObjectData::IsCppBuiltin | ObjectData::HasClone);
+  auto const size = sizeof(ClosureHdr) + ObjectData::sizeForNProps(nProps);
+  auto hdr = new (MM().objMalloc(size)) ClosureHdr(size);
+  auto obj = new (hdr + 1) c_Closure(cls);
   assertx(obj->hasExactlyOneRef());
   return obj;
 }
 
+static ObjectData* closureInstanceCtor(Class* cls) {
+  /*
+   * We call Unit::defClosure while jitting, so its not allowed to
+   * mark the class as cached unless its persistent. Do it here
+   * instead, but only in non-repo-auth mode.
+   */
+  if (!rds::isHandleInit(cls->classHandle())) {
+    cls->preClass()->namedEntity()->clsList()->setCached();
+  }
+  return closureInstanceCtorRepoAuth(cls);
+}
+
 ObjectData* c_Closure::clone() {
   auto const cls = getVMClass();
-  auto ret = c_Closure::fromObject(closureInstanceCtor(cls));
+  auto ret = c_Closure::fromObject(closureInstanceCtorRepoAuth(cls));
 
-  ret->m_ctx = m_ctx;
+  ret->hdr()->ctx = hdr()->ctx;
   if (auto t = getThis()) {
     t->incRefCount();
   }
@@ -310,20 +323,20 @@ static void closureInstanceDtor(ObjectData* obj, const Class* cls) {
   auto const nProps = size_t{cls->numDeclProperties()};
   auto prop = c_Closure::fromObject(obj)->getUseVars();
   auto const stop = prop + nProps;
-  if (auto t = c_Closure::fromObject(obj)->getThis()) {
+  auto closure = c_Closure::fromObject(obj);
+  if (auto t = closure->getThis()) {
     decRefObj(t);
   }
   for (; prop != stop; ++prop) {
     tvRefcountedDecRef(prop);
   }
-  auto const size = ObjectData::sizeForNProps(nProps) +
-                    sizeof(c_Closure) - sizeof(ObjectData);
-  MM().objFree(obj, size);
+  auto hdr = closure->hdr();
+  MM().objFree(hdr, hdr->size());
 }
 
 void PreClassEmitter::setClosurePreClass() {
-  m_builtinObjSize = sizeof(c_Closure) - sizeof(ObjectData);
-  m_instanceCtor = closureInstanceCtor;
+  m_instanceCtor = RuntimeOption::RepoAuthoritative ?
+    closureInstanceCtorRepoAuth : closureInstanceCtor;
   m_instanceDtor = closureInstanceDtor;
 }
 

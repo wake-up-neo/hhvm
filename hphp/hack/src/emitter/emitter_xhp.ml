@@ -48,7 +48,7 @@ let convert_prop prop =
         | N.Hprim N.Tbool -> XC.cTYPE_BOOL, null
         | N.Hprim N.Tint -> XC.cTYPE_INTEGER, null
         | N.Harray _ | N.Htuple _ | N.Hshape _ -> XC.cTYPE_ARRAY, null
-        | N.Habstr (s, _) | N.Happly ((_, s), _) ->
+        | N.Habstr s | N.Happly ((_, s), _) ->
           XC.cTYPE_OBJECT, (p, N.String (p, C.fmt_name s))
         | N.Hprim (N.Tvoid | N.Tresource | N.Tnum |
                    N.Tarraykey | N.Tnoreturn as pr) ->
@@ -77,7 +77,7 @@ let named_body block = N.NamedBody {N.fnb_nast = block; N.fnb_unsafe = false }
 let empty_method name =
   {
     N.m_final = false; m_abstract = false; m_visibility = N.Protected;
-    m_tparams = []; m_variadic = N.FVnonVariadic;
+    m_tparams = []; m_where_constraints = []; m_variadic = N.FVnonVariadic;
     m_params = []; m_fun_kind = Ast.FSync;
     m_user_attributes = []; m_ret = None;
     m_body = named_body [];
@@ -101,7 +101,7 @@ let make_attr_decl_method cls xhp_props =
 
   let convert_attr_use = function
     | pos, N.Happly ((_, cls), _) ->
-      make_attr_decl_call pos (N.CI (pos, cls))
+      make_attr_decl_call pos (N.CI ((pos, cls), []))
     | _ -> C.bug "xhp attr use not apply??"
   in
 
@@ -202,5 +202,5 @@ let convert_xml p (id, attrs, children) =
   let line = p, N.Int (p, string_of_int line) in
   p,
   N.New (
-    N.CI id,
+    N.CI (id, []),
     [attrs_array; children_array; filename; line], [])

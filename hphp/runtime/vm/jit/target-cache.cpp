@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,14 +22,16 @@
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/stats.h"
 #include "hphp/runtime/base/strings.h"
-#include "hphp/runtime/vm/treadmill.h"
 
 #include "hphp/runtime/vm/jit/smashable-instr.h"
-#include "hphp/runtime/vm/jit/tc.h"
 #include "hphp/runtime/vm/jit/tc-internal.h"
+#include "hphp/runtime/vm/jit/tc.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/translator-runtime.h"
 #include "hphp/runtime/vm/jit/write-lease.h"
+
+#include "hphp/runtime/vm/method-lookup.h"
+#include "hphp/runtime/vm/treadmill.h"
 
 #include "hphp/util/text-util.h"
 
@@ -102,7 +104,7 @@ void FuncCache::lookup(rds::Handle handle,
   const StringData* pairSd = pair->m_key;
   if (!stringMatches(pairSd, sd)) {
     // Miss. Does it actually exist?
-    auto const* func = Unit::lookupFunc(sd);
+    auto const* func = Unit::lookupDynCallFunc(sd);
     if (UNLIKELY(!func)) {
       ObjectData *this_ = nullptr;
       Class* self_ = nullptr;
@@ -138,12 +140,13 @@ void FuncCache::lookup(rds::Handle handle,
     }
     assertx(!func->implCls());
     func->validate();
-    pair->m_key = const_cast<StringData*>(func->name()); // use a static name
+    pair->m_key =
+      const_cast<StringData*>(func->displayName()); // use a static name
     pair->m_value = func;
   }
   ar->m_func = pair->m_value;
   ar->trashThis();
-  assertx(stringMatches(pair->m_key, pair->m_value->name()));
+  assertx(stringMatches(pair->m_key, pair->m_value->displayName()));
   pair->m_value->validate();
 }
 
@@ -200,13 +203,7 @@ namespace {
 [[noreturn]] NEVER_INLINE
 void raiseFatal(ActRec* ar, Class* cls, StringData* name, Class* ctx) {
   try {
-    g_context->lookupMethodCtx(
-      cls,
-      name,
-      ctx,
-      CallType::ObjMethod,
-      true // raise error
-    );
+    lookupMethodCtx(cls, name, ctx, CallType::ObjMethod, true /* raise */);
     not_reached();
   } catch (...) {
     // The jit stored an ObjectData in the ActRec, but we didn't set
@@ -238,7 +235,7 @@ void nullFunc(ActRec* ar, StringData* name) {
 template<bool fatal>
 NEVER_INLINE
 void lookup(Entry* mce, ActRec* ar, StringData* name, Class* cls, Class* ctx) {
-  auto func = g_context->lookupMethodCtx(
+  auto func = lookupMethodCtx(
     cls,
     name,
     ctx,
@@ -260,7 +257,7 @@ void lookup(Entry* mce, ActRec* ar, StringData* name, Class* cls, Class* ctx) {
     return;
   }
 
-  auto const isStatic = func->isStaticInProlog();
+  auto const isStatic = func->isStaticInPrologue();
   mce->m_key   = reinterpret_cast<uintptr_t>(cls) | uintptr_t{isStatic} << 1;
   mce->m_value = func;
   ar->m_func   = func;
@@ -311,6 +308,9 @@ void readPublicStatic(Entry* mce,
   auto const obj = ar->getThis();
   ar->setClass(cls);
   decRefObj(obj);
+}
+
+///////////////////////////////////////////////////////////////////////////////
 }
 
 template<bool fatal>
@@ -368,7 +368,7 @@ void handleSlowPath(rds::Handle mce_handle,
     }
     mceValue = mce->m_value;
   }
-  assertx(!mceValue->isStaticInProlog());
+  assertx(!mceValue->isStaticInPrologue());
 
   // Note: if you manually CSE mceValue->methodSlot() here, gcc 4.8
   // will strangely generate two loads instead of one.
@@ -434,7 +434,7 @@ void handleSlowPath(rds::Handle mce_handle,
       // Bummer.
       ar->m_func   = cand;
       mce->m_value = cand;
-      if (UNLIKELY(cand->isStaticInProlog())) {
+      if (UNLIKELY(cand->isStaticInPrologue())) {
         return readPublicStatic<fatal>(mce, ar, cls, cand);
       }
       mce->m_key = reinterpret_cast<uintptr_t>(cls);
@@ -451,7 +451,7 @@ void handleSlowPath(rds::Handle mce_handle,
     // call the new implementation too.  We also know the new function
     // can't be static, because the last one wasn't.
     if (LIKELY(cand->baseCls() == mceValue->baseCls())) {
-      assertx(!cand->isStaticInProlog());
+      assertx(!cand->isStaticInPrologue());
       ar->m_func   = cand;
       mce->m_value = cand;
       mce->m_key   = reinterpret_cast<uintptr_t>(cls);
@@ -460,9 +460,6 @@ void handleSlowPath(rds::Handle mce_handle,
   }
 
   return lookup<fatal>(mce, ar, name, cls, ctx);
-}
-
-///////////////////////////////////////////////////////////////////////////////
 }
 
 template<bool fatal>
@@ -507,10 +504,6 @@ void handlePrimeCacheInit(rds::Handle mce_handle,
 
   // First fill the request local method cache for this call.
   lookup<fatal>(mce, ar, name, cls, ctx);
-
-  // We are using whether the code is already smashed to determine which thread
-  // should free the SmashLoc.
-  auto codeLock = tc::lockCode();
 
   auto smashMov = [&] (TCA addr, uintptr_t value) -> bool {
     auto const imm = smashableMovqImm(addr);
@@ -563,12 +556,8 @@ void handlePrimeCacheInit(rds::Handle mce_handle,
 
   // Regardless of whether the inline cache was populated, smash the
   // call to start doing real dispatch.
-#ifdef MSVC_REQUIRE_AUTO_TEMPLATED_OVERLOAD
-  auto hsp = handleSlowPath<fatal>;
-  smashCall(callAddr, reinterpret_cast<TCA>(hsp));
-#else
-  smashCall(callAddr, reinterpret_cast<TCA>(handleSlowPath<fatal>));
-#endif
+  smashCall(callAddr, fatal ?
+            tc::ustubs().handleSlowPathFatal : tc::ustubs().handleSlowPath);
 }
 
 template
@@ -578,6 +567,14 @@ void handlePrimeCacheInit<false>(rds::Handle, ActRec*, StringData*,
 template
 void handlePrimeCacheInit<true>(rds::Handle, ActRec*, StringData*,
                                 Class*, Class*, uintptr_t);
+
+template
+void handleSlowPath<false>(rds::Handle, ActRec*, StringData*,
+                           Class*, Class*, uintptr_t);
+
+template
+void handleSlowPath<true>(rds::Handle, ActRec*, StringData*,
+                          Class*, Class*, uintptr_t);
 
 } // namespace MethodCache
 
@@ -628,7 +625,6 @@ StaticMethodCache::lookup(rds::Handle handle, const NamedEntity *ne,
         clsName->data(), methName->data(), __builtin_return_address(0));
 
   const Func* f;
-  auto const ec = g_context.getNoCheck();
   auto const cls = Unit::loadClass(ne, clsName);
   if (UNLIKELY(!cls)) {
     raise_error(Strings::UNKNOWN_CLASS, clsName->data());
@@ -643,12 +639,12 @@ StaticMethodCache::lookup(rds::Handle handle, const NamedEntity *ne,
     assertx(rds::handleToRef<LowPtr<Class>>(cls_ch).get() == cls);
   }
 
-  LookupResult res = ec->lookupClsMethod(f, cls, methName,
-                                         nullptr, // there may be an active
-                                                  // this, but we can just fall
-                                                  // through in that case.
-                                         arGetContextClass((ActRec*)vmfp),
-                                         false /*raise*/);
+  LookupResult res = lookupClsMethod(f, cls, methName,
+                                     nullptr, // there may be an active
+                                              // this, but we can just fall
+                                              // through in that case.
+                                     arGetContextClass((ActRec*)vmfp),
+                                     false /*raise*/);
   if (LIKELY(res == LookupResult::MethodFoundNoThis &&
              !f->isAbstract() &&
              f->isStatic())) {
@@ -678,11 +674,10 @@ StaticMethodFCache::lookup(rds::Handle handle, const Class* cls,
   Stats::inc(Stats::TgtCache_StaticMethodFHit, -1);
 
   const Func* f;
-  auto const ec = g_context.getNoCheck();
-  LookupResult res = ec->lookupClsMethod(f, cls, methName,
-                                         nullptr,
-                                         arGetContextClass((ActRec*)vmfp),
-                                         false /*raise*/);
+  LookupResult res = lookupClsMethod(f, cls, methName,
+                                     nullptr,
+                                     arGetContextClass((ActRec*)vmfp),
+                                     false /*raise*/);
   assertx(res != LookupResult::MethodFoundWithThis); // Not possible: no this.
   if (LIKELY(res == LookupResult::MethodFoundNoThis && !f->isAbstract())) {
     // We called lookupClsMethod with a NULL this and got back a method that

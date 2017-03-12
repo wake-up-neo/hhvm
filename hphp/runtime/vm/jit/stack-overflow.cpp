@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -53,7 +53,7 @@ void handleStackOverflow(ActRec* calleeAR) {
   /*
    * First synchronize registers.
    *
-   * We can't finish setting up the prolog here, so there is no
+   * We can't finish setting up the prologue here, so there is no
    * "correct" vm state. However, we need to mark the registers clean
    * because sync_regstate in unwind-itanium.cpp doesn't know how to
    * clean them.

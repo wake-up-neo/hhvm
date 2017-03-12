@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,10 +17,8 @@
 #include "hphp/tools/hfsort/hfutil.h"
 
 #include <stdio.h>
-#include <assert.h>
 #include <zlib.h>
 #include <ctype.h>
-#include <stdarg.h>
 #include <cxxabi.h>
 #include <unordered_map>
 
@@ -105,16 +103,7 @@ void readPerfData(CallGraph& cg, gzFile file, bool computeArcWeight) {
 
   if (!computeArcWeight) return;
 
-  // Normalize incoming arc weights and compute avgCallOffset for each node.
-  for (TargetId f = 0; f < cg.targets.size(); f++) {
-    auto& func = cg.targets[f];
-    for (auto src : func.preds) {
-      auto& arc = *cg.arcs.find(Arc(src, f));
-      arc.normalizedWeight = arc.weight / func.samples;
-      arc.avgCallOffset = arc.avgCallOffset / arc.weight;
-      assert(arc.avgCallOffset < cg.targets[src].size);
-    }
-  }
+  cg.normalizeArcWeights();
 }
 
 void readEdgcntData(CallGraph& cg, FILE* file) {
@@ -189,9 +178,9 @@ void print(CallGraph& cg, const char* filename,
   HFTRACE(1, "============== page 0 ==============\n");
   for (auto& cluster : clusters) {
     HFTRACE(1,
-            "-------- density = %.3lf (%u / %u) arcWeight = %.1lf --------\n",
+            "-------- density = %.3lf (%u / %u) --------\n",
             (double) cluster.samples / cluster.size,
-            cluster.samples, cluster.size, cluster.arcWeight);
+            cluster.samples, cluster.size);
     for (auto fid : cluster.targets) {
       if (cg.targets[fid].samples > 0) {
         hotfuncs++;
@@ -263,6 +252,7 @@ Algorithm checkAlgorithm(const char* algorithm) {
   auto a = HPHP::toLower(algorithm);
 
   if (a == "hfsort") return Algorithm::Hfsort;
+  if (a == "hfsortplus") return Algorithm::HfsortPlus;
   if (a == "pettishansen") return Algorithm::PettisHansen;
 
   return Algorithm::Invalid;
@@ -290,10 +280,13 @@ int main(int argc, char* argv[]) {
   extern char* optarg;
   extern int optind;
   int c;
-  while ((c = getopt(argc, argv, "pe:w")) != -1) {
+  while ((c = getopt(argc, argv, "pae:w")) != -1) {
     switch (c) {
       case 'p':
         algorithm = Algorithm::PettisHansen;
+        break;
+      case 'a':
+        algorithm = Algorithm::HfsortPlus;
         break;
       case 'e':
         edgcntFileName = optarg;
@@ -310,6 +303,7 @@ int main(int argc, char* argv[]) {
     error(
       "Usage: hfsort [-p] [-e <EDGCNT_FILE>] [-w] <SYMBOL_FILE> <PERF_DATA_FILE>\n"
       "   -p,               use pettis-hansen algorithm for code layout\n"
+      "   -a,               use hfsort-plus algorithm for code layout\n"
       "   -e <EDGCNT_FILE>, use edge profile result to build the call graph\n"
       "   -w                use wildcards instead of suffixes in function names"
     );
@@ -334,7 +328,10 @@ int main(int argc, char* argv[]) {
     readEdgcntData(cg, edgcntFile);
     fclose(edgcntFile);
   }
-  cg.printDot("cg.dot");
+  cg.printDot("cg.dot",
+              [&](TargetId id) {
+                return cg.funcs[id].mangledNames[0].c_str();
+              });
 
   std::vector<Cluster> clusters;
 
@@ -343,11 +340,16 @@ int main(int argc, char* argv[]) {
     HFTRACE(1, "=== algorithm : hfsort\n\n");
     clusters = clusterize(cg);
     filename = "hotfuncs.txt";
-  } else {
+  } else if (algorithm == Algorithm::HfsortPlus) {
+    HFTRACE(1, "=== algorithm : hfsort-plus\n\n");
+    clusters = hfsortPlus(cg);
+    filename = "hotfuncs.txt";
+  } else if (algorithm == Algorithm::PettisHansen) {
     HFTRACE(1, "=== algorithm : pettis-hansen\n\n");
-    assert(algorithm == Algorithm::PettisHansen);
     clusters = pettisAndHansen(cg);
     filename = "hotfuncs-pettis.txt";
+  } else {
+    error("Unknown layout algorithm\n");
   }
 
   sort(clusters.begin(), clusters.end(), compareClustersDensity);

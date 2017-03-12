@@ -21,6 +21,7 @@
 #include "hphp/runtime/ext/xdebug/php5_xdebug/xdebug_var.h"
 
 #include "hphp/compiler/builtin_symbols.h"
+#include "hphp/runtime/base/backtrace.h"
 #include "hphp/runtime/base/file.h"
 #include "hphp/runtime/base/static-string-table.h"
 #include "hphp/runtime/base/string-util.h"
@@ -136,17 +137,15 @@ static Variant do_eval(Unit* evalUnit, int depth, bool bypassCheck) {
 
   g_context->debuggerSettings.bypassCheck = bypassCheck;
   // Do the eval
-  Variant result;
-  bool failure = g_context->evalPHPDebugger((TypedValue*)&result,
-                                            evalUnit, depth);
+  auto const result = g_context->evalPHPDebugger(evalUnit, depth);
   g_context->debuggerSettings.bypassCheck = false;
 
   // Restore the error reporting level and then either return or throw
   req_data.setErrorReportingLevel(old_level);
-  if (failure) {
-    throw_exn(Error::EvaluatingCode);
+  if (result.failed) {
+    throw_exn(Error::EvaluatingCode, result.error);
   }
-  return result;
+  return result.result;
 }
 
 // Same as do_eval(const Unit*, int) except that this evaluates a string
@@ -203,14 +202,14 @@ xdebug_xml_node* breakpoint_xml_node(
     // Line breakpoints add a file, line, and possibly a condition
     case XDebugBreakpoint::Type::LINE:
       xdebug_xml_add_attribute(xml, "type", "line");
-      xdebug_xml_add_attribute_dup(xml, "filename",
-                                   xdebug_path_to_url(bp.fileName).data());
+      xdebug_xml_add_attribute(xml, "filename",
+                               xdebug_path_to_url(bp.fileName.c_str()));
       xdebug_xml_add_attribute(xml, "lineno", bp.line);
 
       // Add the condition. cast is due to xml api
       if (bp.conditionUnit != nullptr) {
         xdebug_xml_node* expr_xml = xdebug_xml_node_init("expression");
-        xdebug_xml_add_text(expr_xml, xdstrdup(bp.condition.data()));
+        xdebug_xml_add_text(expr_xml, xdstrdup(bp.condition.c_str()));
         xdebug_xml_add_child(xml, expr_xml);
       }
       break;
@@ -221,19 +220,17 @@ xdebug_xml_node* breakpoint_xml_node(
     // Call breakpoints add function + class (optionally)
     case XDebugBreakpoint::Type::CALL:
       xdebug_xml_add_attribute(xml, "type", "call");
-      xdebug_xml_add_attribute_dup(xml, "function", bp.funcName.data());
-      if (!bp.className.isNull()) {
-        xdebug_xml_add_attribute_dup(xml, "class",
-                                     bp.className.toString().data());
+      xdebug_xml_add_attribute_dup(xml, "function", bp.funcName.c_str());
+      if (bp.className.hasValue()) {
+        xdebug_xml_add_attribute_dup(xml, "class", bp.className.value().c_str());
       }
       break;
     // Return breakpoints add function + class (optionally)
     case XDebugBreakpoint::Type::RETURN:
       xdebug_xml_add_attribute(xml, "type", "return");
-      xdebug_xml_add_attribute_dup(xml, "function", bp.funcName.data());
-      if (!bp.className.isNull()) {
-        xdebug_xml_add_attribute_dup(xml, "class",
-                                     bp.className.toString().data());
+      xdebug_xml_add_attribute_dup(xml, "function", bp.funcName.c_str());
+      if (bp.className.hasValue()) {
+        xdebug_xml_add_attribute_dup(xml, "class", bp.className.value().c_str());
       }
       break;
   }
@@ -669,18 +666,18 @@ struct BreakpointSetCmd : XDebugCommand {
         if (filename == staticEmptyString()) {
           throw_exn(Error::StackDepthInvalid);
         }
-        bp.fileName = String(filename);
+        bp.fileName = filename->toCppString();
       } else {
-        bp.fileName = xdebug_path_from_url(args['f'].toString());
+        bp.fileName = xdebug_path_from_url(args['f'].toString()).toCppString();
       }
 
       // Ensure consistency between filenames
-      bp.fileName = File::TranslatePath(bp.fileName);
+      bp.fileName = File::TranslatePath(String(bp.fileName)).toCppString();
 
       // Create the condition unit if a condition string was supplied
       if (!args['-'].isNull()) {
         auto condition = StringUtil::Base64Decode(args['-'].toString());
-        bp.condition = condition;
+        bp.condition = condition.toCppString();
         bp.conditionUnit = compile_expression(condition);
       }
     }
@@ -691,18 +688,18 @@ struct BreakpointSetCmd : XDebugCommand {
       if (args['m'].isNull()) {
         throw_exn(Error::InvalidArgs);
       }
-      bp.funcName = args['m'].toString();
+      bp.funcName = args['m'].toString().toCppString();
 
       // This is in php5 xdebug, but not in the spec. If 'a' is passed, the
       // value is expected to be a class name that will be prepended to the
       // passed method name.
       if (!args['a'].isNull()) {
-        bp.className = args['a'];
+        bp.className = args['a'].toString().toCppString();
       }
 
       // Precompute full function name
-      bp.fullFuncName = bp.className.isNull() ?
-        bp.funcName : (bp.className.toString() + "::" + bp.funcName);
+      bp.fullFuncName = !bp.className.hasValue() ?
+        bp.funcName : (bp.className.value() + "::" + bp.funcName);
     }
 
     // Exception type
@@ -710,7 +707,7 @@ struct BreakpointSetCmd : XDebugCommand {
       if (args['x'].isNull()) {
         throw_exn(Error::InvalidArgs);
       }
-      bp.exceptionName = args['x'].toString();
+      bp.exceptionName = args['x'].toString().toCppString();
       return;
     }
   }
@@ -943,7 +940,9 @@ struct StackDepthCmd : XDebugCommand {
 // Returns the stack at the given depth, or the entire stack if no depth is
 // provided
 
-const StaticString s_FILE("file");
+const StaticString s_file("file");
+const StaticString s_line("line");
+const StaticString s_function("function");
 
 struct StackGetCmd : XDebugCommand {
   StackGetCmd(XDebugServer& server, const String& cmd, const Array& args)
@@ -962,76 +961,54 @@ struct StackGetCmd : XDebugCommand {
   bool isValidInStatus(Status status) const override { return true; }
 
   void handleImpl(xdebug_xml_node& xml) override {
-    int oldestEvalFrameDepth = findOldestEvalFrameDepth();
-    // Iterate up the stack. We need to keep track of both the frame actrec and
-    // our current depth in case the client passed us a depth
-    Offset offset;
-    int depth = 0;
-    for (const ActRec* fp = g_context->getStackFrame();
-         fp != nullptr && (m_clientDepth == -1 || depth <= m_clientDepth);
-         fp = g_context->getPrevVMState(fp, &offset), depth++) {
+    auto backtraceArgs = BacktraceArgs()
+      .withSelf()
+      .withPseudoMain();
+    if (m_clientDepth >= 0) {
+      backtraceArgs.setLimit(m_clientDepth);
+    }
+    const Array backtrace = createBacktrace(backtraceArgs);
+    for (int depth = 0; depth < backtrace.size() - 1; depth++) {
       // If a depth was provided, we're only interested in that depth
       if (m_clientDepth < 0 || depth == m_clientDepth) {
-        auto frame = getFrame(fp, offset, depth, oldestEvalFrameDepth);
-        xdebug_xml_add_child(&xml, frame);
+        // We need the function name in the parent frame, because in this
+        // data structure, a frame's function name is actually the function
+        // being called in that frame.
+        const auto parent_frame = backtrace.rvalAt(depth + 1);
+        const auto func_name = parent_frame.getArrayData()->get(s_function);
+        const auto frame = backtrace.rvalAt(depth);
+        const auto xdebug_frame = getFrame(
+          frame.getArrayData(),
+          depth,
+          func_name.toString()
+        );
+        xdebug_xml_add_child(&xml, xdebug_frame);
       }
     }
   }
 
 private:
-  // Returns -1 if there are no eval frames on the stack, otherwise
-  // returns the index of the first eval frame.
-  int findOldestEvalFrameDepth() {
-    int oldestEvalFrameDepth = -1;
-    int depth = 0;
-    for (auto fp = g_context->getStackFrame();
-         fp != nullptr;
-         fp = g_context->getPrevVMState(fp), depth++) {
-      const auto func = fp->func();
-      if (func->isPseudoMain() && g_context->getPrevVMState(fp) != nullptr) {
-        oldestEvalFrameDepth = depth;
-      }
-    }
-    return oldestEvalFrameDepth;
-  }
-
   // Returns the xml node for the given stack frame. If level is non-zero,
   // offset is the current offset within the frame
   xdebug_xml_node* getFrame(
-    const ActRec* fp,
-    Offset offset,
+    HPHP::ArrayData* frame,
     int level,
-    int oldestEvalFrameDepth
+    const String& func_name
   ) {
-    const auto func = fp->func();
-    const auto unit = fp->unit();
-
-    // Compute the function name. php5 xdebug includes names for each type of
-    // include, we don't have access to that
-    auto const func_name =
-      func->isPseudoMain() ?
-        (g_context->getPrevVMState(fp) == nullptr ? "{main}" : "include") :
-        func->fullName()->data();
+    const auto file = frame->get(s_file);
+    const auto line = frame->get(s_line);
 
     // Create the frame node
-    auto node = xdebug_xml_node_init("stack");
-    xdebug_xml_add_attribute(node, "where", func_name);
+    const auto node = xdebug_xml_node_init("stack");
+    xdebug_xml_add_attribute_dup(node, "where", func_name.data());
     xdebug_xml_add_attribute(node, "level", level);
-    if (level <= oldestEvalFrameDepth) {
-      xdebug_xml_add_attribute(node, "type", "eval");
-    } else {
-      xdebug_xml_add_attribute(node, "type", "file");
-    }
+    xdebug_xml_add_attribute(node, "type", "file");
 
-    // Grab the file/line for the frame. For level 0, this is the current
-    // file/line, for all other frames this is the stored file/line #
-    auto file =
-      xdebug_path_to_url(String(const_cast<StringData*>(unit->filepath())));
-    auto line = level == 0 ? g_context->getLine() : unit->getLineNumber(offset);
+    const auto xdebug_file = xdebug_path_to_url(file.toString());
 
     // Add the call file/line. Duplication is necessary due to xml api
-    xdebug_xml_add_attribute_dup(node, "filename", file.data());
-    xdebug_xml_add_attribute(node, "lineno", line);
+    xdebug_xml_add_attribute_dup(node, "filename", xdebug_file.data());
+    xdebug_xml_add_attribute(node, "lineno", line.toInt64());
     return node;
   }
 
@@ -1469,7 +1446,8 @@ struct SourceCmd : XDebugCommand {
     // Compute the source string. The initial size is arbitrary, we just guess
     // 80 characters per line
     StringBuffer buf((m_endLine - m_beginLine) * 80);
-    ArrayIter iter(source); iter.setPos(m_beginLine);
+    ArrayIter iter(source);
+    iter.advance(m_beginLine);
     for (int i = m_beginLine; i <= m_endLine && iter; i++, ++iter) {
       buf.append(iter.second());
     }

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -21,7 +21,6 @@
 #include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/ini-setting.h"
 #include "hphp/runtime/base/memory-manager.h"
-#include "hphp/runtime/base/request-event-handler.h"
 #include "hphp/runtime/base/request-local.h"
 #include "hphp/runtime/base/system-profiler.h"
 #include "hphp/runtime/base/variable-serializer.h"
@@ -53,9 +52,6 @@
 #define HP_STACK_DELIM_LEN    (sizeof(HP_STACK_DELIM) - 1)
 
 namespace HPHP {
-
-using std::vector;
-using std::string;
 
 const StaticString s_hotprofiler("hotprofiler");
 
@@ -573,9 +569,6 @@ public:
     return m_flags & NoTrackBuiltins;
   }
 
-  void vscan(IMarker& mark) const override {
-  }
-
 private:
   uint32_t m_flags;
 };
@@ -748,8 +741,8 @@ struct TraceWalker {
     incStats(m_arcBuff, tIt, callee, stats);
   }
 
-  vector<std::pair<char*, int>> m_recursion;
-  vector<Frame> m_stack;
+  std::vector<std::pair<char*, int>> m_recursion;
+  std::vector<Frame> m_stack;
   int m_arcBuffLen;
   char *m_arcBuff;
   int m_badArcCount;
@@ -972,9 +965,6 @@ struct TraceProfiler final : Profiler {
     return m_flags & NoTrackBuiltins;
   }
 
-  void vscan(IMarker& mark) const override {
-  }
-
   TraceEntry* m_traceBuffer;
   TraceEntry m_finalEntry;
   int m_traceBufferSize;
@@ -1053,10 +1043,6 @@ public:
 
       ret.set(String(timestr), String(sample.second));
     }
-  }
-
-  void vscan(IMarker& mark) const override {
-    // nothing to mark
   }
 
 private:
@@ -1285,22 +1271,13 @@ struct MemoProfiler final : Profiler {
   }
 
   struct MemberMemoInfo {
-    template<class F> void scan(F& mark) const {
-      mark(m_return_value);
-      mark(m_ret_tv);
-    }
     String m_return_value;
     TypedValue m_ret_tv;
     int m_count{0};
   };
-  using MemberMemoMap = hphp_hash_map<std::string, MemberMemoInfo, string_hash>;
+  using MemberMemoMap = req::hash_map<std::string,MemberMemoInfo,string_hash>;
 
   struct MemoInfo {
-    template<class F> void scan(F& mark) const {
-      for (auto& e : m_member_memos) e.second.scan(mark);
-      mark(m_return_value);
-      mark(m_ret_tv);
-    }
     MemberMemoMap m_member_memos; // Keyed by serialized args
     String m_return_value;
     TypedValue m_ret_tv;
@@ -1309,25 +1286,17 @@ struct MemoProfiler final : Profiler {
     bool m_has_this{false};
     bool m_ret_tv_same{true};
   };
-  using MemoMap = hphp_hash_map<std::string, MemoInfo, string_hash>;
+  using MemoMap = req::hash_map<std::string, MemoInfo, string_hash>;
 
   struct Frame {
     explicit Frame(const char* symbol) : m_symbol(symbol) {}
-    template<class F> void scan(F& mark) const {
-      mark(m_args);
-    }
     const char* m_symbol;
     String m_args;
   };
 
-  void vscan(IMarker& mark) const override {
-    for (auto& e : m_memos) e.second.scan(mark);
-    for (auto& f : m_stack) f.scan(mark);
-  }
-
 public:
   MemoMap m_memos; // Keyed by function name
-  vector<Frame> m_stack;
+  req::vector<Frame> m_stack;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1342,19 +1311,19 @@ bool ProfilerFactory::start(ProfilerKind kind,
 
   switch (kind) {
   case ProfilerKind::Hierarchical:
-    m_profiler = new HierarchicalProfiler(flags);
+    m_profiler = req::make_raw<HierarchicalProfiler>(flags);
     break;
   case ProfilerKind::Sample:
-    m_profiler = new SampleProfiler();
+    m_profiler = req::make_raw<SampleProfiler>();
     break;
   case ProfilerKind::Trace:
-    m_profiler = new TraceProfiler(flags);
+    m_profiler = req::make_raw<TraceProfiler>(flags);
     break;
   case ProfilerKind::Memo:
-    m_profiler = new MemoProfiler(flags);
+    m_profiler = req::make_raw<MemoProfiler>(flags);
     break;
   case ProfilerKind::XDebug:
-    m_profiler = new XDebugProfiler();
+    m_profiler = req::make_raw<XDebugProfiler>();
     break;
   case ProfilerKind::External:
     if (g_system_profiler) {
@@ -1379,11 +1348,10 @@ bool ProfilerFactory::start(ProfilerKind kind,
       m_profiler->beginFrame("main()");
     }
     return true;
-  } else {
-    delete m_profiler;
-    m_profiler = nullptr;
-    return false;
   }
+  req::destroy_raw(m_profiler);
+  m_profiler = nullptr;
+  return false;
 }
 
 Variant ProfilerFactory::stop() {
@@ -1392,7 +1360,7 @@ Variant ProfilerFactory::stop() {
 
     Array ret;
     m_profiler->writeStats(ret);
-    delete m_profiler;
+    req::destroy_raw(m_profiler);
     m_profiler = nullptr;
     ThreadInfo::s_threadInfo->m_profiler = nullptr;
 

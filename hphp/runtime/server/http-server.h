@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,22 +19,25 @@
 
 #include "hphp/runtime/server/server.h"
 #include "hphp/runtime/server/satellite-server.h"
+#include "hphp/runtime/server/shutdown-stats.h"
 #include "hphp/util/async-func.h"
 
-namespace HPHP {
-struct MemInfo;
+#include <folly/MicroSpinLock.h>
 
+namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 struct HttpServer : Synchronizable, TakeoverListener,
                     Server::ServerEventListener {
   static std::shared_ptr<HttpServer> Server;
   static time_t StartTime;
+  static std::atomic<double> LoadFactor;
 
 private:
   static std::atomic_int_fast64_t PrepareToStopTime;
-  static std::atomic_int LoadFactor;
   static time_t OldServerStopTime;
+  static std::vector<ShutdownStat> ShutdownStats;
+  static folly::MicroSpinLock StatsLock; // for ShutdownStats
 
 public:
   explicit HttpServer();
@@ -68,9 +71,9 @@ public:
   // Get total ongoing/queued request count for all satellite servers.
   std::pair<int, int> getSatelliteRequestCount() const;
 
-  static int GetLoadFactor() {
-    return LoadFactor.load(std::memory_order_relaxed);
-  }
+  static void MarkShutdownStat(ShutdownEvent event);
+  static void LogShutdownStats();
+
   static int64_t GetPrepareToStopTime() {
     // Make sure changes are seen right away after PrepareToStop().
     return PrepareToStopTime.load(std::memory_order_acquire);

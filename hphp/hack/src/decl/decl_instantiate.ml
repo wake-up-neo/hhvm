@@ -29,13 +29,12 @@ let rec instantiate subst (r, ty: decl ty) =
    *)
   if SMap.is_empty subst then (r, ty) else
   match ty with
-  | Tgeneric (x, cstrl) ->
+  | Tgeneric x ->
       (match SMap.get x subst with
       | Some x_ty ->
         (Reason.Rinstantiate (fst x_ty, x, r), snd x_ty)
       | None ->
-        (r, Tgeneric (x, List.map cstrl
-             (fun (ck, ty) -> (ck, instantiate subst ty))))
+        (r, Tgeneric x)
       )
   | _ ->
       let ty = instantiate_ subst ty in
@@ -57,6 +56,7 @@ and instantiate_ subst x =
   | Tthis -> Tthis
   | Tmixed -> Tmixed
   | Tany
+  | Terr
   | Tprim _ as x -> x
   | Ttuple tyl ->
       let tyl = List.map tyl (instantiate subst) in
@@ -86,8 +86,12 @@ and instantiate_ subst x =
       let tparams = List.map ft.ft_tparams begin fun (var, name, cstrl) ->
         (var, name, List.map cstrl
            (fun (ck, ty) -> (ck, instantiate subst ty))) end in
+      let where_constraints = List.map ft.ft_where_constraints
+          begin (fun (ty1, ck, ty2) ->
+            (instantiate subst ty1, ck, instantiate subst ty2)) end in
       Tfun { ft with ft_arity = arity; ft_params = params;
-                     ft_ret = ret; ft_tparams = tparams }
+                     ft_ret = ret; ft_tparams = tparams;
+                     ft_where_constraints = where_constraints }
   | Tapply (x, tyl) ->
       let tyl = List.map tyl (instantiate subst) in
       Tapply (x, tyl)

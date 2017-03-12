@@ -108,7 +108,10 @@ def tbb_chm_at(chm, key, hasher=None):
     h -= 1 << s & ~1                            # segment_base
 
     # bucket_accessor b(this, h & m) <=> this->get_bucket(h & m).
-    seg = chm['my_table'][s]
+    try:
+        seg = chm['my_table'][s]
+    except:
+        return None
     b = seg[h].address
 
     if b['node_list'] == V('tbb::interface5::internal::rehash_req'):
@@ -216,11 +219,7 @@ def tread_hash_map_at(thm, key, hasher=None):
 # PHP value accessors.
 
 def _object_data_prop_vec(obj):
-    cls = rawptr(obj['m_cls'])
-    extra = rawptr(cls['m_extra'])
-
-    prop_vec = (obj.address + 1).cast(T('uintptr_t')) + \
-                extra['m_builtinODTailSize']
+    prop_vec = (obj.address + 1).cast(T('uintptr_t'))
     return prop_vec.cast(T('HPHP::TypedValue').pointer())
 
 
@@ -320,8 +319,12 @@ hash, if valid, will be used instead of the default hash for the key type.
             print('idx: Element not found.')
             return None
 
+        ty = str(value.type.pointer())
+        ty_parts = re.split('([*&])', ty, 1)
+        ty_parts[0] = "'%s'" % ty_parts[0]
+
         gdb.execute('print *(%s)%s' % (
-            str(value.type.pointer()), str(value.address)))
+            ''.join(ty_parts), str(value.address)))
 
 
 class IdxFunction(gdb.Function):

@@ -8,10 +8,6 @@
  *
  *)
 
-val oldify_file_info: Relative_path.t -> FileInfo.t -> unit
-
-val revive_file_info: Relative_path.t -> FileInfo.t -> unit
-
 (* When typechecking a content buffer in IDE mode,
 * this is the path that will be assigned to it *)
 val path: Relative_path.t
@@ -33,7 +29,8 @@ val check_file_input :
  * while the declared definitions are still available in shared memory.
  * The declarations will be removed from shared memory afterwards. *)
 val declare_and_check : string ->
-  f:(Relative_path.t -> FileInfo.t -> 'a) -> 'a
+  f:(Relative_path.t -> FileInfo.t -> 'a) -> TypecheckerOptions.t -> 'a
+
 
 (* Run the typing phase on a list of files and definitions they contain. *)
 val recheck :

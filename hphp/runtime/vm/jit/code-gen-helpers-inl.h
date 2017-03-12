@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -60,24 +60,18 @@ template<class Destroy>
 void emitDecRefWork(Vout& v, Vout& vcold, Vreg data,
                     Destroy destroy, bool unlikelyDestroy) {
   auto const sf = v.makeReg();
-  switch (arch()) {
-    case Arch::X64:
-    case Arch::PPC64:
-      v << cmplim{1, data[FAST_REFCOUNT_OFFSET], sf};
-      break;
-    case Arch::ARM:
-      v << cmplims{1, data[FAST_REFCOUNT_OFFSET], sf};
-      break;
-  }
+  v << cmplim{1, data[FAST_REFCOUNT_OFFSET], sf};
   ifThenElse(
     v, vcold, CC_E, sf,
     destroy,
     [&] (Vout& v) {
       // If it's not static, actually reduce the reference count.  This does
       // another branch using the same status flags from the cmplim above.
-      ifThen(v, CC_NL, sf, [&] (Vout& v) { emitDecRef(v, data); });
+      ifThen(v, CC_NL, sf, [&] (Vout& v) { emitDecRef(v, data); },
+             tag_from_string("decref-is-static"));
     },
-    unlikelyDestroy
+    unlikelyDestroy,
+    tag_from_string("decref-is-one")
   );
 }
 

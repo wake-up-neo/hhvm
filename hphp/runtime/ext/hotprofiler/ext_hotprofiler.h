@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -242,9 +242,6 @@ struct Profiler {
     m_frame_free_list = p;
   }
 
-  virtual void vscan(IMarker&) const = 0;
-
-
 public:
   bool m_successful;
 
@@ -273,9 +270,6 @@ enum class ProfilerKind {
 
 struct ProfilerFactory final : RequestEventHandler {
   static bool EnableNetworkProfiler;
-
-  ProfilerFactory() : m_profiler(nullptr), m_external_profiler(nullptr) {
-  }
 
   ~ProfilerFactory() {
     stop();
@@ -325,15 +319,9 @@ struct ProfilerFactory final : RequestEventHandler {
     return m_external_profiler;
   }
 
-  void vscan(IMarker& mark) const override {
-    if (m_profiler) m_profiler->vscan(mark);
-    if (m_external_profiler) m_external_profiler->vscan(mark);
-    mark(m_artificialFrameNames);
-  }
-
 private:
-  Profiler *m_profiler;
-  Profiler *m_external_profiler;
+  Profiler* m_profiler{nullptr};
+  Profiler* m_external_profiler{nullptr};
   Array m_artificialFrameNames;
 };
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -95,17 +95,15 @@ struct BuiltinFiles final : RequestEventHandler {
 
   void requestInit() override;
   void requestShutdown() override;
-  void vscan(IMarker& mark) const override {
-    mark(m_stdin);
-    mark(m_stdout);
-    mark(m_stderr);
-  }
 
 private:
   Variant m_stdin;
   Variant m_stdout;
   Variant m_stderr;
 };
+
+void clearThreadLocalIO();
+void setThreadLocalIO(FILE* in, FILE* out, FILE* err);
 
 ///////////////////////////////////////////////////////////////////////////////
 }

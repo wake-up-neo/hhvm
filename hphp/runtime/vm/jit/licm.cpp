@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -35,6 +35,7 @@
 #include "hphp/runtime/vm/jit/mutation.h"
 #include "hphp/runtime/vm/jit/pass-tracer.h"
 #include "hphp/runtime/vm/jit/prof-data.h"
+#include "hphp/runtime/vm/jit/timer.h"
 
 namespace HPHP { namespace jit {
 
@@ -285,9 +286,9 @@ template<class Seen, class F>
 void visit_loop_post_order(LoopEnv& env, Seen& seen, Block* b, F f) {
   if (seen[b->id()]) return;
   seen.set(b->id());
-  auto go = [&] (Block* b) {
-    if (!b || !env.blocks.count(b)) return;
-    visit_loop_post_order(env, seen, b, f);
+  auto go = [&] (Block* block) {
+    if (!block || !env.blocks.count(block)) return;
+    visit_loop_post_order(env, seen, block, f);
   };
   go(b->next());
   go(b->taken());
@@ -720,6 +721,7 @@ void insert_pre_headers_and_exits(IRUnit& unit, LoopAnalysis& loops) {
 
 void optimizeLoopInvariantCode(IRUnit& unit) {
   PassTracer tracer { &unit, Trace::hhir_licm, "LICM" };
+  Timer t(Timer::optimize_licm, unit.logEntry().get_pointer());
   Env env { unit, rpoSortCfg(unit) };
   if (env.loops.loops.empty()) {
     FTRACE(1, "no loops\n");

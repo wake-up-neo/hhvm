@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -35,7 +35,6 @@ namespace HPHP {
 
 static void destroy_uploaded_files();
 
-namespace {
 struct Rfc1867Data final : RequestEventHandler {
   std::set<std::string> rfc1867ProtectedVariables;
   std::set<std::string> rfc1867UploadedFiles;
@@ -52,9 +51,7 @@ struct Rfc1867Data final : RequestEventHandler {
   void requestShutdown() override {
     if (!rfc1867UploadedFiles.empty()) destroy_uploaded_files();
   }
-  void vscan(IMarker&) const override {}
 };
-}
 IMPLEMENT_STATIC_REQUEST_LOCAL(Rfc1867Data, s_rfc1867_data);
 
 /*
@@ -867,7 +864,7 @@ void rfc1867PostHandler(Transport* transport,
 
       /* New Rule: never repair potential malicious user input */
       if (!skip_upload) {
-        char *tmp = param;
+        tmp = param;
         long c = 0;
 
         while (*tmp) {

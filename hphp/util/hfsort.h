@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -69,7 +69,12 @@ struct Target {
 
 struct TargetGraph {
   TargetId addTarget(uint32_t size, uint32_t samples = 0);
+  void setSamples(TargetId id, uint32_t samples);
   const Arc& incArcWeight(TargetId src, TargetId dst, double w = 1.0);
+  void normalizeArcWeights();
+
+  template<class L>
+  void printDot(char* fileName, L getLabel) const;
 
   std::vector<Target> targets;
   std::unordered_set<Arc, ArcHash> arcs;
@@ -79,16 +84,23 @@ struct Cluster {
   Cluster(TargetId id, const Target& f);
 
   std::string toString() const;
+  double density() const;
 
   std::vector<TargetId> targets;
   uint32_t samples;
-  double arcWeight; // intra-cluster callgraph arc weight
   uint32_t size;
   bool frozen; // not a candidate for merging
 };
 
+/////////////////////////////////////////////////////////////////////////
+
 bool compareClustersDensity(const Cluster& c1, const Cluster& c2);
 std::vector<Cluster> clusterize(const TargetGraph& cg);
+
+/*
+ * HFSortPlus - layout of hot functions with iTLB cache optimization
+ */
+std::vector<Cluster> hfsortPlus(const TargetGraph& cg);
 
 /*
  * Pettis-Hansen code layout algorithm
@@ -96,6 +108,43 @@ std::vector<Cluster> clusterize(const TargetGraph& cg);
  *            PLDI '90
  */
 std::vector<Cluster> pettisAndHansen(const TargetGraph& cg);
+
+/////////////////////////////////////////////////////////////////////////
+
+template<class L>
+void TargetGraph::printDot(char* fileName, L getLabel) const {
+  FILE* file = fopen(fileName, "wt");
+  if (!file) return;
+
+  fprintf(file, "digraph g {\n");
+  for (size_t f = 0; f < targets.size(); f++) {
+    if (targets[f].samples == 0) continue;
+    fprintf(
+      file,
+      "f%lu [label=\"%s\\nsamples=%u\\nsize=%u\"];\n",
+      f,
+      getLabel(f),
+      targets[f].samples,
+      targets[f].size);
+  }
+  for (size_t f = 0; f < targets.size(); f++) {
+    if (targets[f].samples == 0) continue;
+    for (auto dst : targets[f].succs) {
+      auto& arc = *arcs.find(Arc(f, dst));
+      fprintf(
+        file,
+        "f%lu -> f%u [label=\"normWgt=%.3lf,weight=%.0lf,callOffset=%.1lf\"];"
+        "\n",
+        f,
+        dst,
+        arc.normalizedWeight,
+        arc.weight,
+        arc.avgCallOffset);
+    }
+  }
+  fprintf(file, "}\n");
+  fclose(file);
+}
 
 }}
 

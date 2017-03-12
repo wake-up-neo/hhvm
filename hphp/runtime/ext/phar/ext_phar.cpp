@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -22,8 +22,6 @@
 #include "hphp/runtime/base/stream-wrapper.h"
 #include "hphp/runtime/base/stream-wrapper-registry.h"
 #include "hphp/runtime/base/directory.h"
-
-#include <folly/portability/Unistd.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -49,13 +47,9 @@ static struct PharStreamWrapper final : Stream::Wrapper {
 
     static Func* f = SystemLib::s_PharClass->lookupMethod(s_openPhar.get());
 
-    Variant ret;
-    g_context->invokeFunc(
-      ret.asTypedValue(),
-      f,
-      make_packed_array(filename),
-      nullptr,
-      SystemLib::s_PharClass
+    auto ret = Variant::attach(
+      g_context->invokeFunc(f, make_packed_array(filename), nullptr,
+                            SystemLib::s_PharClass)
     );
 
     if (!ret.isResource()) {
@@ -94,13 +88,9 @@ static struct PharStreamWrapper final : Stream::Wrapper {
 
   req::ptr<Directory> opendir(const String& path) override {
     static Func* f = SystemLib::s_PharClass->lookupMethod(s_opendir.get());
-    Variant ret;
-    g_context->invokeFunc(
-      ret.asTypedValue(),
-      f,
-      make_packed_array(path),
-      nullptr,
-      SystemLib::s_PharClass
+    auto ret = Variant::attach(
+      g_context->invokeFunc(f, make_packed_array(path), nullptr,
+                            SystemLib::s_PharClass)
     );
     Array files = ret.toArray();
     if (files.empty()) {
@@ -113,21 +103,15 @@ static struct PharStreamWrapper final : Stream::Wrapper {
  private:
   Variant callStat(const String& path) {
     static Func* f = SystemLib::s_PharClass->lookupMethod(s_stat.get());
-    Variant ret;
-    g_context->invokeFunc(
-      ret.asTypedValue(),
-      f,
-      make_packed_array(path),
-      nullptr,
-      SystemLib::s_PharClass
+    return Variant::attach(
+      g_context->invokeFunc(f, make_packed_array(path), nullptr,
+                            SystemLib::s_PharClass)
     );
-    return ret;
   }
-
 } s_phar_stream_wrapper;
 
 struct pharExtension final : Extension {
-  pharExtension() : Extension("phar") {}
+  pharExtension() : Extension("Phar", "2.0.2") {}
   void moduleInit() override {
     s_phar_stream_wrapper.registerAs("phar");
   }

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -205,7 +205,7 @@ static void url_encode_array(StringBuffer &ret, const Variant& varr,
 const StaticString s_arg_separator_output("arg_separator.output");
 
 Variant HHVM_FUNCTION(http_build_query, const Variant& formdata,
-                           const String& numeric_prefix /* = null_string */,
+                           const Variant& numeric_prefix /* = null_string */,
                            const String& arg_separator /* = null_string */,
                            int enc_type /* = k_PHP_QUERY_RFC1738 */) {
   if (!formdata.isArray() && !formdata.is(KindOfObject)) {
@@ -222,8 +222,13 @@ Variant HHVM_FUNCTION(http_build_query, const Variant& formdata,
 
   StringBuffer ret(1024);
   std::set<void*> seen_arrs;
+
+  String num_prefix;
+  if (!numeric_prefix.isNull()) {
+    num_prefix = numeric_prefix.toCStrRef();
+  }
   url_encode_array(ret, formdata, seen_arrs,
-                   numeric_prefix, String(), String(), arg_sep,
+                   num_prefix, String(), String(), arg_sep,
                    enc_type != k_PHP_QUERY_RFC3986);
   return ret.detach();
 }

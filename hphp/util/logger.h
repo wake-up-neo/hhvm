@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,6 +18,7 @@
 #define incl_HPHP_LOGGER_H_
 
 #include <atomic>
+#include <chrono>
 #include <cstdarg>
 #include <string>
 
@@ -120,6 +121,7 @@ struct Logger {
 
   static void FlushAll();
   static void SetBatchSize(size_t bsize);
+  static void SetFlushTimeout(std::chrono::milliseconds timeoutMs);
 
   virtual FILE* fileForStackTrace() { return output(); }
 
@@ -132,6 +134,7 @@ protected:
     bool threadLogOnly{false};
     PFUNC_LOG hook{nullptr};
     void *hookData;
+    TYPE_SCAN_CONSERVATIVE_FIELD(hookData);
   };
   static DECLARE_THREAD_LOCAL(ThreadData, s_threadData);
 
@@ -157,6 +160,11 @@ protected:
   virtual std::pair<int, int> flush() { return std::make_pair(0, 0); }
 
   virtual void setBatchSize(size_t bsize) {}
+
+  // flush the log after this timeout (in milliseconds) has been exceeded.
+  // 0 will disable the timeout and flush only when the batch size has been
+  // met.
+  virtual void setFlushTimeout(std::chrono::milliseconds timeoutMs) {}
 
   // deduce where to write log
   virtual FILE* output();

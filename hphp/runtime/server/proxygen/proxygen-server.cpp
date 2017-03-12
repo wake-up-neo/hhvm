@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,6 +20,7 @@
 #include <memory>
 #include <thread>
 #include "hphp/runtime/server/fake-transport.h"
+#include "hphp/runtime/server/http-server.h"
 #include "hphp/runtime/server/proxygen/proxygen-transport.h"
 #include "hphp/runtime/server/server-name-indication.h"
 #include "hphp/runtime/server/server-stats.h"
@@ -128,7 +129,7 @@ ProxygenServer::ProxygenServer(
                    this, RuntimeOption::ServerThreadJobLIFOSwitchThreshold,
                    RuntimeOption::ServerThreadJobMaxQueuingMilliSeconds,
                    kNumPriorities, RuntimeOption::QueuedJobsReleaseRate,
-                   0, options.m_initThreads) {
+                   0, options.m_initThreads, options.m_queueToWorkerRatio) {
   SocketAddress address;
   if (options.m_address.empty()) {
     address.setFromLocalPort(options.m_port);
@@ -166,11 +167,11 @@ ProxygenServer::ProxygenServer(
   const std::vector<std::chrono::seconds> levels {
     std::chrono::seconds(10), std::chrono::seconds(120)};
   ProxygenTransport::s_requestErrorCount =
-    ServiceData::createTimeseries("http_response_error",
+    ServiceData::createTimeSeries("http_response_error",
                                   {ServiceData::StatsType::COUNT},
                                   levels, 10);
   ProxygenTransport::s_requestNonErrorCount =
-    ServiceData::createTimeseries("http_response_nonerror",
+    ServiceData::createTimeSeries("http_response_nonerror",
                                   {ServiceData::StatsType::COUNT},
                                   levels, 10);
 }
@@ -361,7 +362,7 @@ void ProxygenServer::stop() {
 
 void ProxygenServer::stopListening(bool hard) {
   m_shutdownState = ShutdownState::DRAINING_READS;
-
+  HttpServer::MarkShutdownStat(ShutdownEvent::SHUTDOWN_DRAIN_READS);
 #define SHUT_FBLISTEN 3
   /*
    * Modifications to the Linux kernel to support shutting down a listen
@@ -386,9 +387,8 @@ void ProxygenServer::stopListening(bool hard) {
 
   if (RuntimeOption::ServerShutdownListenWait > 0) {
     std::chrono::seconds s(RuntimeOption::ServerShutdownListenWait);
-    VLOG(4) << this << ": scheduling shutdown listen timeout=" <<
-      s.count() <<
-      " port=" << m_port;
+    VLOG(4) << this << ": scheduling shutdown listen timeout="
+            << s.count() << " port=" << m_port;
     scheduleTimeout(s);
     if (RuntimeOption::ServerShutdownEOMWait > 0) {
       int delayMilliSeconds = RuntimeOption::ServerShutdownEOMWait * 1000;
@@ -401,6 +401,8 @@ void ProxygenServer::stopListening(bool hard) {
 }
 
 void ProxygenServer::returnPartialPosts() {
+  VLOG(2) << "Running returnPartialPosts for "
+          << m_pendingTransports.size() << " pending transports";
   for (auto& transport : m_pendingTransports) {
     if (!transport.getClientComplete()) {
       transport.beginPartialPostEcho();
@@ -479,6 +481,7 @@ void ProxygenServer::doShutdown() {
 
 void ProxygenServer::stopVM() {
   m_shutdownState = ShutdownState::STOPPING_VM;
+  HttpServer::MarkShutdownStat(ShutdownEvent::SHUTDOWN_DRAIN_DISPATCHER);
   // we can't call m_dispatcher.stop() from the event loop, because it blocks
   // all I/O.  Spawn a thread to call it and callback when it's done.
   std::thread vmStopper([this] {
@@ -496,6 +499,7 @@ void ProxygenServer::stopVM() {
 
 void ProxygenServer::vmStopped() {
   m_shutdownState = ShutdownState::DRAINING_WRITES;
+  HttpServer::MarkShutdownStat(ShutdownEvent::SHUTDOWN_DRAIN_WRITES);
   if (!drained() && RuntimeOption::ServerGracefulShutdownWait > 0) {
     m_worker.getEventBase()->runInEventBaseThread([&] {
         std::chrono::seconds s(RuntimeOption::ServerGracefulShutdownWait);
@@ -511,7 +515,6 @@ void ProxygenServer::vmStopped() {
 void ProxygenServer::forceStop() {
   Logger::Info("%p: forceStop ProxygenServer port=%d, enqueued=%d, conns=%d",
                this, m_port, m_enqueuedCount, getLibEventConnectionCount());
-
   m_httpServerSocket.reset();
   m_httpsServerSocket.reset();
 
@@ -533,6 +536,9 @@ void ProxygenServer::forceStop() {
 
   // Aaaand we're done - oops not thread safe.  Does it matter?
   setStatus(RunStatus::STOPPED);
+
+  HttpServer::MarkShutdownStat(ShutdownEvent::SHUTDOWN_DONE);
+
   for (auto listener: m_listeners) {
     listener->serverStopped(this);
   }

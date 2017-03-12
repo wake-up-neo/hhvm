@@ -8,5 +8,13 @@
  *
  *)
 
-val elaborate_id : Namespace_env.env -> Ast.ns_kind -> Ast.id -> Ast.id
-val elaborate_defs : Ast.program -> Ast.program
+val elaborate_id : Namespace_env.env ->
+                   Ast.ns_kind ->
+                   Ast.id ->
+                   Ast.id
+val elaborate_defs : ParserOptions.t -> Ast.program -> Ast.program
+
+val renamespace_if_aliased : ?reverse:bool ->
+                             (string * string) list ->
+                             string ->
+                             string

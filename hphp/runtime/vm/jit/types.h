@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -104,6 +104,42 @@ inline std::string show(TransKind k) {
   not_reached();
 }
 
+inline bool isProfiling(TransKind k) {
+  switch (k) {
+    case TransKind::Profile:
+    case TransKind::ProfPrologue:
+      return true;
+
+    case TransKind::Anchor:
+    case TransKind::Interp:
+    case TransKind::Live:
+    case TransKind::LivePrologue:
+    case TransKind::Optimize:
+    case TransKind::OptPrologue:
+    case TransKind::Invalid:
+      return false;
+  }
+  always_assert(false);
+}
+
+inline bool isPrologue(TransKind k) {
+  switch (k) {
+    case TransKind::LivePrologue:
+    case TransKind::ProfPrologue:
+    case TransKind::OptPrologue:
+      return true;
+
+    case TransKind::Anchor:
+    case TransKind::Interp:
+    case TransKind::Live:
+    case TransKind::Profile:
+    case TransKind::Optimize:
+    case TransKind::Invalid:
+      return false;
+  }
+  always_assert(false);
+}
+
 /*
  * Compact flags which may be threaded through a service request to provide
  * hints or demands for retranslations.
@@ -142,7 +178,10 @@ enum class CodeKind : uint8_t {
   CrossTrace,
 
   /*
-   * Helper code that uses scratch registers only.
+   * Helper code that uses native scratch registers only.
+   *
+   * This roughly means unreserved, caller-saved, non-argument registers---but
+   * best to just look at the helper ABI in the appropriate abi-*.cpp file.
    */
   Helper,
 };
@@ -152,7 +191,7 @@ enum class CodeKind : uint8_t {
  *
  * kNumAreas must be kept up to date.
  */
-enum class AreaIndex : unsigned { Main, Cold, Frozen };
+enum class AreaIndex : uint8_t { Main, Cold, Frozen };
 constexpr size_t kNumAreas = 3;
 
 inline std::string areaAsString(AreaIndex area) {
@@ -177,6 +216,19 @@ inline std::string areaAsString(AreaIndex area) {
 #define AROFF(nm) int(offsetof(ActRec, nm))
 #define AFWHOFF(nm) int(offsetof(c_AsyncFunctionWaitHandle, nm))
 #define GENDATAOFF(nm) int(offsetof(Generator, nm))
+
+///////////////////////////////////////////////////////////////////////////////
+
+/*
+ * Generalization of Status Flag bits encoded in Vinstr and used by the
+ * annotateSFUses() pass and platform-specific lowerers/emitters.
+ *
+ * In order for a platform to utilize the pass, they'll need to implement
+ * mappings between ConditionCodes and an operator|-able bit sequence held in a
+ * Vflags byte.  This implies that the platform will need to define their
+ * status flag bits as well.  See required_flags() in abi-arm.h for an example.
+ */
+using Vflags = uint8_t;
 
 ///////////////////////////////////////////////////////////////////////////////
 

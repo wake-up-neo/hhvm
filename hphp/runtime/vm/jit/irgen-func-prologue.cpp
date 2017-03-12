@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,7 +23,6 @@
 #include "hphp/runtime/vm/hhbc.h"
 #include "hphp/runtime/vm/srckey.h"
 
-#include "hphp/runtime/vm/jit/check.h"
 #include "hphp/runtime/vm/jit/extra-data.h"
 #include "hphp/runtime/vm/jit/fixup.h"
 #include "hphp/runtime/vm/jit/ir-opcode.h"
@@ -43,6 +42,35 @@ namespace HPHP { namespace jit { namespace irgen {
 namespace {
 
 ///////////////////////////////////////////////////////////////////////////////
+template <class Body>
+void prologDispatch(IRGS& env, const Func* func, Body body) {
+  assertx(env.irb->curMarker().prologue());
+
+  if (!func->mayHaveThis()) {
+    body(false);
+    return;
+  }
+
+  if (func->requiresThisInBody()) {
+    body(true);
+    return;
+  }
+
+  ifThenElse(
+    env,
+    [&] (Block* taken) {
+      auto const ctx = gen(env, LdCtx, fp(env));
+      gen(env, CheckCtxThis, taken, ctx);
+    },
+    [&] {
+      body(true);
+    },
+    [&] {
+      hint(env, Block::Hint::Unlikely);
+      body(false);
+    }
+  );
+}
 
 /*
  * Initialize parameters.
@@ -131,8 +159,7 @@ void init_use_vars(IRGS& env, const Func* func, SSATmp* closure) {
   // Closure object properties are the use vars followed by the static locals
   // (which are per-instance).
   auto const nuse = cls->numDeclProperties() - func->numStaticLocals();
-
-  ptrdiff_t use_var_off = sizeof(ObjectData) + cls->builtinODTailSize();
+  ptrdiff_t use_var_off = sizeof(ObjectData);
 
   for (auto i = 0; i < nuse; ++i, use_var_off += sizeof(Cell)) {
     auto const ty = typeFromRAT(cls->declPropRepoAuthType(i), func->cls());
@@ -261,9 +288,6 @@ void emitPrologueEntry(IRGS& env, uint32_t argc) {
     auto msg = RBMsgData { Trace::RBTypeFuncPrologue, func->fullName() };
     gen(env, RBTraceMsg, msg);
   }
-  if (RuntimeOption::EvalJitTransCounters) {
-    gen(env, IncTransCounter);
-  }
 
   gen(env, EnterFrame, fp(env));
 
@@ -286,6 +310,12 @@ void emitPrologueBody(IRGS& env, uint32_t argc, TransID transID) {
   // Initialize params, locals, and---if we have a closure---the closure's
   // bound class context and use vars.
   emitPrologueLocals(env, argc, func, nullptr);
+  // "Kill" all the class-ref slots initially. This normally won't do anything
+  // (the class-ref slots should be unoccupied at this point), but in debugging
+  // builds it will write poison values to them.
+  for (uint32_t slot = 0; slot < func->numClsRefSlots(); ++slot) {
+    killClsRef(env, slot);
+  }
   warn_missing_args(env, argc);
 
   // Check surprise flags in the same place as the interpreter: after setting
@@ -297,18 +327,23 @@ void emitPrologueBody(IRGS& env, uint32_t argc, TransID transID) {
     gen(env, CheckSurpriseFlagsEnter, FuncEntryData { func, argc }, fp(env));
   }
 
-  // Emit the bindjmp for the function body.
-  gen(
-    env,
-    ReqBindJmp,
-    ReqBindJmpData {
-      SrcKey { func, func->getEntryForNumArgs(argc), false },
-      FPInvOffset { func->numSlotsInFrame() },
-      bcSPOffset(env),
-      TransFlags{}
-    },
-    sp(env),
-    fp(env)
+  prologDispatch(
+    env, func,
+    [&] (bool hasThis) {
+      // Emit the bindjmp for the function body.
+      gen(
+        env,
+        ReqBindJmp,
+        ReqBindJmpData {
+          SrcKey { func, func->getEntryForNumArgs(argc), false, hasThis },
+          FPInvOffset { func->numSlotsInFrame() },
+          spOffBCFromIRSP(env),
+          TransFlags{}
+        },
+        sp(env),
+        fp(env)
+      );
+    }
   );
 }
 
@@ -389,41 +424,46 @@ void emitFuncBodyDispatch(IRGS& env, const DVFuncletsVec& dvs) {
   auto const func = env.context.func;
   auto const num_args = gen(env, LdARNumParams, fp(env));
 
-  for (auto const& dv : dvs) {
-    ifThen(
-      env,
-      [&] (Block* taken) {
-        auto const lte = gen(env, LteInt, num_args, cns(env, dv.first));
-        gen(env, JmpNZero, taken, lte);
-      },
-      [&] {
-        gen(
+  prologDispatch(
+    env, func,
+    [&] (bool hasThis) {
+      for (auto const& dv : dvs) {
+        ifThen(
           env,
-          ReqBindJmp,
-          ReqBindJmpData {
-            SrcKey { func, dv.second, false },
-            FPInvOffset { func->numSlotsInFrame() },
-            bcSPOffset(env),
-            TransFlags{}
+          [&] (Block* taken) {
+            auto const lte = gen(env, LteInt, num_args, cns(env, dv.first));
+            gen(env, JmpNZero, taken, lte);
           },
-          sp(env),
-          fp(env)
+          [&] {
+            gen(
+              env,
+              ReqBindJmp,
+              ReqBindJmpData {
+                SrcKey { func, dv.second, false, hasThis },
+                FPInvOffset { func->numSlotsInFrame() },
+                spOffBCFromIRSP(env),
+                TransFlags{}
+              },
+              sp(env),
+              fp(env)
+            );
+          }
         );
       }
-    );
-  }
 
-  gen(
-    env,
-    ReqBindJmp,
-    ReqBindJmpData {
-      SrcKey { func, func->base(), false },
-      FPInvOffset { func->numSlotsInFrame() },
-      bcSPOffset(env),
-      TransFlags{}
-    },
-    sp(env),
-    fp(env)
+      gen(
+        env,
+        ReqBindJmp,
+        ReqBindJmpData {
+          SrcKey { func, func->base(), false, hasThis },
+          FPInvOffset { func->numSlotsInFrame() },
+          spOffBCFromIRSP(env),
+          TransFlags{}
+        },
+        sp(env),
+        fp(env)
+      );
+    }
   );
 }
 

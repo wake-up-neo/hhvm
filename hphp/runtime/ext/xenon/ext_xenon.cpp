@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -27,6 +27,7 @@
 #include "hphp/runtime/base/backtrace.h"
 #include "hphp/runtime/ext/std/ext_std_function.h"
 #include "hphp/runtime/vm/vm-regs.h"
+#include "hphp/util/struct-log.h"
 
 #include <signal.h>
 #include <time.h>
@@ -66,25 +67,22 @@ void *s_waitThread(void *arg) {
 // allocated when a web request begins (if Xenon is enabled)
 // grab snapshots of the php and async stack when log is called
 // detach itself from its snapshots when the request is ending.
-namespace {
 struct XenonRequestLocalData final : RequestEventHandler  {
   XenonRequestLocalData();
   ~XenonRequestLocalData();
-  void log(Xenon::SampleType t, c_WaitableWaitHandle* wh = nullptr);
+  void log(Xenon::SampleType t,
+           const char* info = nullptr,
+           c_WaitableWaitHandle* wh = nullptr);
   Array createResponse();
 
   // implement RequestEventHandler
   void requestInit() override;
   void requestShutdown() override;
-  void vscan(IMarker& mark) const override {
-    mark(m_stackSnapshots);
-  }
 
   // an array of php stacks
   Array m_stackSnapshots;
 };
 IMPLEMENT_STATIC_REQUEST_LOCAL(XenonRequestLocalData, s_xenonData);
-}
 
 ///////////////////////////////////////////////////////////////////////////////
 // statics used by the Xenon classes
@@ -98,7 +96,9 @@ const StaticString
   s_time("time"),
   s_isWait("ioWaitSample"),
   s_stack("stack"),
-  s_phpStack("phpStack");
+  s_phpStack("phpStack"),
+  s_type("type"),
+  s_info("info");
 
 namespace {
 
@@ -228,9 +228,15 @@ void Xenon::log(SampleType t, c_WaitableWaitHandle* wh) const {
     if (!RuntimeOption::XenonForceAlwaysOn) {
       clearSurpriseFlag(XenonSignalFlag);
     }
-    TRACE(1, "Xenon::log %s\n", (t == IOWaitSample) ? "IOWait" : "Normal");
-    s_xenonData->log(t, wh);
+    logNoSurprise(t, nullptr, wh);
   }
+}
+
+void Xenon::logNoSurprise(SampleType t,
+                          const char* info,
+                          c_WaitableWaitHandle* wh) const {
+  TRACE(1, "Xenon::log %s %s\n", show(t), info ? info : "(null)");
+  s_xenonData->log(t, info, wh);
 }
 
 // Called from timer handler, Lets non-signal code know the timer was fired.
@@ -249,8 +255,6 @@ void Xenon::surpriseAll() {
 
 ///////////////////////////////////////////////////////////////////////////////
 // There is one XenonRequestLocalData per thread, stored in thread local area
-
-namespace {
 
 XenonRequestLocalData::XenonRequestLocalData() {
   TRACE(1, "XenonRequestLocalData\n");
@@ -277,19 +281,35 @@ Array XenonRequestLocalData::createResponse() {
   return stacks.toArray();
 }
 
-void XenonRequestLocalData::log(Xenon::SampleType t, c_WaitableWaitHandle* wh) {
+void XenonRequestLocalData::log(Xenon::SampleType t,
+                                const char* info,
+                                c_WaitableWaitHandle* wh) {
   TRACE(1, "XenonRequestLocalData::log\n");
   time_t now = time(nullptr);
   auto bt = createBacktrace(BacktraceArgs()
                              .skipTop(t == Xenon::EnterSample)
+                             .skipInlined(t == Xenon::EnterSample)
                              .fromWaitHandle(wh)
                              .withMetadata()
                              .ignoreArgs());
-  m_stackSnapshots.append(make_map_array(
-    s_time, now,
-    s_stack, bt,
-    s_isWait, (t == Xenon::IOWaitSample)
-  ));
+  auto logDest = RuntimeOption::XenonStructLogDest;
+  if (!logDest.empty()) {
+    StructuredLogEntry cols;
+    cols.setStr("type", Xenon::show(t));
+    if (info) {
+      cols.setStr("info", info);
+    }
+    addBacktraceToStructLog(bt, cols);
+    StructuredLog::log(logDest, cols);
+  } else {
+    m_stackSnapshots.append(make_map_array(
+      s_time, now,
+      s_stack, bt,
+      s_isWait, !Xenon::isCPUTime(t),
+      s_type, Xenon::show(t),
+      s_info, info ? info : ""
+    ));
+  }
 }
 
 void XenonRequestLocalData::requestInit() {
@@ -322,8 +342,6 @@ Array HHVM_FUNCTION(xenon_get_data, void) {
   }
   return empty_array();
 }
-
-} // namespace
 
 struct xenonExtension final : Extension {
   xenonExtension() : Extension("xenon", "1.0") { }

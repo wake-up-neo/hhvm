@@ -1204,7 +1204,7 @@ let rec entry ~keep_source_metadata ~no_trailing_commas ~modes
     let errorl, (), _ = Errors.do_ begin fun () ->
       let rp = Relative_path.(create Dummy (file :> string)) in
       let {Parser_hack.file_mode; _} =
-        Parser_hack.program rp content in
+        Parser_hack.program_with_default_popt rp content in
       if not (List.mem modes file_mode) then raise PHP;
     end in
     if not (Errors.is_empty errorl)
@@ -2580,7 +2580,7 @@ and expr_remain lowest env =
           back env;
           expr_binop lowest ">" Tgt env
       )
-  | Teq | Tbareq | Tpluseq | Tstareq | Tslasheq
+  | Teq | Tbareq | Tpluseq | Tstareq | Tslasheq | Tstarstareq
   | Tdoteq | Tminuseq | Tpercenteq | Txoreq
   | Tampeq | Tlshifteq | Trshifteq ->
       space env;
@@ -2742,14 +2742,14 @@ and expr_atomic_word env last_tok = function
       expect "(" env;
       right env array_body;
       expect ")" env
-  | "dict" ->
+  | "dict" when next_token env == Tlb ->
       out "dict" env;
       expect (token_to_string Tlb) env;
       (** Dict body looks exactly like an array body. *)
       right env array_body;
       expect (token_to_string Trb) env;
-  | "keyset" ->
-      out "keyset" env;
+  | "keyset" | "vec" as v when next_token env == Tlb ->
+      out v env;
       expect (token_to_string Tlb) env;
       right env (list_comma_nl ~trailing:true expr);
       expect (token_to_string Trb) env;

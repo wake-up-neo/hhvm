@@ -131,9 +131,6 @@ struct FormatVisitor {
       str << "nullptr";
     }
   }
-  void imm(ServiceRequest req) {
-    str << sep() << svcreq::to_name(req);
-  }
   void imm(TransFlags f) {
     if (f.noinlineSingleton) str << sep() << "noinlineSingleton";
   }
@@ -146,6 +143,7 @@ struct FormatVisitor {
   void imm(RoundDirection rd) {
     str << sep() << show(rd);
   }
+  void imm(Vflags fl) {}
 
   void imm(RegSet x) { print(x); }
   void imm(ComparisonPred x) {

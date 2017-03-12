@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,26 +21,21 @@
 #include "hphp/runtime/base/runtime-option.h"
 #include <utility>
 
-namespace HPHP {
-struct IMarker;
-namespace req {
+namespace HPHP { namespace req {
 
 /*
  * An explicitly-tracked root, registered on construction and de-registered
- * on destruction. Subclasses of this implement vscan() and detach() methods
+ * on destruction. Subclasses of this implement tyindex() and detach() methods
  * so instances can be scanned as needed.
  * Warning: this extra tracking is expensive, and only necessary when
  * creating and destroying heap pointers in areas not already known
  * as roots (thread locals, stack, rds, ExecutionContext, etc).
  */
 struct root_handle {
-  static constexpr size_t INVALID = -1LL;
-  ALWAYS_INLINE bool enable() const {
-    return RuntimeOption::EvalEnableGC;
-  }
+  static constexpr auto INVALID = ~size_t(0);
 
   root_handle()
-    : m_id(enable() ? addRootHandle() : INVALID)
+    : m_id(addRootHandle())
   {}
 
   // move construction takes over the old handle's id.
@@ -50,7 +45,7 @@ struct root_handle {
 
   // move-assignment poaches the old handle's id if necessary.
   root_handle& operator=(root_handle&& h) {
-    if (m_id == INVALID && enable()) m_id = stealRootHandle(&h);
+    if (m_id == INVALID) m_id = stealRootHandle(&h);
     return *this;
   }
 
@@ -66,8 +61,7 @@ struct root_handle {
     m_id = INVALID;
     detach();
   }
-  template<class F> void scan(F&) const;
-  virtual void vscan(IMarker&) const = 0;
+  virtual void scan(type_scan::Scanner&) const = 0;
   virtual void detach() = 0;
 private:
   size_t addRootHandle();
@@ -124,11 +118,11 @@ struct root : T, root_handle {
   }
 
   // implement root_handle
-  void vscan(IMarker& mark) const override;
+  void scan(type_scan::Scanner&) const override;
   void detach() override;
 };
 
-template<> void root<TypedValue>::vscan(IMarker& mark) const;
+template<> void root<TypedValue>::scan(type_scan::Scanner&) const;
 template<> void root<TypedValue>::detach();
 
 }}

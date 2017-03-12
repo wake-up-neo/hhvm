@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -283,6 +283,10 @@ bool isIgnoredType(const std::string& name);
 // (like the standard containers) where we have request heap aware versions and
 // is to prevent people accidently using the standard kind.
 bool isForbiddenTemplate(const std::string& name);
+
+// Check if a type with the given name is on the list of template types which
+// will always be scanned conservatively.
+bool isForcedConservativeTemplate(const std::string& name);
 
 // Macro trickery to generate field names for type annotations.
 #define TYPE_SCAN_BUILD_NAME(A,B) TYPE_SCAN_BUILD_NAME_HIDDEN(A,B)

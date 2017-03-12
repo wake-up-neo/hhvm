@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,7 +18,6 @@
 #include "hphp/system/systemlib.h"
 #include "hphp/runtime/base/backtrace.h"
 #include "hphp/runtime/base/execution-context.h"
-#include "hphp/runtime/base/imarker.h"
 #include "hphp/runtime/base/object-data.h"
 #include "hphp/runtime/base/type-variant.h"
 #include "hphp/runtime/ext/std/ext_std_errorfunc.h"
@@ -217,8 +216,6 @@ void throwable_init_file_and_line_from_builtin(ObjectData* throwable) {
   assertx(is_throwable(throwable));
   assertx(throwable_has_expected_props());
 
-  assertx(throwable->propVec()[s_fileIdx].m_type == KindOfNull);
-  assertx(throwable->propVec()[s_lineIdx].m_type == KindOfNull);
   assertx(throwable->propVec()[s_traceIdx].m_type == KindOfArray);
   auto const trace = throwable->propVec()[s_traceIdx].m_data.parr;
   for (ArrayIter iter(trace); iter; ++iter) {
@@ -227,8 +224,12 @@ void throwable_init_file_and_line_from_builtin(ObjectData* throwable) {
     auto const file = frame->nvGet(s_file.get());
     auto const line = frame->nvGet(s_line.get());
     if (file || line) {
-      if (file) cellDup(*tvAssertCell(file), throwable->propVec()[s_fileIdx]);
-      if (line) cellDup(*tvAssertCell(line), throwable->propVec()[s_lineIdx]);
+      if (file) {
+        tvSetIgnoreRef(*tvAssertCell(file), throwable->propVec()[s_fileIdx]);
+      }
+      if (line) {
+        tvSetIgnoreRef(*tvAssertCell(line), throwable->propVec()[s_lineIdx]);
+      }
       return;
     }
   }
@@ -248,13 +249,11 @@ void throwable_init(ObjectData* throwable) {
   if (UNLIKELY(fp->func()->isBuiltin())) {
     throwable_init_file_and_line_from_builtin(throwable);
   } else {
-    assertx(throwable->propVec()[s_fileIdx].m_type == KindOfNull);
-    assertx(throwable->propVec()[s_lineIdx].m_type == KindOfNull);
     auto const unit = fp->func()->unit();
     auto const file = const_cast<StringData*>(unit->filepath());
     auto const line = unit->getLineNumber(unit->offsetOf(vmpc()));
-    cellDup(make_tv<KindOfString>(file), throwable->propVec()[s_fileIdx]);
-    cellDup(make_tv<KindOfInt64>(line), throwable->propVec()[s_lineIdx]);
+    tvSetIgnoreRef(make_tv<KindOfString>(file), throwable->propVec()[s_fileIdx]);
+    tvSetIgnoreRef(make_tv<KindOfInt64>(line), throwable->propVec()[s_lineIdx]);
   }
 }
 

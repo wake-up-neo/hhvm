@@ -131,6 +131,10 @@ flaky_tests = (
     # these tests use each other's data
     '/ext/standard/tests/file/bug38086.php',
     '/ext/standard/tests/file/stream_copy_to_stream.php',
+    '/ext/standard/tests/file/mkdir_variation1.php',
+    '/ext/gd/tests/gif2gd.php',
+    '/ext/gd/tests/jpg2gd.php',
+    '/ext/gd/tests/png2gd.php',
 
     # these all write to temp3.txt.gz
     '/ext/zlib/tests/gzseek_basic2.php',
@@ -155,6 +159,7 @@ flaky_tests = (
 
     # flaky for various reasons
     '/ext/sockets/tests/socket_getpeername_ipv6loop.php',
+    '/ext/sockets/tests/socket_read_params.php',
 
     # segfaults on contbuild in opt
     '/ext/standard/tests/strings/explode_bug.php',
@@ -330,6 +335,9 @@ flaky_tests = (
     '/ext/standard/tests/general_functions/getservbyname_variation9.php',
     '/ext/standard/tests/general_functions/getservbyname_variation10.php',
     '/ext/standard/tests/general_functions/getservbyport_variation1.php',
+
+    # bad assumption about system call effect
+    '/ext/standard/tests/general_functions/proc_nice_basic.php',
 )
 
 # Tests that work but not in repo mode
@@ -914,6 +922,7 @@ other_files = (
     '/ext/standard/tests/image/75x50.xbm',
     '/ext/standard/tests/image/blank_file.bmp',
     '/ext/standard/tests/image/bug13213.jpg',
+    '/ext/standard/tests/image/bug72278.jpg',
     '/ext/standard/tests/image/skipif_imagetype.inc',
     '/ext/standard/tests/image/test13pix.swf',
     '/ext/standard/tests/image/test1bpix.bmp',
@@ -1359,6 +1368,16 @@ def walk(filename, dest_subdir):
     if '/ext/standard/tests/strings/md5_file.php' in full_dest_filename:
         test = test.replace('DataFile.txt', 'md5_DataFile.txt')
         test = test.replace('EmptyFile.txt', 'md5_EmptyFile.txt')
+    if 'ext/standard/tests/strings/lcfirst.php' in full_dest_filename:
+        test = test.replace('dummy.txt', 'dummy-lcfirst.txt')
+    if 'ext/standard/tests/strings/strncmp_variation6.php' in full_dest_filename:
+        test = re.sub(r'^var_dump\( strncmp\(\$str1, \$str2, 8\) \)',
+                      'var_dump( strncmp($str1, $str2, 8) > 0)', test)
+        exp = re.sub(r'range, given in binary format --\nint\(1\)',
+                      'range, given in binary format --\nbool(true)', exp)
+        open(full_dest_filename + '.expectf', 'w').write(exp)
+    if 'ext/standard/tests/strings/ucfirst.php' in full_dest_filename:
+        test = test.replace('dummy.txt', 'dummy-ucfirst.txt')
     if '/ext/intl/tests/calendar_getNow_basic.php' in full_dest_filename:
         test = test.replace('500)', '1000)')
         test = test.replace('1000)', '2000)')

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -125,13 +125,14 @@ struct InliningDecider {
    * If inlining is not performed when true is returned, registerEndInlining()
    * must be called immediately to correctly reset the internal inlining costs.
    */
-  bool shouldInline(SrcKey callerSk, const Func* callee,
+  bool shouldInline(SrcKey callerSk, Op callerFPushOp, const Func* callee,
                     const RegionDesc& region, uint32_t maxTotalCost);
 
   /*
    * Update our context to account for the beginning of an inlined call.
    */
   void accountForInlining(SrcKey callerSk,
+                          Op callerFPushOp,
                           const Func* callee,
                           const RegionDesc& region);
 

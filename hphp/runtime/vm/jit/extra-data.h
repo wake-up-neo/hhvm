@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -30,6 +30,7 @@
 
 #include "hphp/util/arena.h"
 #include "hphp/util/ringbuffer.h"
+#include "hphp/util/safe-cast.h"
 
 #include <folly/Conv.h>
 #include <folly/Optional.h>
@@ -154,7 +155,7 @@ struct ExtendsClassData : IRExtraData {
   }
 
   size_t hash() const {
-    return hash_int64(reinterpret_cast<intptr_t>(cls));
+    return pointer_hash<Class>()(cls);
   }
 
   const Class* cls;
@@ -181,7 +182,7 @@ struct ClsMethodData : IRExtraData {
     return clsName == o.clsName && methodName == o.methodName;
   }
   size_t hash() const {
-    return hash_int64_pair((uintptr_t)clsName, (uintptr_t)methodName);
+    return hash_int64_pair((intptr_t)clsName, (intptr_t)methodName);
   }
 
   const StringData* clsName;
@@ -240,6 +241,17 @@ struct LocalId : IRExtraData {
   size_t hash() const { return std::hash<uint32_t>()(locId); }
 
   uint32_t locId;
+};
+
+struct ClsRefSlotData : IRExtraData {
+  explicit ClsRefSlotData(uint32_t slot) : slot{slot} {}
+
+  std::string show() const { return folly::to<std::string>(slot); }
+
+  bool equals(ClsRefSlotData o) const { return slot == o.slot; }
+  size_t hash() const { return std::hash<uint32_t>()(slot); }
+
+  uint32_t slot;
 };
 
 /*
@@ -308,20 +320,6 @@ struct RDSHandleData : IRExtraData {
 };
 
 /*
- * ProfileMethod
- */
-struct ProfileMethodData : IRExtraData {
-  explicit ProfileMethodData(
-    IRSPRelOffset spOffset, rds::Handle handle) :
-      spOffset(spOffset), handle(handle) {}
-
-  std::string show() const { return folly::to<std::string>(handle); }
-
-  IRSPRelOffset spOffset;
-  rds::Handle handle;
-};
-
-/*
  * Translation ID.
  *
  * Used with profiling-related instructions.
@@ -335,13 +333,29 @@ struct TransIDData : IRExtraData {
 };
 
 /*
+ * FP-relative offset.
+ */
+struct FPRelOffsetData : IRExtraData {
+  explicit FPRelOffsetData(FPRelOffset offset) : offset(offset) {}
+
+  std::string show() const {
+    return folly::to<std::string>("FPRelOff ", offset.offset);
+  }
+
+  bool equals(FPRelOffsetData o) const { return offset == o.offset; }
+  size_t hash() const { return std::hash<int32_t>()(offset.offset); }
+
+  FPRelOffset offset;
+};
+
+/*
  * Stack pointer offset.
  */
 struct FPInvOffsetData : IRExtraData {
   explicit FPInvOffsetData(FPInvOffset offset) : offset(offset) {}
 
   std::string show() const {
-    return folly::to<std::string>("FPRelOff ", offset.offset);
+    return folly::to<std::string>("FPInvOff ", offset.offset);
   }
 
   bool equals(FPInvOffsetData o) const { return offset == o.offset; }
@@ -386,15 +400,15 @@ struct IsAsyncData : IRExtraData {
 };
 
 struct LdBindAddrData : IRExtraData {
-  explicit LdBindAddrData(SrcKey sk, FPInvOffset spOff)
+  explicit LdBindAddrData(SrcKey sk, FPInvOffset bcSPOff)
     : sk(sk)
-    , spOff(spOff)
+    , bcSPOff(bcSPOff)
   {}
 
   std::string show() const { return showShort(sk); }
 
   SrcKey sk;
-  FPInvOffset spOff;
+  FPInvOffset bcSPOff;
 };
 
 struct LdSSwitchData : IRExtraData {
@@ -412,19 +426,19 @@ struct LdSSwitchData : IRExtraData {
     target->numCases   = numCases;
     target->defaultSk  = defaultSk;
     target->cases      = new (arena) Elm[numCases];
-    target->spOff      = spOff;
+    target->bcSPOff    = bcSPOff;
     std::copy(cases, cases + numCases, const_cast<Elm*>(target->cases));
     return target;
   }
 
   std::string show() const {
-    return folly::to<std::string>(spOff.offset);
+    return folly::to<std::string>(bcSPOff.offset);
   }
 
   int64_t     numCases;
   const Elm*  cases;
   SrcKey      defaultSk;
-  FPInvOffset spOff;
+  FPInvOffset bcSPOff;
 };
 
 struct ProfileSwitchData : IRExtraData {
@@ -446,10 +460,10 @@ struct ProfileSwitchData : IRExtraData {
 struct JmpSwitchData : IRExtraData {
   JmpSwitchData* clone(Arena& arena) const {
     JmpSwitchData* sd = new (arena) JmpSwitchData;
-    sd->cases      = cases;
-    sd->targets    = new (arena) SrcKey[cases];
-    sd->invSPOff   = invSPOff;
-    sd->irSPOff    = irSPOff;
+    sd->cases = cases;
+    sd->targets = new (arena) SrcKey[cases];
+    sd->spOffBCFromFP = spOffBCFromFP;
+    sd->spOffBCFromIRSP = spOffBCFromIRSP;
     std::copy(targets, targets + cases, const_cast<SrcKey*>(sd->targets));
     return sd;
   }
@@ -460,8 +474,8 @@ struct JmpSwitchData : IRExtraData {
 
   int32_t cases;       // number of cases
   SrcKey* targets;     // srckeys for all targets
-  FPInvOffset invSPOff;
-  IRSPRelOffset irSPOff;
+  FPInvOffset spOffBCFromFP;
+  IRSPRelOffset spOffBCFromIRSP;
 };
 
 struct FPushCufData : IRExtraData {
@@ -535,26 +549,6 @@ struct ReqRetranslateData : IRExtraData {
   TransFlags trflags;
 };
 
-struct ReqRetranslateOptData : IRExtraData {
-  explicit ReqRetranslateOptData(TransID transID,
-                                 SrcKey target,
-                                 IRSPRelOffset irSPOff)
-    : transID(transID)
-    , target(target)
-    , irSPOff(irSPOff)
-  {}
-
-  std::string show() const {
-    return folly::to<std::string>(transID, ',',
-                                  target.offset(), ',',
-                                  irSPOff.offset);
-  }
-
-  TransID transID;
-  SrcKey target;
-  IRSPRelOffset irSPOff;
-};
-
 /*
  * Compile-time metadata about an ActRec allocation.
  */
@@ -593,15 +587,6 @@ struct DefInlineFPData : IRExtraData {
   uint32_t numNonDefault;
 };
 
-struct InlineReturnNoFrameData : IRExtraData {
-  explicit InlineReturnNoFrameData(FPRelOffset off) : frameOffset(off) {}
-  std::string show() const {
-    return folly::to<std::string>(frameOffset.offset);
-  }
-
-  FPRelOffset frameOffset;
-};
-
 struct SyncReturnBCData : IRExtraData {
   SyncReturnBCData(Offset bcOff, IRSPRelOffset spOff)
     : bcOffset(bcOff)
@@ -620,23 +605,31 @@ struct CallArrayData : IRExtraData {
                          int32_t numParams,
                          Offset pcOffset,
                          Offset after,
+                         const Func* callee,
                          bool destroyLocals)
     : spOffset(spOffset)
     , numParams(numParams)
     , pc(pcOffset)
     , after(after)
+    , callee(callee)
     , destroyLocals(destroyLocals)
   {}
 
   std::string show() const {
-    return folly::to<std::string>(pc, ",", after,
-                                  destroyLocals ? ",destroyLocals" : "");
+    return folly::to<std::string>(
+      pc, ",",
+      after,
+      callee
+        ? folly::sformat(",{}", callee->fullName())
+        : std::string{},
+      destroyLocals ? ",destroyLocals" : "");
   }
 
   IRSPRelOffset spOffset; // offset from StkPtr to bottom of call's ActRec+args
   int32_t numParams;
   Offset pc;     // XXX why isn't this available in the marker?
   Offset after;  // offset from unit m_bc (unlike m_soff in ActRec)
+  const Func* callee; // nullptr if not statically known
   bool destroyLocals;
 };
 
@@ -818,7 +811,7 @@ struct LdFuncCachedUData : IRExtraData {
   }
 
   size_t hash() const {
-    return hash_int64_pair(name->hash(), fallback->hash());
+    return hash_int64_pair((uint32_t)name->hash(), (uint32_t)fallback->hash());
   }
   bool equals(const LdFuncCachedUData& o) const {
     return name == o.name && fallback == o.fallback;
@@ -842,10 +835,22 @@ struct InterpOneData : IRExtraData {
     Type type;
   };
 
+  struct ClsRefSlot {
+    explicit ClsRefSlot(uint32_t id = 0, bool write = false)
+      : id{id}
+      , write{write}
+    {}
+
+    uint32_t id;
+    bool write;
+  };
+
   explicit InterpOneData(IRSPRelOffset spOffset)
     : spOffset(spOffset)
     , nChangedLocals(0)
     , changedLocals(nullptr)
+    , nChangedClsRefSlots(0)
+    , changedClsRefSlots(nullptr)
     , smashesAllLocals(false)
   {}
 
@@ -868,6 +873,9 @@ struct InterpOneData : IRExtraData {
   uint32_t nChangedLocals;
   LocalType* changedLocals;
 
+  uint32_t nChangedClsRefSlots;
+  ClsRefSlot* changedClsRefSlots;
+
   bool smashesAllLocals;
 
   InterpOneData* clone(Arena& arena) const {
@@ -878,8 +886,12 @@ struct InterpOneData : IRExtraData {
     id->opcode = opcode;
     id->nChangedLocals = nChangedLocals;
     id->changedLocals = new (arena) LocalType[nChangedLocals];
+    id->nChangedClsRefSlots = nChangedClsRefSlots;
+    id->changedClsRefSlots = new (arena) ClsRefSlot[nChangedClsRefSlots];
     id->smashesAllLocals = smashesAllLocals;
     std::copy(changedLocals, changedLocals + nChangedLocals, id->changedLocals);
+    std::copy(changedClsRefSlots, changedClsRefSlots + nChangedClsRefSlots,
+              id->changedClsRefSlots);
     return id;
   }
 
@@ -899,6 +911,13 @@ struct InterpOneData : IRExtraData {
         ret += folly::sformat(", Local {} -> {}",
                               changedLocals[i].id,
                               changedLocals[i].type);
+      }
+    }
+    if (nChangedClsRefSlots) {
+      for (auto i = 0; i < nChangedClsRefSlots; ++i) {
+        ret += folly::sformat(", Slot {}{}",
+                              changedClsRefSlots[i].id,
+                              changedClsRefSlots[i].write ? "W" : "R");
       }
     }
 
@@ -1023,12 +1042,21 @@ struct NewKeysetArrayData : IRExtraData {
   uint32_t size;
 };
 
-struct MOpFlagsData : IRExtraData {
-  explicit MOpFlagsData(MOpFlags flags) : flags{flags} {}
+struct MemoData : IRExtraData {
+  explicit MemoData(LocalRange locals)
+    : locals(locals) {}
 
-  std::string show() const { return subopToName(flags); }
+  std::string show() const { return HPHP::show(locals); }
 
-  MOpFlags flags;
+  LocalRange locals;
+};
+
+struct MOpModeData : IRExtraData {
+  explicit MOpModeData(MOpMode mode) : mode{mode} {}
+
+  std::string show() const { return subopToName(mode); }
+
+  MOpMode mode;
 };
 
 struct SetOpData : IRExtraData {
@@ -1093,7 +1121,7 @@ struct NewColData : IRExtraData {
 };
 
 struct LocalIdRange : IRExtraData {
-  explicit LocalIdRange(uint32_t start, uint32_t end)
+  LocalIdRange(uint32_t start, uint32_t end)
     : start(start)
     , end(end)
   {}
@@ -1123,6 +1151,49 @@ struct FuncEntryData : IRExtraData {
   uint32_t argc;
 };
 
+struct CheckRefsData : IRExtraData {
+  CheckRefsData(unsigned firstBit, uint64_t mask, uint64_t vals)
+    : firstBit(safe_cast<int>(firstBit))
+    , mask(mask)
+    , vals(vals)
+  {}
+
+  std::string show() const {
+    return folly::format("{},{},{}", firstBit, mask, vals).str();
+  }
+
+  int firstBit;
+  uint64_t mask;
+  uint64_t vals;
+};
+
+struct LookupClsMethodData : IRExtraData {
+  explicit LookupClsMethodData(IRSPRelOffset offset, bool forward) :
+    calleeAROffset(offset), forward(forward) {}
+
+  std::string show() const {
+    return folly::to<std::string>("IRSPOff ", calleeAROffset.offset,
+                                  forward ? " forwarded" : "");
+  }
+
+  // offset from caller SP to bottom of callee's ActRec
+  IRSPRelOffset calleeAROffset;
+  bool forward;
+};
+
+
+struct ProfileMethodData : IRExtraData {
+  ProfileMethodData(IRSPRelOffset bcSPOff, rds::Handle handle)
+    : bcSPOff(bcSPOff)
+    , handle(handle)
+  {}
+
+  std::string show() const { return folly::to<std::string>(handle); }
+
+  IRSPRelOffset bcSPOff;
+  rds::Handle handle;
+};
+
 //////////////////////////////////////////////////////////////////////
 
 #define X(op, data)                                                   \
@@ -1145,6 +1216,9 @@ X(LdLocPseudoMain,              LocalId);
 X(StLoc,                        LocalId);
 X(StLocPseudoMain,              LocalId);
 X(StLocRange,                   LocalIdRange);
+X(LdClsRef,                     ClsRefSlotData);
+X(StClsRef,                     ClsRefSlotData);
+X(KillClsRef,                   ClsRefSlotData);
 X(IterFree,                     IterId);
 X(MIterFree,                    IterId);
 X(CIterFree,                    IterId);
@@ -1190,10 +1264,11 @@ X(LdStkAddr,                    IRSPRelOffsetData);
 X(DefInlineFP,                  DefInlineFPData);
 X(BeginInlining,                IRSPRelOffsetData);
 X(SyncReturnBC,                 SyncReturnBCData);
-X(InlineReturnNoFrame,          InlineReturnNoFrameData);
+X(InlineReturn,                 FPRelOffsetData);
+X(InlineReturnNoFrame,          FPRelOffsetData);
 X(ReqRetranslate,               ReqRetranslateData);
 X(ReqBindJmp,                   ReqBindJmpData);
-X(ReqRetranslateOpt,            ReqRetranslateOptData);
+X(ReqRetranslateOpt,            IRSPRelOffsetData);
 X(CheckCold,                    TransIDData);
 X(IncProfCounter,               TransIDData);
 X(Call,                         CallData);
@@ -1207,7 +1282,7 @@ X(LdArrFuncCtx,                 IRSPRelOffsetData);
 X(LdArrFPushCuf,                IRSPRelOffsetData);
 X(LdStrFPushCuf,                IRSPRelOffsetData);
 X(LdFunc,                       IRSPRelOffsetData);
-X(LookupClsMethod,              IRSPRelOffsetData);
+X(LookupClsMethod,              LookupClsMethodData);
 X(LookupClsMethodCache,         ClsMethodData);
 X(LdClsMethodCacheFunc,         ClsMethodData);
 X(LdClsMethodCacheCls,          ClsMethodData);
@@ -1251,14 +1326,16 @@ X(ProfileKeysetOffset,          RDSHandleData);
 X(ProfileType,                  RDSHandleData);
 X(ProfileMethod,                ProfileMethodData);
 X(LdRDSAddr,                    RDSHandleData);
-X(BaseG,                        MOpFlagsData);
-X(PropX,                        MOpFlagsData);
-X(PropDX,                       MOpFlagsData);
-X(ElemX,                        MOpFlagsData);
-X(ElemDX,                       MOpFlagsData);
-X(ElemUX,                       MOpFlagsData);
-X(CGetProp,                     MOpFlagsData);
-X(CGetElem,                     MOpFlagsData);
+X(BaseG,                        MOpModeData);
+X(PropX,                        MOpModeData);
+X(PropDX,                       MOpModeData);
+X(ElemX,                        MOpModeData);
+X(ElemDX,                       MOpModeData);
+X(ElemUX,                       MOpModeData);
+X(CGetProp,                     MOpModeData);
+X(CGetElem,                     MOpModeData);
+X(MemoGet,                      MemoData);
+X(MemoSet,                      MemoData);
 X(SetOpProp,                    SetOpData);
 X(SetOpCell,                    SetOpData);
 X(IncDecProp,                   IncDecData);
@@ -1268,7 +1345,9 @@ X(StAsyncArResume,              ResumeOffset);
 X(StContArResume,               ResumeOffset);
 X(StContArState,                GeneratorState);
 X(ContEnter,                    ContEnterData);
+X(DbgAssertARFunc,              IRSPRelOffsetData);
 X(LdARFuncPtr,                  IRSPRelOffsetData);
+X(LdARCtx,                      IRSPRelOffsetData);
 X(EndCatch,                     IRSPRelOffsetData);
 X(EagerSyncVMRegs,              IRSPRelOffsetData);
 X(JmpSSwitchDest,               IRSPRelOffsetData);
@@ -1288,6 +1367,7 @@ X(LdContResumeAddr,             IsAsyncData);
 X(LdContActRec,                 IsAsyncData);
 X(DecRef,                       DecRefData);
 X(LdTVAux,                      LdTVAuxData);
+X(CheckRefs,                    CheckRefsData);
 
 #undef X
 

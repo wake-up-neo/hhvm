@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -85,7 +85,7 @@ struct IRBuilder {
    * Update the current BCContext.
    */
   void setCurMarker(BCMarker);
-  void resetCurIROff() { m_curBCContext.iroff = 0; }
+  void resetCurIROff(uint16_t off = 0) { m_curBCContext.iroff = off; }
 
   /*
    * Exception handling and IRBuilder.
@@ -117,6 +117,7 @@ struct IRBuilder {
    */
   const LocalState& local(uint32_t id, TypeConstraint tc);
   const StackState& stack(IRSPRelOffset offset, TypeConstraint tc);
+  const CSlotState& clsRefSlot(uint32_t slot);
   SSATmp* valueOf(Location l, TypeConstraint tc);
   Type     typeOf(Location l, TypeConstraint tc);
 
@@ -125,8 +126,10 @@ struct IRBuilder {
    *
    * @returns: ldRefReturn(fs().predictedTypeOf(location).unbox())
    */
+  Type predictedInnerType(Location l) const;
   Type predictedLocalInnerType(uint32_t id) const;
   Type predictedStackInnerType(IRSPRelOffset) const;
+  Type predictedMBaseInnerType() const;
 
   /////////////////////////////////////////////////////////////////////////////
   /*
@@ -137,6 +140,12 @@ struct IRBuilder {
    * these functions. This happens automatically for most values, when obtained
    * through irgen-internal functions like popC (and friends).
    */
+
+  /*
+   * Enable guard constraining for this IRBuilder. This may disable some
+   * optimizations.
+   */
+  void enableConstrainGuards();
 
   /*
    * All the guards in the managed IRUnit.
@@ -167,13 +176,6 @@ struct IRBuilder {
   bool constrainLocation(Location l, TypeConstraint tc);
   bool constrainLocal(uint32_t id, TypeConstraint tc, const std::string& why);
   bool constrainStack(IRSPRelOffset offset, TypeConstraint tc);
-
-  /*
-   * Whether `val' might have its type relaxed by guard relaxation.
-   *
-   * If `val' is nullptr, only conditions that apply to all values are checked.
-   */
-  bool typeMightRelax(SSATmp* val = nullptr) const;
 
   /////////////////////////////////////////////////////////////////////////////
   // Bytecode-level control flow helpers.
@@ -281,6 +283,7 @@ private:
    */
   Location loc(uint32_t) const;
   Location stk(IRSPRelOffset) const;
+  Location cslot(uint32_t) const;
 
   /*
    * preOptimize() and helpers.
@@ -288,7 +291,10 @@ private:
   SSATmp* preOptimizeCheckLocation(IRInstruction*, Location);
   SSATmp* preOptimizeCheckLoc(IRInstruction*);
   SSATmp* preOptimizeCheckStk(IRInstruction*);
+  SSATmp* preOptimizeCheckMBase(IRInstruction*);
+  SSATmp* preOptimizeHintInner(IRInstruction*, Location);
   SSATmp* preOptimizeHintLocInner(IRInstruction*);
+  SSATmp* preOptimizeHintMBaseInner(IRInstruction*);
   SSATmp* preOptimizeAssertTypeOp(IRInstruction* inst,
                                   Type oldType,
                                   SSATmp* oldVal,
@@ -309,6 +315,7 @@ private:
   SSATmp* preOptimizeLdLocation(IRInstruction*, Location);
   SSATmp* preOptimizeLdLoc(IRInstruction*);
   SSATmp* preOptimizeLdStk(IRInstruction*);
+  SSATmp* preOptimizeLdClsRef(IRInstruction*);
   SSATmp* preOptimizeCastStk(IRInstruction*);
   SSATmp* preOptimizeCoerceStk(IRInstruction*);
   SSATmp* preOptimizeLdMBase(IRInstruction*);
@@ -357,6 +364,7 @@ private:
   bool m_enableSimplification{false};
 
   GuardConstraints m_constraints;
+  bool m_constrainGuards{false};
 
   // Keep track of blocks created to support bytecode control flow.
   jit::flat_map<SrcKey,Block*> m_skToBlockMap;
@@ -387,13 +395,6 @@ struct BlockPusher {
  private:
   IRBuilder& m_irb;
 };
-
-///////////////////////////////////////////////////////////////////////////////
-
-bool typeMightRelax(const SSATmp* tmp);
-
-bool dictElemMightRelax(const IRInstruction* inst);
-bool keysetElemMightRelax(const IRInstruction* inst);
 
 ///////////////////////////////////////////////////////////////////////////////
 

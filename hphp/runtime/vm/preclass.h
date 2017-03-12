@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -96,11 +96,6 @@ using BuiltinDtorFunction = LowPtr<void(ObjectData*, const Class*)>;
  *    required) is not known at parse time.  This leads to the Maybe/Always
  *    split below.
  *
- *    Closures have a special kind of hoistability, ClosureHoistable, that
- *    requires them to be defined first (before any other classes or
- *    functions), to avoid races if other threads are trying to load the same
- *    unit.  See the comments in Unit::initialMerge for more information.
- *
  */
 struct PreClass : AtomicCountable {
   friend struct PreClassEmitter;
@@ -113,7 +108,6 @@ struct PreClass : AtomicCountable {
     Mergeable,
     MaybeHoistable,
     AlwaysHoistable,
-    ClosureHoistable
   };
 
   /*
@@ -330,17 +324,6 @@ public:
   const TypeConstraint& enumBaseTy() const { return m_enumBaseTy; }
 
   /*
-   * For a builtin class c_Foo:
-   *
-   * builtinObjSize is the size of the object, excluding ObjectData (i.e.,
-   * sizeof(c_Foo) - sizeof(ObjectData)).
-   *
-   * builtinODOffset is the offset of the ObjectData subobject in c_Foo.
-   */
-  uint32_t builtinObjSize() const { return m_builtinObjSize; }
-  int32_t builtinODOffset() const { return m_builtinODOffset; }
-
-  /*
    * Extension builtin classes have custom creation and destruction routines.
    */
   BuiltinCtorFunction instanceCtor() const { return m_instanceCtor; }
@@ -452,8 +435,6 @@ private:
   int m_line2;
   Offset m_offset;
   Id m_id;
-  uint32_t m_builtinObjSize{0};
-  int32_t m_builtinODOffset{0};
   Attr m_attrs;
   Hoistable m_hoistable;
   LowStringPtr m_name;

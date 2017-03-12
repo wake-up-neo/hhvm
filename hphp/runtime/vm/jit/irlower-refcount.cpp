@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -77,7 +77,7 @@ void ifNonPersistent(Vout& v, Type ty, Vloc loc, Then then) {
 template<class Then>
 void ifRefCountedType(Vout& v, Vout& vtaken, Type ty, Vloc loc, Then then) {
   if (!ty.maybe(TCounted)) return;
-  if (ty <= TStkElem && ty.isKnownDataType()) {
+  if (ty <= TGen && ty.isKnownDataType()) {
     if (isRefcountedType(ty.toDataType())) then(v);
     return;
   }
@@ -87,7 +87,7 @@ void ifRefCountedType(Vout& v, Vout& vtaken, Type ty, Vloc loc, Then then) {
     v << testqi{ActRec::kHasClassBit, loc.reg(0), sf};
     cond = CC_E;
   } else {
-    assert(ty <= TStkElem);
+    assert(ty <= TGen);
     emitCmpTVType(v, sf, KindOfRefCountThreshold, loc.reg(1));
   }
   unlikelyIfThen(v, vtaken, cond, sf, then);
@@ -106,8 +106,6 @@ void ifRefCountedNonPersistent(Vout& v, Type ty, Vloc loc, Then then) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-namespace {
-
 struct IncRefProfile {
   std::string toString() const {
     return folly::sformat("tryinc: {:4}", tryinc);
@@ -123,8 +121,6 @@ struct IncRefProfile {
    */
   uint16_t tryinc;
 };
-
-}
 
 void cgIncRef(IRLS& env, const IRInstruction* inst) {
   // This is redundant with a check in ifRefCountedNonPersistent, but we check
@@ -182,8 +178,6 @@ void cgIncRef(IRLS& env, const IRInstruction* inst) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-namespace {
-
 /*
  * Profile for the type and release-frequency of a DecRef instruction.
  */
@@ -217,6 +211,8 @@ struct DecRefProfile {
    */
   uint16_t destroy;
 };
+
+namespace {
 
 using OptDecRefProfile = folly::Optional<TargetProfile<DecRefProfile>>;
 
@@ -285,7 +281,6 @@ CallSpec getDtorCallSpec(DataType type) {
     case KindOfRef:
       return CallSpec::method(&RefData::release);
     DT_UNCOUNTED_CASE:
-    case KindOfClass:
       break;
   }
   always_assert(false);

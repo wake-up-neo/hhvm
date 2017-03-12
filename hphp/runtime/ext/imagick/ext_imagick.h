@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -38,6 +38,7 @@ namespace HPHP {
 struct ImagickExtension final : Extension {
   ImagickExtension();
   void moduleInit() override;
+  void moduleShutdown() override;
   void threadInit() override;
 
   static bool hasLocaleFix();
@@ -66,11 +67,10 @@ struct ImagickExtension final : Extension {
     \
     static Object allocObject(const Variant& arg) { \
       Object ret = allocObject(); \
-      TypedValue dummy; \
-      g_context->invokeFunc(&dummy, \
-                              cls->getCtor(), \
-                              make_packed_array(arg), \
-                              ret.get()); \
+      tvRefcountedDecRef(\
+        g_context->invokeFunc(cls->getCtor(), make_packed_array(arg), \
+                              ret.get()) \
+      );\
       return ret; \
     } \
     \

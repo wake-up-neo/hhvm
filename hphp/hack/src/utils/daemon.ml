@@ -40,6 +40,9 @@ let descr_of_in_channel : 'a in_channel -> Unix.file_descr =
 let descr_of_out_channel : 'a out_channel -> Unix.file_descr =
   Unix.descr_of_out_channel
 
+let cast_in ic = ic
+let cast_out oc = oc
+
 (* We cannot fork() on Windows, so in order to emulate this in a
  * cross-platform way, we use create_process() and set the HH_SERVER_DAEMON
  * environment variable to indicate which function the child should
@@ -256,6 +259,18 @@ let devnull () =
   let oc = open_out "/dev/null" in
   {channels = ic, oc; pid = 0}
 
+(**
+ * In order for the Daemon infrastructure to work, the beginning of your
+ * program (or very close to the beginning) must start with a call to
+ * check_entry_point.
+ *
+ * Details: Daemon.spawn essentially does a fork then exec of the currently
+ * running program. Thus, the child process will just end up running the exact
+ * same program as the parent if you forgot to start with a check_entry_point.
+ * The parent process sees this as a NOOP when its program starts, but a
+ * child process (from Daemon.spawn) will use this as a GOTO to its entry
+ * point.
+ *)
 let check_entry_point () =
   try
     let entry, param, (ic, oc) = Entry.get_context () in

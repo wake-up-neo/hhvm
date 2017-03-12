@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -206,7 +206,6 @@ public:
   void onVec(Token& out, Token& exprs);
   void onKeyset(Token& out, Token& exprs);
   void onEmptyCollection(Token &out);
-  void onCollectionPair(Token &out, Token *pairs, Token *name, Token &value);
   void onUserAttribute(Token &out, Token *attrList, Token &name, Token &value);
   void onClassConst(Token &out, Token &cls, Token &name, bool text);
   void onClassClass(Token &out, Token &cls, Token &name, bool text);
@@ -308,9 +307,11 @@ public:
   void onTypeAnnotation(Token& out, const Token& name, const Token& typeArgs);
   void onTypeList(Token& type1, const Token& type2);
   void onTypeSpecialization(Token& type, char specialization);
+  void onShapeFieldSpecialization(Token& shapeField, char specialization);
   void onClsCnsShapeField(Token& out, const Token& cls, const Token& cns,
     const Token& value);
-  void onShape(Token& out, const Token& shapeMemberList);
+  void onShape(
+    Token& out, const Token& shapeMemberList, bool terminatedWithEllipsis);
 
   // for namespace support
   void onNamespaceStart(const std::string &ns, bool file_scope = false);
@@ -399,16 +400,15 @@ public:
 
 private:
   struct FunctionContext {
-    FunctionContext()
-      : hasCallToGetArgs(false)
+    explicit FunctionContext(std::string name)
+      : name(std::move(name))
       , hasNonEmptyReturn(false)
       , isGenerator(false)
       , isAsync(false)
       , mayCallSetFrameMetadata(false)
     {}
 
-    // Function contains a call to func_num_args, func_get_args or func_get_arg.
-    bool hasCallToGetArgs;
+    std::string name;
 
     // Function contains a non-empty return statement.
     bool hasNonEmptyReturn;
@@ -445,8 +445,6 @@ private:
   std::vector<FunctionContext> m_funcContexts;
   std::vector<ScalarExpressionPtr> m_compilerHaltOffsetVec;
   std::stack<ClassContext> m_clsContexts;
-  std::string m_funcName;
-  std::string m_containingFuncName;
 
   // parser output
   StatementListPtr m_tree;
@@ -463,6 +461,16 @@ private:
   void newScope();
   void completeScope(BlockScopePtr inner);
 
+  /*
+   * The name of the containing named function (ie, not including
+   * closures), if any.
+   */
+  const std::string& realFuncName() const;
+  /*
+   * The name of the currently active function, or '{closure}'
+   * if its a closure.
+   */
+  const std::string& funcName() const;
   const std::string& clsName() const;
   bool inTrait() const;
 

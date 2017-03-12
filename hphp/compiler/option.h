@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -104,8 +104,6 @@ struct Option {
    * Optimization flags
    */
   static bool PreOptimization;
-  static bool PostOptimization;
-  static bool AnalyzePerfectVirtuals;
 
   /*
    * Flags that only affect HHBBC right now.  See hhbbc/hhbbc.h for
@@ -114,22 +112,14 @@ struct Option {
   static bool HardConstProp;
 
   /**
-   * Separate compilation
-   */
-  static bool SeparateCompilation;
-  static bool SeparateCompLib;
-
-  /**
    * CodeGenerator options for PHP.
    */
   static bool GeneratePickledPHP;
   static bool GenerateInlinedPHP;
   static bool GenerateTrimmedPHP;
   static bool ConvertSuperGlobals;    // $GLOBALS['var'] => global $var
-  static bool ConvertQOpExpressions;  // $var = $exp ? $yes : $no => if-else
   static std::string ProgramPrologue;
   static std::string TrimmedPrologue;
-  static std::set<std::string, stdltistr> DynamicInvokeFunctions;
   static std::set<std::string> VolatileClasses;
   static std::map<std::string,std::string, stdltistr> AutoloadClassMap;
   static std::map<std::string,std::string, stdltistr> AutoloadFuncMap;
@@ -169,21 +159,6 @@ struct Option {
   static bool KeepStatementsWithNoEffect;
 
   /**
-   * When we have an include inside a function or a method, how many levels
-   * do we expand? If 0, we rely on "require" vs. "include" to give explicit
-   * instructions. If 1, we only inline just one level, and all deeper
-   * includes are considered as libraries, and they will be moved to top
-   * level. If -1, we completely disable conditional include handling.
-   */
-  static int ConditionalIncludeExpandLevel;
-
-  /**
-   * Maximum number of examplar programs to store in each output.
-   */
-  static int DependencyMaxProgram;
-  static int CodeErrorMaxProgram;
-
-  /**
    * Whether or not name matches AUTOLOAD files. If not, returns empty. If
    * yes, returns root directory for the file.
    */
@@ -198,17 +173,9 @@ struct Option {
   static std::string ProgramName;
 
   static bool ParseTimeOpts;
-  static bool OutputHHBC;
-  static bool EnableHipHopSyntax;
-  static bool EnableZendCompat;
-  static bool JitEnableRenameFunction;
   static bool EnableHipHopExperimentalSyntax;
   static bool EnableShortTags;
   static bool EnableAspTags;
-  static bool EnableXHP;
-  static bool IntsOverflowToInts;
-  static HackStrictOption StrictArrayFillKeys;
-  static HackStrictOption DisallowDynamicVarEnvFuncs;
   static int ParserThreadCount;
 
   static int GetScannerType();
@@ -233,9 +200,6 @@ private:
   static void LoadRootHdf(const IniSettingMap& ini, const Hdf &roots,
                           const std::string& name,
                           std::map<std::string, std::string> &map);
-  static void LoadRootHdf(const IniSettingMap& ini, const Hdf &roots,
-                          const std::string& name,
-                          std::vector<std::string> &vec);
 };
 
 //////////////////////////////////////////////////////////////////////

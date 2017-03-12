@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -41,13 +41,14 @@
 #include "hphp/runtime/base/stats.h"
 #include "hphp/runtime/base/unit-cache.h"
 #include "hphp/runtime/ext/generator/ext_generator.h"
+#include "hphp/runtime/vm/bc-pattern.h"
 #include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/hhbc-codec.h"
 #include "hphp/runtime/vm/hhbc.h"
+#include "hphp/runtime/vm/method-lookup.h"
 #include "hphp/runtime/vm/runtime.h"
 #include "hphp/runtime/vm/treadmill.h"
 #include "hphp/runtime/vm/type-profile.h"
-#include "hphp/runtime/vm/bc-pattern.h"
 
 #include "hphp/runtime/vm/jit/annotation.h"
 #include "hphp/runtime/vm/jit/inlining-decider.h"
@@ -85,7 +86,7 @@ static const struct {
 
   /*** 1. Basic instructions ***/
 
-  { OpPopA,        {Stack1,           None,         OutNone         }},
+  { OpDiscardClsRef, {None,           None,         OutNone         }},
   { OpPopC,        {Stack1|
                     DontGuardStack1,  None,         OutNone         }},
   { OpPopV,        {Stack1|
@@ -94,6 +95,8 @@ static const struct {
   { OpPopR,        {Stack1|
                     DontGuardStack1|
                     IgnoreInnerType,  None,         OutNone         }},
+  { OpPopU,        {Stack1|
+                    DontGuardStack1,  None,         OutNone         }},
   { OpDup,         {Stack1,           StackTop2,    OutSameAsInput1 }},
   { OpBox,         {Stack1,           Stack1,       OutVInput       }},
   { OpUnbox,       {Stack1,           Stack1,       OutCInput       }},
@@ -121,8 +124,8 @@ static const struct {
   { OpNewStructArray, {StackN,        Stack1,       OutArray        }},
   { OpNewVecArray,    {StackN,        Stack1,       OutVec          }},
   { OpNewKeysetArray, {StackN,        Stack1,       OutKeyset       }},
-  { OpAddElemC,    {StackTop3,        Stack1,       OutSameAsInput3 }},
-  { OpAddElemV,    {StackTop3,        Stack1,       OutSameAsInput3 }},
+  { OpAddElemC,    {StackTop3,        Stack1,       OutModifiedInput3 }},
+  { OpAddElemV,    {StackTop3,        Stack1,       OutModifiedInput3 }},
   { OpAddNewElemC, {StackTop2,        Stack1,       OutArray        }},
   { OpAddNewElemV, {StackTop2,        Stack1,       OutArray        }},
   { OpNewCol,      {None,             Stack1,       OutObject       }},
@@ -132,11 +135,12 @@ static const struct {
   { OpCns,         {None,             Stack1,       OutCns          }},
   { OpCnsE,        {None,             Stack1,       OutCns          }},
   { OpCnsU,        {None,             Stack1,       OutCns          }},
-  { OpClsCns,      {Stack1,           Stack1,       OutUnknown      }},
+  { OpClsCns,      {None,             Stack1,       OutUnknown      }},
   { OpClsCnsD,     {None,             Stack1,       OutUnknown      }},
   { OpFile,        {None,             Stack1,       OutString       }},
   { OpDir,         {None,             Stack1,       OutString       }},
-  { OpNameA,       {Stack1,           Stack1,       OutString       }},
+  { OpMethod,      {None,             Stack1,       OutString       }},
+  { OpClsRefName,  {None,             Stack1,       OutString       }},
 
   /*** 3. Operator instructions ***/
 
@@ -218,7 +222,6 @@ static const struct {
   { OpCGetL,       {Local,            Stack1,       OutCInputL      }},
   { OpCGetL2,      {Stack1|DontGuardStack1|
                     Local,            StackIns1,    OutCInputL      }},
-  { OpCGetL3,      {StackTop2|Local,  StackIns2,    OutCInputL      }},
   { OpCGetQuietL,  {Local,            Stack1,       OutCInputL      }},
   // In OpCUGetL we rely on OutCInputL returning TCell (which covers Uninit
   // values) instead of TInitCell.
@@ -228,7 +231,7 @@ static const struct {
   { OpCGetQuietN,  {Stack1,           Stack1,       OutUnknown      }},
   { OpCGetG,       {Stack1,           Stack1,       OutUnknown      }},
   { OpCGetQuietG,  {Stack1,           Stack1,       OutUnknown      }},
-  { OpCGetS,       {StackTop2,        Stack1,       OutUnknown      }},
+  { OpCGetS,       {Stack1,           Stack1,       OutUnknown      }},
   { OpVGetL,       {Local,            Stack1|Local, OutVInputL      }},
   { OpVGetN,       {Stack1,           Stack1|Local, OutVUnknown     }},
   // TODO: In pseudo-main, the VGetG instruction invalidates what we know
@@ -236,9 +239,9 @@ static const struct {
   // local variables to become "boxed". We need to add logic to tracelet
   // analysis to deal with this properly.
   { OpVGetG,       {Stack1,           Stack1,       OutVUnknown     }},
-  { OpVGetS,       {StackTop2,        Stack1,       OutVUnknown     }},
-  { OpAGetC,       {Stack1,           Stack1,       OutClassRef     }},
-  { OpAGetL,       {Local,            Stack1,       OutClassRef     }},
+  { OpVGetS,       {Stack1,           Stack1,       OutVUnknown     }},
+  { OpClsRefGetC,  {Stack1,           None,         OutNone         }},
+  { OpClsRefGetL,  {Local,            None,         OutNone         }},
 
   /*** 6. Isset, Empty, and type querying instructions ***/
 
@@ -246,34 +249,35 @@ static const struct {
   { OpIssetL,      {Local,            Stack1,       OutBoolean      }},
   { OpIssetN,      {Stack1,           Stack1,       OutBoolean      }},
   { OpIssetG,      {Stack1,           Stack1,       OutBoolean      }},
-  { OpIssetS,      {StackTop2,        Stack1,       OutBoolean      }},
+  { OpIssetS,      {Stack1,           Stack1,       OutBoolean      }},
   { OpEmptyL,      {Local,            Stack1,       OutBoolean      }},
   { OpEmptyN,      {Stack1,           Stack1,       OutBoolean      }},
   { OpEmptyG,      {Stack1,           Stack1,       OutBoolean      }},
-  { OpEmptyS,      {StackTop2,        Stack1,       OutBoolean      }},
+  { OpEmptyS,      {Stack1,           Stack1,       OutBoolean      }},
   { OpIsTypeC,     {Stack1|
                     DontGuardStack1,  Stack1,       OutBoolean      }},
   { OpIsTypeL,     {Local,            Stack1,       OutIsTypeL      }},
+  { OpIsUninit,    {Stack1,           StackTop2,    OutBoolean      }},
 
   /*** 7. Mutator instructions ***/
 
   { OpSetL,        {Stack1|Local,     Stack1|Local, OutSameAsInput1  }},
   { OpSetN,        {StackTop2,        Stack1|Local, OutSameAsInput1  }},
   { OpSetG,        {StackTop2,        Stack1,       OutSameAsInput1  }},
-  { OpSetS,        {StackTop3,        Stack1,       OutSameAsInput1  }},
+  { OpSetS,        {StackTop2,        Stack1,       OutSameAsInput1  }},
   { OpSetOpL,      {Stack1|Local,     Stack1|Local, OutSetOp        }},
   { OpSetOpN,      {StackTop2,        Stack1|Local, OutUnknown      }},
   { OpSetOpG,      {StackTop2,        Stack1,       OutUnknown      }},
-  { OpSetOpS,      {StackTop3,        Stack1,       OutUnknown      }},
+  { OpSetOpS,      {StackTop2,        Stack1,       OutUnknown      }},
   { OpIncDecL,     {Local,            Stack1|Local, OutIncDec       }},
   { OpIncDecN,     {Stack1,           Stack1|Local, OutUnknown      }},
   { OpIncDecG,     {Stack1,           Stack1,       OutUnknown      }},
-  { OpIncDecS,     {StackTop2,        Stack1,       OutUnknown      }},
+  { OpIncDecS,     {Stack1,           Stack1,       OutUnknown      }},
   { OpBindL,       {Stack1|Local|
                     IgnoreInnerType,  Stack1|Local, OutSameAsInput1  }},
   { OpBindN,       {StackTop2,        Stack1|Local, OutSameAsInput1  }},
   { OpBindG,       {StackTop2,        Stack1,       OutSameAsInput1  }},
-  { OpBindS,       {StackTop3,        Stack1,       OutSameAsInput1  }},
+  { OpBindS,       {StackTop2,        Stack1,       OutSameAsInput1  }},
   { OpUnsetL,      {Local,            Local,        OutNone         }},
   { OpUnsetN,      {Stack1,           Local,        OutNone         }},
   { OpUnsetG,      {Stack1,           None,         OutNone         }},
@@ -288,13 +292,14 @@ static const struct {
   { OpFPushObjMethodD,
                    {Stack1,           FStack,       OutFDesc        }},
   { OpFPushClsMethod,
-                   {StackTop2,        FStack,       OutFDesc        }},
+                   {Stack1,           FStack,       OutFDesc        }},
   { OpFPushClsMethodF,
-                   {StackTop2,        FStack,       OutFDesc        }},
+                   {Stack1,           FStack,       OutFDesc        }},
   { OpFPushClsMethodD,
                    {None,             FStack,       OutFDesc        }},
-  { OpFPushCtor,   {Stack1,           Stack1|FStack,OutObject       }},
+  { OpFPushCtor,   {None,             Stack1|FStack,OutObject       }},
   { OpFPushCtorD,  {None,             Stack1|FStack,OutObject       }},
+  { OpFPushCtorI,  {None,             Stack1|FStack,OutObject       }},
   { OpFPushCufIter,{None,             FStack,       OutFDesc        }},
   { OpFPushCuf,    {Stack1,           FStack,       OutFDesc        }},
   { OpFPushCufF,   {Stack1,           FStack,       OutFDesc        }},
@@ -308,8 +313,7 @@ static const struct {
   { OpFPassL,      {Local|FuncdRef,   Stack1,       OutFInputL      }},
   { OpFPassN,      {Stack1|FuncdRef,  Stack1,       OutUnknown      }},
   { OpFPassG,      {Stack1|FuncdRef,  Stack1,       OutUnknown      }},
-  { OpFPassS,      {StackTop2|FuncdRef,
-                                      Stack1,       OutUnknown      }},
+  { OpFPassS,      {Stack1|FuncdRef,  Stack1,       OutUnknown      }},
   /*
    * FCall is special. Like the Ret* instructions, its manipulation of the
    * runtime stack are outside the boundaries of the tracelet abstraction.
@@ -364,6 +368,8 @@ static const struct {
   { OpThis,        {None,             Stack1,       OutThisObject   }},
   { OpBareThis,    {None,             Stack1,       OutUnknown      }},
   { OpCheckThis,   {This,             None,         OutNone         }},
+  { OpVarEnvDynCall,
+                   {None,             None,         OutNone         }},
   { OpInitThisLoc,
                    {None,             Local,        OutUnknown      }},
   { OpStaticLoc,
@@ -379,9 +385,9 @@ static const struct {
                    {Stack1,           Stack1,       OutSameAsInput1  }},
   { OpOODeclExists,
                    {StackTop2,        Stack1,       OutBoolean      }},
-  { OpSelf,        {None,             Stack1,       OutClassRef     }},
-  { OpParent,      {None,             Stack1,       OutClassRef     }},
-  { OpLateBoundCls,{None,             Stack1,       OutClassRef     }},
+  { OpSelf,        {None,             None,         OutNone         }},
+  { OpParent,      {None,             None,         OutNone         }},
+  { OpLateBoundCls,{None,             None,         OutNone         }},
   { OpNativeImpl,  {None,             None,         OutNone         }},
   { OpCreateCl,    {BStackN,          Stack1,       OutObject       }},
   { OpIncStat,     {None,             None,         OutNone         }},
@@ -394,7 +400,7 @@ static const struct {
   { OpAssertRATL,  {None,             None,         OutNone         }},
   { OpAssertRATStk,{None,             None,         OutNone         }},
   { OpBreakTraceHint,{None,           None,         OutNone         }},
-  { OpGetMemoKey,  {Stack1,           Stack1,       OutUnknown      }},
+  { OpGetMemoKeyL, {Local,            Stack1,       OutUnknown      }},
 
   /*** 14. Generator instructions ***/
 
@@ -434,8 +440,8 @@ static const struct {
   { OpFPassBaseNL, {Local|FuncdRef,   MBase,        OutNone         }},
   { OpFPassBaseGC, {StackI|FuncdRef,  MBase,        OutNone         }},
   { OpFPassBaseGL, {Local|FuncdRef,   MBase,        OutNone         }},
-  { OpBaseSC,      {StackI|IdxA,      MBase|IdxA,   OutUnknown      }},
-  { OpBaseSL,      {Local|IdxA,       MBase|IdxA,   OutUnknown      }},
+  { OpBaseSC,      {StackI,           MBase,        OutNone         }},
+  { OpBaseSL,      {Local,            MBase,        OutNone         }},
   { OpBaseL,       {Local,            MBase,        OutNone         }},
   { OpFPassBaseL,  {Local|FuncdRef,   MBase,        OutNone         }},
   { OpBaseC,       {StackI,           MBase,        OutNone         }},
@@ -464,6 +470,15 @@ static const struct {
                    {MBase,            None,         OutNone         }},
   { OpSetWithRefRML,
                    {Stack1|MBase,     None,         OutNone         }},
+  { OpMemoGet,     {BStackN|MBase|DontGuardBase|LocalRange,
+                                      Stack1,       OutUnknown      }},
+  { OpMemoSet,     {Stack1|BStackN|MBase|DontGuardBase|LocalRange,
+                                      Stack1,       OutSameAsInput1 }},
+  { OpMaybeMemoType, {Stack1|DontGuardStack1,
+                                      Stack1,       OutBoolean      }},
+  { OpIsMemoType,  {Stack1|DontGuardStack1,
+                                      Stack1,       OutBoolean      }},
+
 };
 
 namespace {
@@ -496,7 +511,7 @@ namespace {
 int64_t countOperands(uint64_t mask) {
   const uint64_t ignore = FuncdRef | Local | Iter | AllLocals |
     DontGuardStack1 | IgnoreInnerType | DontGuardAny | This |
-    MBase | StackI | IdxA | MKey;
+    MBase | StackI | MKey | LocalRange | DontGuardBase;
   mask &= ~ignore;
 
   static const uint64_t counts[][2] = {
@@ -504,7 +519,6 @@ int64_t countOperands(uint64_t mask) {
     {Stack2,       1},
     {Stack1,       1},
     {StackIns1,    2},
-    {StackIns2,    3},
     {FStack,       kNumActRecCells},
   };
 
@@ -532,6 +546,7 @@ int64_t getStackPopped(PC pc) {
     case Op::VGetM:
     case Op::IncDecM:
     case Op::UnsetM:
+    case Op::MemoGet:
     case Op::NewPackedArray:
     case Op::NewVecArray:
     case Op::NewKeysetArray:
@@ -547,11 +562,10 @@ int64_t getStackPopped(PC pc) {
     case Op::SetM:
     case Op::SetOpM:
     case Op::BindM:
+    case Op::MemoSet:
       return getImm(pc, 0).u_IVA + 1;
 
     case Op::NewStructArray: return getImmVector(pc).size();
-
-    case Op::BaseSC: case Op::BaseSL: return getImm(pc, 1).u_IVA + 1;
 
     default:             break;
   }
@@ -567,8 +581,6 @@ int64_t getStackPopped(PC pc) {
 
 int64_t getStackPushed(PC pc) {
   auto const op = peek_op(pc);
-  if (op == Op::BaseSC || op == Op::BaseSL) return getImm(pc, 1).u_IVA;
-
   return countOperands(getInstrInfo(op).out);
 }
 
@@ -581,6 +593,8 @@ bool isAlwaysNop(Op op) {
   case Op::Nop:
   case Op::UnboxRNop:
   case Op::RGetCNop:
+  case Op::CGetCUNop:
+  case Op::UGetCUNop:
   case Op::EntryNop:
     return true;
   case Op::VerifyRetTypeC:
@@ -606,6 +620,8 @@ bool isAlwaysNop(Op op) {
 #define IVA(n)
 #define I64A(n)
 #define IA(n)
+#define CAR(n)
+#define CAW(n)
 #define DA(n)
 #define SA(n)
 #define AA(n)
@@ -614,6 +630,7 @@ bool isAlwaysNop(Op op) {
 #define OA(op) BA
 #define VSA(n)
 #define KA(n)
+#define LAR(n)
 #define O(name, imm, ...) case Op::name: imm break;
 
 size_t localImmIdx(Op op) {
@@ -650,6 +667,8 @@ size_t memberKeyImmIdx(Op op) {
 #undef IVA
 #undef I64A
 #undef IA
+#undef CAR
+#undef CAW
 #undef DA
 #undef SA
 #undef AA
@@ -658,6 +677,7 @@ size_t memberKeyImmIdx(Op op) {
 #undef OA
 #undef VSA
 #undef KA
+#undef LAR
 #undef O
 
 /*
@@ -737,6 +757,16 @@ InputInfoVec getInputs(NormalizedInstruction& ni, FPInvOffset bcSPOff) {
     SKTRACE(1, sk, "getInputs: local %d\n", loc);
     inputs.emplace_back(Location::Local { uint32_t(loc) });
   }
+  if (flags & LocalRange) {
+    auto const& range = ni.imm[1].u_LAR;
+    SKTRACE(1, sk, "getInputs: localRange %d+%d\n",
+            range.first, range.restCount);
+    for (int i = 0; i < range.restCount+1; ++i) {
+      inputs.emplace_back(Location::Local { uint32_t(range.first + i) });
+      inputs.back().dontGuard = true;
+      inputs.back().dontBreak = true;
+    }
+  }
   if (flags & AllLocals) ni.ignoreInnerType = true;
 
   if (flags & MKey) {
@@ -760,6 +790,13 @@ InputInfoVec getInputs(NormalizedInstruction& ni, FPInvOffset bcSPOff) {
         // The inputs vector is only used for deciding when to break the
         // tracelet, which can never happen for these cases.
         break;
+    }
+  }
+  if (flags & MBase) {
+    inputs.emplace_back(Location::MBase{});
+    if (flags & DontGuardBase) {
+      inputs.back().dontGuard = true;
+      inputs.back().dontBreak = true;
     }
   }
 
@@ -818,6 +855,7 @@ bool dontGuardAnyInputs(Op op) {
   case Op::BreakTraceHint:
   case Op::IsTypeL:
   case Op::IsTypeC:
+  case Op::IsUninit:
   case Op::IncDecL:
   case Op::DefCls:
   case Op::FPushCuf:
@@ -849,8 +887,8 @@ bool dontGuardAnyInputs(Op op) {
   case Op::MulO:
   case Op::Add:
   case Op::AddO:
-  case Op::AGetC:
-  case Op::AGetL:
+  case Op::ClsRefGetC:
+  case Op::ClsRefGetL:
   case Op::AKExists:
   case Op::AddElemC:
   case Op::AddNewElemC:
@@ -910,6 +948,7 @@ bool dontGuardAnyInputs(Op op) {
   case Op::FPushClsMethodF:
   case Op::FPushCtor:
   case Op::FPushCtorD:
+  case Op::FPushCtorI:
   case Op::FPushCufIter:
   case Op::FPushFunc:
   case Op::FPushFuncD:
@@ -917,7 +956,7 @@ bool dontGuardAnyInputs(Op op) {
   case Op::FPushObjMethodD:
   case Op::False:
   case Op::File:
-  case Op::GetMemoKey:
+  case Op::GetMemoKeyL:
   case Op::Idx:
   case Op::InitThisLoc:
   case Op::InstanceOf:
@@ -928,10 +967,11 @@ bool dontGuardAnyInputs(Op op) {
   case Op::IssetS:
   case Op::IterFree:
   case Op::LateBoundCls:
+  case Op::Method:
   case Op::MIterFree:
   case Op::Mod:
   case Op::Pow:
-  case Op::NameA:
+  case Op::ClsRefName:
   case Op::NativeImpl:
   case Op::NewArray:
   case Op::NewCol:
@@ -945,10 +985,11 @@ bool dontGuardAnyInputs(Op op) {
   case Op::NullUninit:
   case Op::OODeclExists:
   case Op::Parent:
-  case Op::PopA:
+  case Op::DiscardClsRef:
   case Op::PopC:
   case Op::PopR:
   case Op::PopV:
+  case Op::PopU:
   case Op::Print:
   case Op::PushL:
   case Op::RetC:
@@ -1002,6 +1043,9 @@ bool dontGuardAnyInputs(Op op) {
   case Op::UnsetM:
   case Op::SetWithRefLML:
   case Op::SetWithRefRML:
+  case Op::VarEnvDynCall:
+  case Op::MemoGet:
+  case Op::MemoSet:
     return false;
 
   // These are instructions that are always interp-one'd, or are always no-ops.
@@ -1013,6 +1057,8 @@ bool dontGuardAnyInputs(Op op) {
   case Op::BoxRNop:
   case Op::UnboxRNop:
   case Op::RGetCNop:
+  case Op::CGetCUNop:
+  case Op::UGetCUNop:
   case Op::AddElemV:
   case Op::AddNewElemV:
   case Op::ClsCns:
@@ -1020,7 +1066,6 @@ bool dontGuardAnyInputs(Op op) {
   case Op::Fatal:
   case Op::Unwind:
   case Op::Throw:
-  case Op::CGetL3:
   case Op::CGetN:
   case Op::CGetQuietN:
   case Op::VGetN:
@@ -1058,6 +1103,8 @@ bool dontGuardAnyInputs(Op op) {
   case Op::YieldFromDelegate:
   case Op::ContUnsetDelegate:
   case Op::NewKeysetArray:
+  case Op::MaybeMemoType:
+  case Op::IsMemoType:
     return true;
   }
 
@@ -1091,6 +1138,8 @@ bool instrBreaksProfileBB(const NormalizedInstruction* inst) {
 #define IMM_I64A(n)    ni.imm[n].u_I64A
 #define IMM_LA(n)      ni.imm[n].u_LA
 #define IMM_IA(n)      ni.imm[n].u_IA
+#define IMM_CAR(n)     ni.imm[n].u_CAR
+#define IMM_CAW(n)     ni.imm[n].u_CAW
 #define IMM_DA(n)      ni.imm[n].u_DA
 #define IMM_SA(n)      ni.unit()->lookupLitstrId(ni.imm[n].u_SA)
 #define IMM_RATA(n)    ni.imm[n].u_RATA
@@ -1099,6 +1148,7 @@ bool instrBreaksProfileBB(const NormalizedInstruction* inst) {
 #define IMM_OA_IMPL(n) ni.imm[n].u_OA
 #define IMM_OA(subop)  (subop)IMM_OA_IMPL
 #define IMM_KA(n)      ni.imm[n].u_KA
+#define IMM_LAR(n)     ni.imm[n].u_LAR
 
 #define ONE(x0)           , IMM_##x0(0)
 #define TWO(x0,x1)        , IMM_##x0(0), IMM_##x1(1)
@@ -1126,6 +1176,8 @@ static void translateDispatch(irgen::IRGS& irgs,
 #undef IMM_I64A
 #undef IMM_LA
 #undef IMM_IA
+#undef IMM_CAR
+#undef IMM_CAW
 #undef IMM_DA
 #undef IMM_SA
 #undef IMM_RATA
@@ -1135,6 +1187,7 @@ static void translateDispatch(irgen::IRGS& irgs,
 #undef IMM_OA
 #undef IMM_VSA
 #undef IMM_KA
+#undef IMM_LAR
 
 //////////////////////////////////////////////////////////////////////
 
@@ -1148,7 +1201,6 @@ Type flavorToType(FlavorDesc f) {
     case CUV: return TCell;
     case UV: return TUninit;
     case VV: return TBoxedInitCell;
-    case AV: return TCls;
     case RV: case CRV: case FV: case CVV: case CVUV: return TGen;
   }
   not_reached();
@@ -1214,8 +1266,8 @@ const Func* lookupImmutableMethod(const Class* cls, const StringData* name,
   auto ctx = ctxFunc->cls();
   const Func* func;
   LookupResult res = staticLookup ?
-    g_context->lookupClsMethod(func, cls, name, nullptr, ctx, false) :
-    g_context->lookupObjMethod(func, cls, name, ctx, false);
+    lookupClsMethod(func, cls, name, nullptr, ctx, false) :
+    lookupObjMethod(func, cls, name, ctx, false);
 
   if (res == LookupResult::MethodNotFound) return nullptr;
 

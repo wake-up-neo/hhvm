@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -21,7 +21,6 @@
 #include "hphp/runtime/base/preg.h"
 #include "hphp/runtime/base/stream-wrapper-registry.h"
 #include "hphp/runtime/ext/extension.h"
-#include "hphp/runtime/ext/pcre/ext_pcre.h"
 #include "hphp/runtime/ext/std/ext_std_file.h"
 
 namespace HPHP {
@@ -42,7 +41,8 @@ static zip* _zip_open(const String& filename, int _flags, int* zep) {
 struct ZipStream : File {
   DECLARE_RESOURCE_ALLOCATION(ZipStream);
 
-  ZipStream(zip* z, const String& name) : m_zipFile(nullptr) {
+  ZipStream(zip* z, const String& name)
+  : File(false), m_zipFile(nullptr) {
     if (name.empty()) {
       return;
     }
@@ -543,7 +543,7 @@ static bool addPattern(zip* zipStruct, const String& pattern, const Array& optio
     }
 
     if (!glob) {
-      auto var = preg_match(pattern, source);
+      auto var = preg_match(pattern.get(), source.get());
       if (var.isInteger()) {
         if (var.asInt64Val() == 0) {
           continue;
@@ -914,6 +914,7 @@ static Variant HHVM_METHOD(ZipArchive, getFromIndex, int64_t index,
   StringBuffer sb(length);
   auto buf = sb.appendCursor(length);
   auto n   = zip_fread(zipFile, buf, length);
+  zip_fclose(zipFile);
   if (n > 0) {
     sb.resize(n);
     return sb.detach();
@@ -951,6 +952,7 @@ static Variant HHVM_METHOD(ZipArchive, getFromName, const String& name,
   StringBuffer sb(length);
   auto buf = sb.appendCursor(length);
   auto n   = zip_fread(zipFile, buf, length);
+  zip_fclose(zipFile);
   if (n > 0) {
     sb.resize(n);
     return sb.detach();

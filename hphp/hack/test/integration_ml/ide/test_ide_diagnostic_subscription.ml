@@ -9,8 +9,6 @@
  *)
 
 open Integration_test_base_types
-open Reordered_argument_collections
-open ServerCommandTypes
 
 module Test = Integration_test_base
 
@@ -22,43 +20,71 @@ let foo_contents = "<?hh
 {
 "
 
+let foo_diagnostics = "
+/bar.php:
+File \"/bar.php\", line 3, characters 10-13:
+Was expecting a return type hint (Typing[4030])
+
+/foo.php:
+File \"/foo.php\", line 3, characters 1-0:
+Expected } (Parsing[1002])
+"
+
+let foo_clear_diagnostics = "
+/bar.php:
+File \"/bar.php\", line 3, characters 10-13:
+Was expecting a return type hint (Typing[4030])
+
+/foo.php:
+"
+
+let bar_name = "bar.php"
+
+let bar_contents = "
+<?hh // strict
+function test() {} // missing return type
+"
+
+let bar_diagnostics = "
+/bar.php:
+File \"/bar.php\", line 3, characters 10-13:
+Was expecting a return type hint (Typing[4030])
+"
+
+let assert_no_push_message loop_outputs =
+  match loop_outputs.push_message with
+  | Some _ -> Test.fail "Unexpected push message"
+  | None -> ()
+
 let () =
 
   let env = Test.setup_server () in
   let env = Test.connect_persistent_client env in
-
-  let env, _ = Test.(run_loop_once env { default_loop_input with
-    persistent_client_request = Some (
-      SUBSCRIBE_DIAGNOSTIC diagnostic_subscription_id
-    )
-  }) in
-  let env, _ = Test.(run_loop_once env { default_loop_input with
-    persistent_client_request = Some (OPEN_FILE foo_name)
-  }) in
-  let env, _ = Test.(run_loop_once env { default_loop_input with
-    persistent_client_request = Some (EDIT_FILE
-      (foo_name, [File_content.{range = None; text = foo_contents;}])
-    )
-  }) in
-  let env = ServerEnv.{ env with last_command_time = 0.0 } in
+  (* Initially there is a single typing error in bar.php *)
+  let env = Test.setup_disk env [(bar_name, bar_contents)] in
+  let env = Test.subscribe_diagnostic ~id:diagnostic_subscription_id env in
   let env, loop_outputs = Test.(run_loop_once env default_loop_input) in
-  (match loop_outputs.push_message with
-  | Some (DIAGNOSTIC (id, errors))
-      when id = diagnostic_subscription_id ->
-    if not @@ (SMap.cardinal errors = 1) then
-      Test.fail "Expected errors for single file";
-    begin match SMap.get errors (Test.prepend_root foo_name) with
-      | Some [error] ->
-        let error = Errors.to_string error in
-        Test.assertEqual
-          ("File \"/foo.php\", line 3, characters 1-0:\n" ^
-          "Expected } (Parsing[1002])\n")
-          error
-      | _ -> Test.fail "Expected exactly one error"
-    end
-  | _ -> Test.fail "Expected push diagnostics");
-  let env = ServerEnv.{ env with last_command_time = 0.0 } in
+  (* Initial list of errors is pushed after subscribing *)
+  Test.assert_diagnostics loop_outputs bar_diagnostics;
+  (* Open and edit file to have errors *)
+  let env = Test.open_file env foo_name ~contents:foo_contents in
+  let env = Test.wait env in
+  let env, loop_outputs = Test.(run_loop_once env default_loop_input) in
+  Test.assert_diagnostics loop_outputs foo_diagnostics;
+  let env = Test.wait env in
+  let env, loop_outputs = Test.(run_loop_once env default_loop_input) in
+  assert_no_push_message loop_outputs;
+  (* Fix the errors in file *)
+  let env, _ = Test.edit_file env foo_name "" in
+  let env = Test.wait env in
+  let env, loop_outputs = Test.(run_loop_once env default_loop_input) in
+  Test.assert_diagnostics loop_outputs foo_clear_diagnostics;
+  let env = Test.wait env in
+  let env, loop_outputs = Test.(run_loop_once env default_loop_input) in
+  assert_no_push_message loop_outputs;
+  (* Change the file, but still no new errors *)
+  let env, _ = Test.edit_file env foo_name "<?hh\n" in
+  let env = Test.wait env in
   let _, loop_outputs = Test.(run_loop_once env default_loop_input) in
-  match loop_outputs.push_message with
-  | Some _ -> Test.fail "Unexpected push message"
-  | None -> ()
+  (* Back to initial list of errors *)
+  Test.assert_diagnostics loop_outputs bar_diagnostics

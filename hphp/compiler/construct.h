@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -292,7 +292,6 @@ public:
   void dumpNode(int spc) const;
 
   void dump(int spc, AnalysisResultConstPtr ar);
-  void dumpNode(int spc, AnalysisResultConstPtr ar);
 
   /**
    * Called when generating code.
@@ -312,10 +311,6 @@ public:
 
   void recomputeEffects();
 
-  /**
-   * Write where this construct was in PHP files.
-   */
-  void printSource(CodeGenerator &cg);
   ExpressionPtr makeConstant(AnalysisResultConstPtr ar,
                              const std::string &value) const;
   ExpressionPtr makeScalarExpression(AnalysisResultConstPtr ar,

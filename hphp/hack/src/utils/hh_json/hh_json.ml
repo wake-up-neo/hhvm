@@ -8,7 +8,6 @@
  *
  *)
 
-
 (**
  * Hh_json parsing and pretty printing library.
  *)
@@ -176,7 +175,9 @@ let js_string env =
         buf_eat_all buf env c;
         loop env
   in
-  eat env '"';
+  (match peek env with
+  | '"' -> env.pos <- env.pos + 1
+  | _ ->  syntax_error env "expected '\"' character");
   if peek env = '"' then
     begin eat env '"'; JSON_String("") end
   else
@@ -373,12 +374,15 @@ and add_assoc_to_buffer (buf:Buffer.t) (k,v) =
   add_char buf ':';
   add_json_to_buffer buf v
 
-let json_to_string (json:json): string =
-  let buf = Buffer.create 1024 in (* need a better estimate! *)
-  add_json_to_buffer buf json;
-  Buffer.contents buf
+let rec json_to_string ?(pretty=false) (json:json): string =
+  if pretty
+  then json_to_multiline json
+  else
+    let buf = Buffer.create 1024 in (* need a better estimate! *)
+    add_json_to_buffer buf json;
+    Buffer.contents buf
 
-let json_to_multiline json =
+and json_to_multiline json =
   let rec loop indent json =
     let single = json_to_string json in
     if String.length single < 80 then single else
@@ -454,6 +458,130 @@ let get_string_exn = function
   | JSON_String s -> s
   | _ -> assert false
 
+let get_number_exn = function
+  | JSON_Number s -> s
+  | _ -> assert false
+
 let get_bool_exn = function
   | JSON_Bool b -> b
   | _ -> assert false
+
+let opt_string_to_json = function
+  | Some x -> JSON_String x
+  | None -> JSON_Null
+
+let opt_int_to_json = function
+  | Some x -> JSON_Number (string_of_int x)
+  | None -> JSON_Null
+
+type json_type =
+  | Object_t
+  | Array_t
+  | String_t
+  | Number_t
+  | Bool_t
+
+let json_type_to_string = function
+  | Object_t -> "Object"
+  | Array_t -> "Array"
+  | String_t -> "String"
+  | Number_t -> "Number"
+  | Bool_t -> "Bool"
+
+module type Access = sig
+  type keytrace = string list
+
+  type access_failure =
+    | Not_an_object of keytrace
+    | Missing_key_error of string * keytrace
+    | Wrong_type_error of keytrace * json_type
+
+  type 'a m = (('a * keytrace), access_failure) Result.t
+
+  val access_failure_to_string : access_failure -> string
+
+  val return : 'a -> 'a m
+
+  val (>>=) : 'a m -> (('a * keytrace) -> 'b m) -> 'b m
+  val counit_with : (access_failure -> 'a) -> 'a m -> 'a
+  val get_obj : string -> json * keytrace -> json m
+  val get_bool : string -> json * keytrace -> bool m
+  val get_string : string -> json * keytrace -> string m
+  val get_number : string -> json * keytrace -> string m
+  val get_array: string -> json * keytrace -> (json list) m
+  val get_val: string -> json * keytrace -> json m
+end
+
+module Access = struct
+  type keytrace = string list
+
+  type access_failure =
+    | Not_an_object of keytrace
+    | Missing_key_error of string * keytrace
+    | Wrong_type_error of keytrace * json_type
+
+  type 'a m = (('a * keytrace), access_failure) Result.t
+
+  let keytrace_to_string x =
+    if x = [] then "" else
+    let res = List.map x (fun x -> "[" ^ x ^ "]")  |> String.concat " " in
+    " (at field " ^ res ^ ")"
+
+  let access_failure_to_string = function
+    | Not_an_object x ->
+      Printf.sprintf "Value is not an object %s" (keytrace_to_string x)
+    | Missing_key_error (x, y) ->
+      Printf.sprintf "Missing key: %s%s" x (keytrace_to_string y)
+    | Wrong_type_error (x, y) ->
+      Printf.sprintf "Value expected to be %s%s"
+        (json_type_to_string y) (keytrace_to_string x)
+
+  let return v = Result.Ok (v, [])
+
+  let (>>=) m f = Result.bind m f
+
+  let counit_with f m = match m with
+    | Result.Ok (v, _) ->
+      v
+    | Result.Error e ->
+      f e
+
+  let catch_type_error exp f (v, keytrace) =
+    try Result.Ok (f v, keytrace) with
+      | Assert_failure _ ->
+        Result.Error (Wrong_type_error (keytrace, exp))
+
+  let get_val k (v, keytrace) =
+    try begin
+      let obj = get_object_exn v in
+      let candidate = List.fold_left obj ~init:None ~f:(fun opt (key, json) ->
+        if opt <> None then opt
+        else if key = k then (Some json)
+        else None
+      ) in
+      match candidate with
+      | None -> Result.Error (Missing_key_error (k, keytrace))
+      | Some obj ->
+        Result.Ok (obj, k :: keytrace)
+    end with
+    | Assert_failure _ ->
+      Result.Error (Not_an_object (keytrace))
+
+  let make_object_json v =
+    JSON_Object (get_object_exn v)
+
+  let get_obj k (v, keytrace) =
+    get_val k (v, keytrace) >>= catch_type_error Object_t make_object_json
+
+  let get_bool k (v, keytrace) =
+    get_val k (v, keytrace) >>= catch_type_error Bool_t get_bool_exn
+
+  let get_string k (v, keytrace) =
+    get_val k (v, keytrace) >>= catch_type_error String_t get_string_exn
+
+  let get_number k (v, keytrace) =
+    get_val k (v, keytrace) >>= catch_type_error Number_t get_number_exn
+
+  let get_array k (v, keytrace) =
+    get_val k (v, keytrace) >>= catch_type_error Array_t get_array_exn
+end

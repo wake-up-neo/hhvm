@@ -1,7 +1,4 @@
 INCLUDE(CMakeDependentOption)
-CMAKE_DEPENDENT_OPTION(ENABLE_MONGO
-  "Enable Mongo extension (requires ENABLE_ZEND_COMPAT)" OFF
-  "ENABLE_ZEND_COMPAT" OFF)
 CMAKE_DEPENDENT_OPTION(ENABLE_EZC_TEST
   "Enable ezc_test (requires ENABLE_ZEND_COMPAT)" OFF "ENABLE_ZEND_COMPAT" OFF)
 
@@ -55,13 +52,6 @@ if (ENABLE_ZEND_COMPAT)
         list(APPEND ZEND_COMPAT_LINK_LIBRARIES ${LibYaml_LIBRARIES})
         auto_systemlib("${EZC_DIR}/yaml")
       endif()
-    elseif (${ezc_project} STREQUAL "mongo")
-      if (ENABLE_MONGO)
-        message(WARNING "The ext_zend_compat version of the MongoDB extension is deprecated. Please use the official driver at https://github.com/mongodb/mongo-hhvm-driver instead.")
-        HHVM_SELECT_SOURCES("${EZC_DIR}/mongo")
-        include_directories("${EZC_DIR}/mongo/mcon")
-        auto_systemlib("${EZC_DIR}/mongo")
-      endif()
     elseif (${ezc_project} STREQUAL "ezc_test")
       if (ENABLE_EZC_TEST)
         HHVM_SELECT_SOURCES("${EZC_DIR}/ezc_test")
@@ -83,6 +73,7 @@ auto_source_group("hphp_ext_zend_compat" "${CMAKE_CURRENT_SOURCE_DIR}"
   ${CXX_SOURCES} ${C_SOURCES} ${ASM_SOURCES} ${HEADER_SOURCES})
 object_library_ld_link_libraries(hphp_ext_zend_compat ${EZC_LINK_LIBRARIES})
 object_library_hphp_link(hphp_ext_zend_compat)
+add_dependencies(hphp_ext_zend_compat hphp_runtime_static)
 
 HHVM_PUBLIC_HEADERS(ext_zend_compat ${HEADER_SOURCES})
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -102,8 +102,8 @@ Variant StringUtil::Explode(const String& input, const String& delimiter,
         positions.push_back(input.size() - pos0);
         found++;
       }
-      int iMax = (found + limit) << 1;
-      for (int i = 0; i < iMax; i += 2) {
+      unsigned nelems = std::max(found + limit, 0);
+      for (unsigned i = 0; i < nelems * 2; i += 2) {
         ret.append(input.substr(positions[i], positions[i+1]));
       }
     } // else we have negative limit and delimiter not found

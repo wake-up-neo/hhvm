@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -56,7 +56,7 @@ struct VcallArgs {
   VregList args;
   VregList simdArgs;
   VregList stkArgs;
-  bool indirect;
+  VregList indRetArgs;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -208,9 +208,11 @@ struct Vunit {
   jit::vector<VregList> tuples;
   jit::vector<VcallArgs> vcallArgs;
   jit::vector<VdataBlock> dataBlocks;
-  uint8_t cur_voff{0};  // current instruction index managed by Vout
+  uint16_t cur_voff{0};  // current instruction index managed by Vout
   bool padding{false};
+  bool profiling{false};
   folly::Optional<TransContext> context;
+  StructuredLogEntry* log_entry{nullptr};
 };
 
 ///////////////////////////////////////////////////////////////////////////////

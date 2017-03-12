@@ -42,44 +42,6 @@ struct c_Vector;
 namespace am = facebook::common::mysql_client;
 namespace db = facebook::db;
 
-extern const int64_t k_NOT_NULL_FLAG;
-extern const int64_t k_PRI_KEY_FLAG;
-extern const int64_t k_UNIQUE_KEY_FLAG;
-extern const int64_t k_MULTIPLE_KEY_FLAG;
-extern const int64_t k_UNSIGNED_FLAG;
-extern const int64_t k_ZEROFILL_FLAG;
-extern const int64_t k_BINARY_FLAG;
-extern const int64_t k_AUTO_INCREMENT_FLAG;
-extern const int64_t k_ENUM_FLAG;
-extern const int64_t k_SET_FLAG;
-extern const int64_t k_BLOB_FLAG;
-extern const int64_t k_TIMESTAMP_FLAG;
-extern const int64_t k_NUM_FLAG;
-extern const int64_t k_NO_DEFAULT_VALUE_FLAG;
-
-extern const int64_t k_MYSQL_TYPE_TINY;
-extern const int64_t k_MYSQL_TYPE_SHORT;
-extern const int64_t k_MYSQL_TYPE_LONG;
-extern const int64_t k_MYSQL_TYPE_INT24;
-extern const int64_t k_MYSQL_TYPE_LONGLONG;
-extern const int64_t k_MYSQL_TYPE_DECIMAL;
-extern const int64_t k_MYSQL_TYPE_NEWDECIMAL;
-extern const int64_t k_MYSQL_TYPE_FLOAT;
-extern const int64_t k_MYSQL_TYPE_DOUBLE;
-extern const int64_t k_MYSQL_TYPE_BIT;
-extern const int64_t k_MYSQL_TYPE_TIMESTAMP;
-extern const int64_t k_MYSQL_TYPE_DATE;
-extern const int64_t k_MYSQL_TYPE_TIME;
-extern const int64_t k_MYSQL_TYPE_DATETIME;
-extern const int64_t k_MYSQL_TYPE_YEAR;
-extern const int64_t k_MYSQL_TYPE_STRING;
-extern const int64_t k_MYSQL_TYPE_VAR_STRING;
-extern const int64_t k_MYSQL_TYPE_BLOB;
-extern const int64_t k_MYSQL_TYPE_SET;
-extern const int64_t k_MYSQL_TYPE_ENUM;
-extern const int64_t k_MYSQL_TYPE_GEOMETRY;
-extern const int64_t k_MYSQL_TYPE_NULL;
-
 ///////////////////////////////////////////////////////////////////////////////
 // class AsyncMysqlConnectionPool
 
@@ -292,7 +254,7 @@ struct AsyncMysqlQueryResult : AsyncMysqlResult {
   std::unique_ptr<am::QueryResult> m_query_result;
 
   // Created here for buildRows and passed to RowBlocks
-  std::shared_ptr<FieldIndex> m_field_index;
+  req::shared_ptr<FieldIndex> m_field_index;
   static Class* s_class;
   static const StaticString s_className;
 
@@ -350,6 +312,12 @@ struct AsyncMysqlMultiQueryEvent final : AsioExternalThreadEvent {
     m_multi_op = op;
   }
 
+  AsyncMysqlMultiQueryEvent() : AsioExternalThreadEvent() {}
+
+  void setQueryOp(std::shared_ptr<am::MultiQueryOperation> op) {
+    m_multi_op = std::move(op);
+  }
+
   void opFinished() { markAsFinished(); }
 
   void setClientStats(db::ClientPerfStats stats) {
@@ -376,10 +344,10 @@ struct AsyncMysqlRowBlock {
   FieldType getFieldAs(int64_t row, const Variant& field);
   static Class* getClass();
   static Object newInstance(am::RowBlock* row_block,
-                            std::shared_ptr<FieldIndex> indexer);
+                            req::shared_ptr<FieldIndex> indexer);
 
   std::unique_ptr<am::RowBlock> m_row_block;
-  std::shared_ptr<FieldIndex> m_field_index;
+  req::shared_ptr<FieldIndex> m_field_index;
   static Class* s_class;
   static const StaticString s_className;
 

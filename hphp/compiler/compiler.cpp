@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -63,6 +63,8 @@
 
 #include <exception>
 
+#include <folly/portability/SysStat.h>
+
 using namespace boost::program_options;
 using std::cout;
 
@@ -100,7 +102,6 @@ struct CompilerOptions {
   int revision;
   bool genStats;
   bool keepTempDir;
-  bool noTypeInference;
   int logLevel;
   bool force;
   int optimizeLevel;
@@ -416,12 +417,11 @@ int prepareOptions(CompilerOptions &po, int argc, char **argv) {
   for (unsigned int i = 0; i < po.confStrings.size(); i++) {
     Config::ParseHdfString(po.confStrings[i].c_str(), config);
   }
-  Option::Load(ini, config);
-  IniSetting::Map iniR = IniSetting::Map::object;
   Hdf runtime = config["Runtime"];
   // The configuration command line strings were already processed above
   // Don't process them again.
-  RuntimeOption::Load(iniR, runtime);
+  RuntimeOption::Load(ini, runtime);
+  Option::Load(ini, config);
   RuntimeOption::EvalJit = false;
 
   initialize_repo();
@@ -489,7 +489,6 @@ int prepareOptions(CompilerOptions &po, int argc, char **argv) {
 
   // we always do pre/post opt no matter the opt level
   Option::PreOptimization = true;
-  Option::PostOptimization = true;
   if (po.optimizeLevel == 0) {
     // --optimize-level=0 is equivalent to --opts=none
     Option::ParseTimeOpts = false;
@@ -504,15 +503,12 @@ int prepareOptions(CompilerOptions &po, int argc, char **argv) {
 
 int process(const CompilerOptions &po) {
   if (po.coredump) {
-#if defined(__MINGW__) || defined(_MSC_VER)
+#ifdef _MSC_VER
 /**
  * Windows actually does core dump size and control at a system, not an app
- * level.  So we do nothing here and are at the mercy of Dr. Watson
- *
- * Cygwin has a compat layer in place and does its own core dumping, so we
- * still call setrlimit for core dumps
+ * level.  So we do nothing here and are at the mercy of Dr. Watson.
  */
-#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__CYGWIN__)
+#elif defined(__APPLE__) || defined(__FreeBSD__)
     struct rlimit rl;
     getrlimit(RLIMIT_CORE, &rl);
     rl.rlim_cur = 80000000LL;
@@ -548,12 +544,20 @@ int process(const CompilerOptions &po) {
   // one time initialization
   BuiltinSymbols::LoadSuperGlobals();
 
+  bool processInitRan = false;
+  SCOPE_EXIT {
+    if (processInitRan) {
+      hphp_process_exit();
+    }
+  };
+
   bool isPickledPHP = (po.target == "php" && po.format == "pickled");
   if (!isPickledPHP) {
     bool wp = Option::WholeProgram;
     Option::WholeProgram = false;
     BuiltinSymbols::s_systemAr = ar;
     hphp_process_init();
+    processInitRan = true;
     BuiltinSymbols::s_systemAr.reset();
     Option::WholeProgram = wp;
     if (po.target == "hhbc" && !Option::WholeProgram) {
@@ -566,10 +570,11 @@ int process(const CompilerOptions &po) {
     }
   } else {
     hphp_process_init();
+    processInitRan = true;
   }
 
   {
-    Timer timer(Timer::WallTime, "parsing inputs");
+    Timer timer2(Timer::WallTime, "parsing inputs");
     if (!po.inputs.empty() && isPickledPHP) {
       for (unsigned int i = 0; i < po.inputs.size(); i++) {
         package.addSourceFile(po.inputs[i].c_str());
@@ -612,7 +617,7 @@ int process(const CompilerOptions &po) {
         return 1;
       }
       if (Option::WholeProgram) {
-        Timer timer(Timer::WallTime, "analyzeProgram");
+        Timer timer3(Timer::WallTime, "analyzeProgram");
         ar->analyzeProgram();
       }
     }
@@ -628,9 +633,9 @@ int process(const CompilerOptions &po) {
     ar->dump();
   }
 
-  ar->setFinish([&po,&timer,&package](AnalysisResultPtr ar) {
+  ar->setFinish([&po,&timer,&package](AnalysisResultPtr res) {
       if (Option::DumpAst) {
-        ar->dump();
+        res->dump();
       }
 
       // saving stats
@@ -771,16 +776,9 @@ void hhbcTargetInit(const CompilerOptions &po, AnalysisResultPtr ar) {
   RuntimeOption::RepoLocalMode = "--";
   RuntimeOption::RepoDebugInfo = Option::RepoDebugInfo;
   RuntimeOption::RepoJournal = "memory";
-  RuntimeOption::EnableHipHopSyntax = Option::EnableHipHopSyntax;
   if (HHBBC::options.HardReturnTypeHints) {
     RuntimeOption::EvalCheckReturnTypeHints = 3;
   }
-  RuntimeOption::EnableZendCompat = Option::EnableZendCompat;
-  RuntimeOption::EvalJitEnableRenameFunction = Option::JitEnableRenameFunction;
-  RuntimeOption::IntsOverflowToInts = Option::IntsOverflowToInts;
-  RuntimeOption::StrictArrayFillKeys = Option::StrictArrayFillKeys;
-  RuntimeOption::DisallowDynamicVarEnvFuncs =
-    Option::DisallowDynamicVarEnvFuncs;
 
   // Turn off commits, because we don't want systemlib to get included
   RuntimeOption::RepoCommit = false;

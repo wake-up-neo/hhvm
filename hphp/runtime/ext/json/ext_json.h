@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -45,6 +45,7 @@ extern const int64_t k_JSON_FB_LOOSE;
 extern const int64_t k_JSON_FB_EXTRA_ESCAPES;
 extern const int64_t k_JSON_FB_UNLIMITED;
 extern const int64_t k_JSON_FB_COLLECTIONS;
+extern const int64_t k_JSON_FB_HACK_ARRAYS;
 extern const int64_t k_JSON_FB_STABLE_MAPS;
 extern const int64_t k_JSON_BIGINT_AS_STRING;
 

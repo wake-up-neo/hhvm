@@ -21,7 +21,7 @@ type 'a message = 'a * string
 
 module Common = struct
   type error_flags = {
-    lazy_decl_err: bool;
+    lazy_decl_err: Relative_path.t option;
   }
   let try_with_result f1 f2 error_list accumulate_errors =
     let error_list_copy = !error_list in
@@ -44,7 +44,7 @@ module Common = struct
     error_list := [];
     applied_fixmes := [];
     accumulate_errors := true;
-    has_lazy_decl_error := false;
+    has_lazy_decl_error := None;
     let result = f () in
     let out_errors = !error_list in
     let out_applied_fixmes = !applied_fixmes in
@@ -92,6 +92,12 @@ module Common = struct
     let error_number = Printf.sprintf "%04d" error_code in
     error_kind^"["^error_number^"]"
 
+  let get_sorted_error_list get_pos (err,_) =
+    List.sort ~cmp:begin fun x y ->
+      Pos.compare (get_pos x) (get_pos y)
+    end err
+    |> List.remove_consecutive_duplicates ~equal:(=)
+
 end
 
 (** The mode abstracts away the underlying errors type so errors can be
@@ -108,7 +114,7 @@ module type Errors_modes = sig
 
   val try_with_result: (unit -> 'a) -> ('a -> error -> 'a) -> 'a
   val do_: (unit -> 'a) -> (error list * applied_fixme list) * 'a * error_flags
-  val run_in_decl_mode: (unit -> 'a) -> 'a
+  val run_in_decl_mode: Relative_path.t -> (unit -> 'a) -> 'a
   val add_error: error -> unit
   val make_error: error_code -> (Pos.t message) list -> error
 
@@ -117,7 +123,7 @@ module type Errors_modes = sig
   val to_list: 'a error_ -> 'a message list
   val to_absolute : error -> Pos.absolute error_
 
-  val to_string : Pos.absolute error_ -> string
+  val to_string : ?indent:bool -> Pos.absolute error_ -> string
 
   val get_sorted_error_list: error list * applied_fixme list -> error list
 
@@ -133,8 +139,10 @@ module NonTracingErrors: Errors_modes = struct
   let applied_fixmes: applied_fixme list ref = ref []
   let (error_list: error list ref) = ref []
   let accumulate_errors = ref false
-  let in_lazy_decl = ref false
-  let has_lazy_decl_error = ref false
+  (* Some filename when declaring *)
+  let in_lazy_decl = ref None
+  (* Some filename = in_lazy_decl if there's an error in the file *)
+  let has_lazy_decl_error = ref None
 
   let try_with_result f1 f2 =
     Common.try_with_result f1 f2 error_list accumulate_errors
@@ -147,10 +155,11 @@ module NonTracingErrors: Errors_modes = struct
      This runs without returning the original state,
      since we collect it later in do_with_lazy_decls_
   *)
-  let run_in_decl_mode f =
-    in_lazy_decl := true;
+  let run_in_decl_mode filename f =
+    let old_in_lazy_decl = !in_lazy_decl in
+    in_lazy_decl := Some filename;
     let result = f () in
-    in_lazy_decl := false;
+    in_lazy_decl := old_in_lazy_decl;
     result
 
   and make_error code (x: (Pos.t * string) list) = ((code, x): error)
@@ -167,7 +176,7 @@ module NonTracingErrors: Errors_modes = struct
     let msg_l = List.map msg_l (fun (p, s) -> Pos.to_absolute p, s) in
     code, msg_l
 
-  let to_string (error : Pos.absolute error_) : string =
+  let to_string ?(indent=false) (error : Pos.absolute error_) : string =
     let error_code, msgl = (get_code error), (to_list error) in
     let buf = Buffer.create 50 in
     (match msgl with
@@ -177,31 +186,33 @@ module NonTracingErrors: Errors_modes = struct
           let error_code = Common.error_code_to_string error_code in
           Printf.sprintf "%s\n%s (%s)\n"
             (Pos.string pos1) msg1 error_code
-        end;
+      end;
+        let indentstr = if indent then "  " else "" in
         List.iter rest_of_error begin fun (p, w) ->
-          let msg = Printf.sprintf "%s\n%s\n" (Pos.string p) w in
+          let msg = Printf.sprintf "%s%s\n%s%s\n"
+              indentstr (Pos.string p) indentstr w in
           Buffer.add_string buf msg
         end
     );
     Buffer.contents buf
 
-  let get_sorted_error_list (err,_) =
-    List.sort ~cmp:begin fun x y ->
-      Pos.compare (get_pos x) (get_pos y)
-    end err
+  let get_sorted_error_list = Common.get_sorted_error_list get_pos
 
   let add_error error =
     if !accumulate_errors then
       begin
         error_list := error :: !error_list;
-        has_lazy_decl_error := !has_lazy_decl_error || !in_lazy_decl
+        has_lazy_decl_error := match !in_lazy_decl with
+        | Some fn -> Some fn
+        | None -> !has_lazy_decl_error
       end
     else
       (* We have an error, but haven't handled it in any way *)
       let msg = error |> to_absolute |> to_string in
-      if !in_lazy_decl then
+      match !in_lazy_decl with
+      | Some _ ->
         Common.lazy_decl_error_logging msg error_list to_absolute to_string
-      else assert_false_log_backtrace (Some msg)
+      | None -> assert_false_log_backtrace (Some msg)
 
 end
 
@@ -216,8 +227,8 @@ module TracingErrors: Errors_modes = struct
   let (error_list: error list ref) = ref []
 
   let accumulate_errors = ref false
-  let in_lazy_decl = ref false
-  let has_lazy_decl_error = ref false
+  let in_lazy_decl = ref None
+  let has_lazy_decl_error = ref None
 
   let try_with_result f1 f2 =
     Common.try_with_result f1 f2 error_list accumulate_errors
@@ -229,10 +240,10 @@ module TracingErrors: Errors_modes = struct
      This runs without returning the original state,
      since we collect it later in do_with_lazy_decls_
   *)
-  let run_in_decl_mode f =
-    in_lazy_decl := true;
+  let run_in_decl_mode filename f =
+    in_lazy_decl := Some filename;
     let result = f () in
-    in_lazy_decl := false;
+    in_lazy_decl := None;
     result
 
 
@@ -255,7 +266,7 @@ module TracingErrors: Errors_modes = struct
     bt, code, msg_l
 
   (** TODO: Much of this is copy-pasta. *)
-  let to_string (error : Pos.absolute error_) : string =
+  let to_string ?(indent=false) (error : Pos.absolute error_) : string =
     let bt, error_code, msgl = (get_bt error),
       (get_code error), (to_list error) in
     let buf = Buffer.create 50 in
@@ -268,8 +279,10 @@ module TracingErrors: Errors_modes = struct
             (Pos.string pos1) (Printexc.raw_backtrace_to_string bt)
             msg1 error_code
         end;
+        let indentstr = if indent then "  " else "" in
         List.iter rest_of_error begin fun (p, w) ->
-          let msg = Printf.sprintf "%s\n%s\n" (Pos.string p) w in
+          let msg = Printf.sprintf "%s%s\n%s%s\n"
+              indentstr (Pos.string p) indentstr w in
           Buffer.add_string buf msg
         end
     );
@@ -279,25 +292,26 @@ module TracingErrors: Errors_modes = struct
     if !accumulate_errors then
       begin
         error_list := error :: !error_list;
-        has_lazy_decl_error := !has_lazy_decl_error || !in_lazy_decl
+        has_lazy_decl_error := match !in_lazy_decl with
+        | Some fn -> Some fn
+        | None -> !has_lazy_decl_error
       end
     else
     (* We have an error, but haven't handled it in any way *)
       let msg = error |> to_absolute |> to_string in
-      if !in_lazy_decl then
+      match !in_lazy_decl with
+      | Some _ ->
         Common.lazy_decl_error_logging msg error_list to_absolute to_string
-      else assert_false_log_backtrace (Some msg)
+      | None -> assert_false_log_backtrace (Some msg)
 
-  let get_sorted_error_list (err,_) =
-    List.sort ~cmp:begin fun x y ->
-      Pos.compare (get_pos x) (get_pos y)
-    end err
+  let get_sorted_error_list = Common.get_sorted_error_list get_pos
 
 end
 
 (** The Errors functor which produces the Errors module.
  * Omitting gratuitous indentation. *)
 module Errors_with_mode(M: Errors_modes) = struct
+
 
 (*****************************************************************************)
 (* Types *)
@@ -315,6 +329,16 @@ type error_flags = Common.error_flags
 
 let applied_fixmes = M.applied_fixmes
 
+let ignored_fixme_files = ref None
+let set_ignored_fixmes files = ignored_fixme_files := files
+
+let is_ignored_fixme pos = match !ignored_fixme_files with
+(* No fixme is ignored *)
+| None -> false
+(* Only the fixmes in gives files are ignored *)
+| Some l ->
+  List.exists l ~f:(fun x -> x = (Pos.filename pos))
+
 let (is_hh_fixme: (Pos.t -> error_code -> bool) ref) = ref (fun _ _ -> false)
 
 (*****************************************************************************)
@@ -327,8 +351,9 @@ let add_applied_fixme code pos =
 let rec add_error = M.add_error
 
 and add code pos msg =
-  if !is_hh_fixme pos code then add_applied_fixme code pos else
-  add_error (M.make_error code [pos, msg])
+  if not (is_ignored_fixme pos) && !is_hh_fixme pos code
+  then add_applied_fixme code pos
+  else add_error (M.make_error code [pos, msg])
 
 and add_list code pos_msg_l =
   let pos = fst (List.hd_exn pos_msg_l) in
@@ -492,6 +517,7 @@ module NastCheck                            = struct
   let constructor_required                  = 3030 (* DONT MODIFY!!!! *)
   let interface_with_partial_typeconst      = 3031 (* DONT MODIFY!!!! *)
   let multiple_xhp_category                 = 3032 (* DONT MODIFY!!!! *)
+  let optional_shape_fields_not_supported   = 3033 (* DONT MODIFY!!!! *)
   (* EXTEND HERE WITH NEW VALUES IF NEEDED *)
 end
 
@@ -651,6 +677,10 @@ module Typing                               = struct
   let keyset_set                            = 4156 (* DONT MODIFY!!!! *)
   let eq_incompatible_types                 = 4157 (* DONT MODIFY!!!! *)
   let contravariant_this                    = 4158 (* DONT MODIFY!!!! *)
+  let instanceof_always_false               = 4159 (* DONT MODIFY!!!! *)
+  let instanceof_always_true                = 4160 (* DONT MODIFY!!!! *)
+  let ambiguous_member                      = 4161 (* DONT MODIFY!!!! *)
+  let instanceof_generic_classname          = 4162 (* DONT MODIFY!!!! *)
   (* EXTEND HERE WITH NEW VALUES IF NEEDED *)
 end
 
@@ -1196,6 +1226,10 @@ let dangerous_method_name pos =
   "__construct"
 )
 
+let optional_shape_fields_not_supported pos =
+  add NastCheck.optional_shape_fields_not_supported pos
+    "Optional shape fields are not supported."
+
 (*****************************************************************************)
 (* Nast terminality *)
 (*****************************************************************************)
@@ -1222,21 +1256,29 @@ let visibility_extends vis pos parent_pos parent_vis =
   add_list Typing.visibility_extends [msg1; msg2]
 
 let member_not_implemented member_name parent_pos pos defn_pos =
-  let msg1 = pos, "This object doesn't implement the method "^member_name in
+  let msg1 = pos, "This type doesn't implement the method "^member_name in
   let msg2 = parent_pos, "Which is required by this interface" in
   let msg3 = defn_pos, "As defined here" in
   add_list Typing.member_not_implemented [msg1; msg2; msg3]
 
 let bad_decl_override parent_pos parent_name pos name (error: error) =
-  let msg1 = pos, ("This object is of type "^(strip_ns name)) in
+  let msg1 = pos, ("Class " ^ (strip_ns name)
+      ^ " does not correctly implement all required methods ") in
   let msg2 = parent_pos,
-    ("It is incompatible with this object of type "^(strip_ns parent_name)^
-     "\nbecause some declarations are incompatible."^
+    ("Some methods are incompatible with those declared in type "
+     ^ (strip_ns parent_name) ^
      "\nRead the following to see why:"
     ) in
   (* This is a cascading error message *)
   let code, msgl = (get_code error), (to_list error) in
   add_list code (msg1 :: msg2 :: msgl)
+
+let bad_method_override pos member_name (error: error) =
+  let msg = pos, ("Member " ^ (strip_ns member_name)
+      ^ " has the wrong type") in
+  (* This is a cascading error message *)
+  let code, msgl = (get_code error), (to_list error) in
+  add_list code (msg :: msgl)
 
 let bad_enum_decl pos (error: error) =
   let msg = pos,
@@ -1392,6 +1434,14 @@ let explain_constraint p_inst pos name (error : error) =
   add_list code begin
     [p_inst, inst_msg;
      pos, "'"^name^"' is a constrained type"] @ msgl
+  end
+
+let explain_where_constraint use_pos def_pos (error : error) =
+  let inst_msg = "A 'where' type constraint is violated here" in
+  let code, msgl = (get_code error), (to_list error) in
+  add_list code begin
+    [use_pos, inst_msg;
+     def_pos, "This is the method with 'where' type constraints"] @ msgl
   end
 
 let explain_type_constant reason_msgl (error: error) =
@@ -1595,11 +1645,15 @@ let classname_abstract_call cname meth_name call_pos decl_pos =
     decl_pos, "Declaration is here"
   ]
 
-let isset_empty_in_strict pos name =
-  let name = Utils.strip_ns name in
+let empty_in_strict pos =
   add Typing.isset_empty_in_strict pos
-    (name^" cannot be used in a completely type safe way and so is banned in "
+    ("empty cannot be used in a completely type safe way and so is banned in "
      ^"strict mode")
+
+let isset_in_strict pos =
+  add Typing.isset_empty_in_strict pos
+    ("isset cannot be used in a completely type safe way and so is banned in "
+     ^"strict mode; try using array_key_exists instead")
 
 let unset_nonidx_in_strict pos msgs =
   add_list Typing.unset_nonidx_in_strict
@@ -1908,7 +1962,17 @@ let non_object_member s pos1 ty pos2 =
    ty);
   pos2,
   "Check this out"
-]
+  ]
+
+let ambiguous_member s pos1 ty pos2 =
+  add_list Typing.ambiguous_member [
+  pos1,
+  ("You are trying to access the member "^s^
+   " but there is more than one implementation on "^
+   ty);
+  pos2,
+  "Check this out"
+  ]
 
 let null_container p null_witness =
   add_list Typing.null_container (
@@ -1959,6 +2023,20 @@ let abstract_concrete_override pos parent_pos kind =
     pos, "Cannot re-declare this " ^ kind_str ^ " as abstract";
     parent_pos, "Previously defined here"
   ])
+
+let instanceof_always_false pos =
+  add Typing.instanceof_always_false pos
+    "This 'instanceof' test will never succeed"
+
+let instanceof_always_true pos =
+  add Typing.instanceof_always_true pos
+    "This 'instanceof' test will always succeed"
+
+let instanceof_generic_classname pos name =
+  add Typing.instanceof_generic_classname pos
+    ("'instanceof' cannot be used on 'classname<" ^ name ^ ">' because '" ^
+    name ^ "' may be instantiated with a type such as \
+     'C<int>' that cannot be checked at runtime")
 
 (*****************************************************************************)
 (* Typing decl errors *)

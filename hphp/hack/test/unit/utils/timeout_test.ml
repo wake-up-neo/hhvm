@@ -15,7 +15,7 @@ let payload = "Hello"
 let test_basic_no_timeout () =
   Timeout.with_timeout
     ~timeout:1
-    ~on_timeout:(fun _ -> false)
+    ~on_timeout:(fun _ -> ())
     ~do_:begin fun _ ->
       true
     end
@@ -24,7 +24,7 @@ let test_basic_with_timeout () =
   try
     Timeout.with_timeout
       ~timeout:1
-      ~on_timeout:(fun _ -> true)
+      ~on_timeout:(fun _ -> ())
       ~do_:begin fun timeout ->
         let _ = Unix.select [] [] [] 2.0 in
         false
@@ -53,7 +53,7 @@ let test_input_within_timeout () =
   let ic, _ = handle.Daemon.channels in
   Timeout.with_timeout
     ~timeout:1
-    ~on_timeout:(fun _ -> false)
+    ~on_timeout:(fun _ -> ())
     ~do_:begin fun timeout ->
       let result: string = Daemon.from_channel ~timeout ic in
       assert (result = payload);
@@ -69,7 +69,7 @@ let test_input_exceeds_timeout () =
   try
     Timeout.with_timeout
       ~timeout:2
-      ~on_timeout:(fun _ -> true)
+      ~on_timeout:(fun _ -> ())
       ~do_:begin fun timeout ->
         let _result: string = Daemon.from_channel ~timeout ic in
         false
@@ -128,12 +128,23 @@ let test_timeout_no_input () =
   let handle = Daemon.spawn
     ~channel_mode:`socket Daemon.(null_fd (), null_fd ())
     slow_computation_with_timeout_entry 2 in
-  let _ = Unix.select [] [] [] 2.2 in
+  (** In case machine is very slow to spawn process, give it 2 extra seconds. *)
+  let _ = Unix.select [] [] [] 4.0 in
   let pid = handle.Daemon.pid in
   let result = match Unix.waitpid [Unix.WNOHANG] pid with
-    | 0, _ -> false
+    | 0, _ ->
+      Printf.eprintf "Child hasn't exited";
+      false
     | _, Unix.WEXITED 0-> true
-    | _ -> false
+    | _, Unix.WEXITED i ->
+      Printf.eprintf "Child exited with code: %d" i;
+      false
+    | _, Unix.WSIGNALED i ->
+      Printf.eprintf "Child signaled with code: %d" i;
+      false
+    | _, Unix.WSTOPPED i ->
+      Printf.eprintf "Child stopped with code: %d" i;
+      false
   in
   if not result then
     Unix.kill pid Sys.sigkill;
@@ -179,19 +190,19 @@ let test_timeout_after_input () =
   Daemon.to_channel oc ~flush:true payload;
   (** 0.9 seconds left in the timeout, but its rounded by alarms being integers
    * so give it slightly more time. *)
-  let _ = Unix.select [] [] [] 1.2 in
+  let _ = Unix.select [] [] [] 2.0 in
   let pid = handle.Daemon.pid in
   let result = match Unix.waitpid [Unix.WNOHANG] pid with
     | 0, _ ->
-      Printf.printf "Child process did not exit.\n%!";
+      Printf.eprintf "Child process did not exit.\n%!";
       Unix.kill pid Sys.sigkill;
       false
     | _, Unix.WEXITED 0 -> true
     | _, Unix.WEXITED i ->
-      Printf.printf "Child process exited with non-zero exit code\n%!.";
+      Printf.eprintf "Child process exited with non-zero exit code\n%!.";
       false
     | _ ->
-      Printf.printf "Child process unexpected exit.\n%!.";
+      Printf.eprintf "Child process unexpected exit.\n%!.";
       false
   in
   if not result then

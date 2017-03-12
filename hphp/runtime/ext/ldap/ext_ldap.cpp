@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -19,7 +19,8 @@
 #include "hphp/runtime/ext/std/ext_std_function.h"
 #include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/builtin-functions.h"
-#include "hphp/util/thread-local.h"
+#include "hphp/runtime/base/request-local.h"
+#include "hphp/runtime/base/root-map.h"
 #include <folly/String.h>
 #include <lber.h>
 #include "hphp/util/text-util.h"
@@ -46,19 +47,17 @@ const int64_t
 #define LDAP_MODIFY_BATCH_VALUES "values"
 
 static const StaticString
-  s_LDAP_ESCAPE_FILTER("LDAP_ESCAPE_FILTER"),
-  s_LDAP_ESCAPE_DN("LDAP_ESCAPE_DN"),
   s_LDAP_MODIFY_BATCH_ATTRIB(LDAP_MODIFY_BATCH_ATTRIB),
   s_LDAP_MODIFY_BATCH_MODTYPE(LDAP_MODIFY_BATCH_MODTYPE),
   s_LDAP_MODIFY_BATCH_VALUES(LDAP_MODIFY_BATCH_VALUES);
 
 static struct LdapExtension final : Extension {
   LdapExtension() : Extension("ldap", NO_EXTENSION_VERSION_YET) {}
+  void requestInit() override;
+  void requestShutdown() override;
   void moduleInit() override {
-    Native::registerConstant<KindOfInt64>(s_LDAP_ESCAPE_FILTER.get(),
-                                          k_LDAP_ESCAPE_FILTER);
-    Native::registerConstant<KindOfInt64>(s_LDAP_ESCAPE_DN.get(),
-                                          k_LDAP_ESCAPE_DN);
+    HHVM_RC_INT(LDAP_ESCAPE_FILTER, k_LDAP_ESCAPE_FILTER);
+    HHVM_RC_INT(LDAP_ESCAPE_DN, k_LDAP_ESCAPE_DN);
 
     HHVM_FE(ldap_connect);
     HHVM_FE(ldap_explode_dn);
@@ -155,16 +154,6 @@ static struct LdapExtension final : Extension {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-struct LdapRequestData {
-  LdapRequestData() : m_num_links(0), m_max_links(-1) {
-  }
-
-  long m_num_links;
-  long m_max_links;
-};
-static IMPLEMENT_THREAD_LOCAL(LdapRequestData, s_ldap_data);
-#define LDAPG(name) s_ldap_data->m_ ## name
-
 struct LdapLink : SweepableResourceData {
   DECLARE_RESOURCE_ALLOCATION(LdapLink)
 
@@ -192,22 +181,49 @@ public:
   Variant rebindproc;
 };
 
+struct LdapRequestData {
+  LdapRequestData() : m_num_links(0), m_max_links(-1) {
+  }
+
+  long m_num_links;
+  long m_max_links;
+
+  RootMap<LdapLink> m_links;
+};
+static IMPLEMENT_THREAD_LOCAL(LdapRequestData, s_ldap_data);
+#define LDAPG(name) s_ldap_data->m_ ## name
+
+void LdapExtension::requestInit() {
+  if (!s_ldap_data.isNull()) {
+    s_ldap_data->m_links.reset();
+  }
+}
+
+void LdapExtension::requestShutdown() {
+  if (!s_ldap_data.isNull()) {
+    s_ldap_data->m_links.reset();
+  }
+}
+
 namespace {
 
 req::ptr<LdapLink> getLdapLinkFromToken(void* userData) {
-  auto token = reinterpret_cast<MemoryManager::RootId>(userData);
-  return MM().lookupRoot<LdapLink>(token);
+  return s_ldap_data->m_links.lookupRoot(userData);
 }
 
 void* getLdapLinkToken(const req::ptr<LdapLink>& link) {
-  return reinterpret_cast<void*>(MM().addRoot(link));
+  return reinterpret_cast<void*>(
+    s_ldap_data->m_links.addRoot(link)
+  );
 }
 
 // Note: a raw pointer is ok here since clearLdapLink is being
 // called from ~LdapLink which might be getting invoked from
 // sweep and we can't create any new req::ptrs at the point.
 void clearLdapLink(const LdapLink* link) {
-  MM().removeRoot(link);
+  if (!s_ldap_data.isNull()) {
+    s_ldap_data->m_links.removeRoot(link);
+  }
 }
 
 }
@@ -725,7 +741,7 @@ static void get_attributes(Array &ret, LDAP *ldap,
 ///////////////////////////////////////////////////////////////////////////////
 
 Variant HHVM_FUNCTION(ldap_connect,
-                      const Variant& hostname /* = null_variant */,
+                      const Variant& hostname /* = uninit_variant */,
                       int port /* = 389 */) {
   const String& str_hostname = hostname.isNull()
                              ? null_string
@@ -1121,8 +1137,8 @@ bool HHVM_FUNCTION(ldap_modify_batch,
 
 bool HHVM_FUNCTION(ldap_bind,
                    const Resource& link,
-                   const Variant& bind_rdn /* = null_variant */,
-                   const Variant& bind_password /* = null_variant */) {
+                   const Variant& bind_rdn /* = uninit_variant */,
+                   const Variant& bind_password /* = uninit_variant */) {
 
   auto ld = get_valid_ldap_link_resource(link);
   if (!ld) {
@@ -1493,7 +1509,7 @@ Variant HHVM_FUNCTION(ldap_list,
                       const Variant& link,
                       const Variant& base_dn,
                       const Variant& filter,
-                      const Variant& attributes /* = null_variant */,
+                      const Variant& attributes /* = uninit_variant */,
                       int attrsonly /* = 0 */,
                       int sizelimit /* = -1 */,
                       int timelimit /* = -1 */,
@@ -1506,7 +1522,7 @@ Variant HHVM_FUNCTION(ldap_read,
                       const Variant& link,
                       const Variant& base_dn,
                       const Variant& filter,
-                      const Variant& attributes /* = null_variant */,
+                      const Variant& attributes /* = uninit_variant */,
                       int attrsonly /* = 0 */,
                       int sizelimit /* = -1 */,
                       int timelimit /* = -1 */,
@@ -1519,7 +1535,7 @@ Variant HHVM_FUNCTION(ldap_search,
                       const Variant& link,
                       const Variant& base_dn,
                       const Variant& filter,
-                      const Variant& attributes /* = null_variant */,
+                      const Variant& attributes /* = uninit_variant */,
                       int attrsonly /* = 0 */,
                       int sizelimit /* = -1 */,
                       int timelimit /* = -1 */,

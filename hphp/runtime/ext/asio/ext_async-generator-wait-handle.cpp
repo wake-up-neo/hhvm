@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -157,6 +157,11 @@ c_WaitableWaitHandle* c_AsyncGeneratorWaitHandle::getChild() {
     assert(getState() == STATE_READY || getState() == STATE_RUNNING);
     return nullptr;
   }
+}
+
+Resumable* c_AsyncGeneratorWaitHandle::resumable() const {
+  auto generator = Native::data<AsyncGenerator>(m_generator);
+  return generator->resumable();
 }
 
 void c_AsyncGeneratorWaitHandle::exitContext(context_idx_t ctx_idx) {

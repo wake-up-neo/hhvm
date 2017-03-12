@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -135,7 +135,6 @@ struct ArrayIter {
     if (LIKELY(hasArrayData())) {
       auto* ad = getArrayData();
       return !ad || m_pos == ad->iter_end();
-      return endHelper();
     }
     return endHelper();
   }
@@ -166,7 +165,7 @@ struct ArrayIter {
   void nvFirst(TypedValue* out) {
     const ArrayData* ad = getArrayData();
     assert(ad && m_pos != ad->iter_end());
-    const_cast<ArrayData*>(ad)->nvGetKey(out, m_pos);
+    cellCopy(ad->nvGetKey(m_pos), *out);
   }
 
   /*
@@ -199,9 +198,6 @@ struct ArrayIter {
   }
   bool hasCollection() const {
     return (!hasArrayData() && getObject()->isCollection());
-  }
-  bool hasIteratorObj() const {
-    return (!hasArrayData() && !getObject()->isCollection());
   }
 
   //
@@ -273,6 +269,12 @@ struct ArrayIter {
   void setPos(ssize_t newPos) {
     m_pos = newPos;
   }
+  void advance(ssize_t count) {
+    while (!end() && count--) {
+      next();
+    }
+  }
+  void rewind();
   Type getIterType() const {
     return m_itype;
   }
@@ -289,7 +291,6 @@ struct ArrayIter {
     return (ObjectData*)((intptr_t)m_obj & ~1);
   }
 
-  template<typename F> void scan(F& mark) const;
 private:
   friend int64_t new_iter_array(Iter*, ArrayData*, TypedValue*);
   template<bool withRef>
@@ -489,7 +490,6 @@ struct MArrayIter {
   bool getResetFlag() const { return m_resetFlag; }
   void setResetFlag(bool reset) { m_resetFlag = reset; }
 
-  template<typename F> void scan(F& mark) const;
 private:
   ArrayData* getData() const {
     assert(hasRef());
@@ -614,12 +614,6 @@ struct CufIter {
   static constexpr uint32_t ctxOff()  { return offsetof(CufIter, m_ctx); }
   static constexpr uint32_t nameOff() { return offsetof(CufIter, m_name); }
 
-  template<class F> void scan(F& mark) const {
-    if (m_ctx && intptr_t(m_ctx) % 2 == 0) {
-      mark(reinterpret_cast<const ObjectData*>(m_ctx));
-    }
-    mark(m_name);
-  }
  private:
   const Func* m_func;
   void* m_ctx;
@@ -627,7 +621,7 @@ struct CufIter {
 
   TYPE_SCAN_CUSTOM_FIELD(m_ctx) {
     if (m_ctx && intptr_t(m_ctx) % 2 == 0) {
-      scanner.enqueue(reinterpret_cast<const ObjectData*>(m_ctx));
+      scanner.enqAddr((const ObjectData**)&m_ctx);
     }
   }
 };

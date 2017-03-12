@@ -15,20 +15,43 @@
 #   +----------------------------------------------------------------------+
 #
 
+add_definitions("-DHHVM")
+
 if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/facebook")
   # I'm sorry, but facebook's internal repo has the top level dir stored inside
   # of hphp/, so we need to pull that one in first if it exists
   CMAKE_MINIMUM_REQUIRED(VERSION 2.8.7 FATAL_ERROR)
   get_filename_component(HPHP_HOME "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
   set(ENABLE_EXTENSION_PGSQL OFF CACHE INTERNAL "" FORCE)
+  set(TP_DIR "${HPHP_HOME}/hphp/public_tld/third-party/")
+  set(TP_BUILD_DIR "${TP_DIR}")
   set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/facebook/CMake"
                         "${CMAKE_CURRENT_SOURCE_DIR}/public_tld/CMake"
                         ${CMAKE_MODULE_PATH})
+endif()
+
+include(HHVMProject)
+
+include(HHVMExtensionConfig)
+# Before we do anything else, we'll configure the extensions,
+# so that the defines take effect globally.
+file(GLOB subdirs ${CMAKE_CURRENT_SOURCE_DIR}/runtime/ext/*)
+foreach (dir ${subdirs})
+  if (IS_DIRECTORY ${dir})
+    if (EXISTS "${dir}/config.cmake")
+      set(HRE_CURRENT_EXT_PATH "${dir}")
+      include("${dir}/config.cmake")
+    endif()
+  endif()
+endforeach()
+HHVM_EXTENSION_RESOLVE_DEPENDENCIES()
+
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/facebook")
   include(FBTLD)
 endif()
 
 include(HPHPSetup)
-include(FollySetup)
+include(HPHPFindLibs)
 include(HHVMGenerateConfig)
 HHVM_GENERATE_CONFIG("${CMAKE_CURRENT_BINARY_DIR}/util/hphp-config.h")
 
@@ -82,10 +105,14 @@ install(PROGRAMS ${CMAKE_CURRENT_SOURCE_DIR}/tools/oss-repo-mode
   DESTINATION bin
   COMPONENT dev)
 
-add_definitions("-DHHVM")
 add_definitions("-DUSE_CMAKE")
 
 enable_language(ASM)
+
+link_libraries(folly)
+if (NOT PCRE_LIBRARY)
+  link_libraries(pcre)
+endif()
 
 add_subdirectory(tools/hfsort)
 add_subdirectory(tools/version)

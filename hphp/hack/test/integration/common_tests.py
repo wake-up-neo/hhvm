@@ -74,15 +74,22 @@ class CommonTestDriver(object):
     def setUp(self):
         shutil.copytree(self.template_repo, self.repo_dir)
 
-    def tearDown(self):
+    def tearDownWithRetries(self, retries=3):
         (_, _, exit_code) = self.proc_call([
             hh_client,
             'stop',
             self.repo_dir
         ])
-        self.assertEqual(exit_code, 0, msg="Stopping hh_server failed")
+        if exit_code == 0:
+            shutil.rmtree(self.repo_dir)
+            return
+        elif retries > 0 and exit_code != 0:
+            self.tearDownWithRetries(retries=retries - 1)
+        else:
+            self.assertEqual(exit_code, 0, msg="Stopping hh_server failed")
 
-        shutil.rmtree(self.repo_dir)
+    def tearDown(self):
+        self.tearDownWithRetries()
 
     @classmethod
     def proc_create(cls, args, env):
@@ -108,6 +115,22 @@ class CommonTestDriver(object):
         sys.stderr.flush()
         retcode = proc.wait()
         return (stdout_data, stderr_data, retcode)
+
+    @classmethod
+    def wait_pid_with_timeout(cls, pid, timeout):
+        """
+        Like os.waitpid but with a timeout in seconds.
+        """
+        waited_time = 0
+        while True:
+            pid_expected, _ = os.waitpid(pid, os.WNOHANG)
+            if pid_expected == pid:
+                break
+            elif waited_time >= timeout:
+                raise subprocess.TimeoutExpired
+            else:
+                time.sleep(1)
+                waited_time += 1
 
     # Runs `hh_client check` asserting the stdout is equal the expected.
     # Returns stderr.
@@ -140,7 +163,7 @@ class CommonTestDriver(object):
             hh_client,
             'ide',
             self.repo_dir], env={})
-        return IdeConnection(proc)
+        return IdeConnection(proc, self.repo_dir)
 
 
 class DebugSubscription(object):
@@ -171,8 +194,9 @@ class IdeConnection(object):
     """
     Wraps `hh_client ide`.
     """
-    def __init__(self, proc):
+    def __init__(self, proc, root):
         self.proc = proc
+        self.root = root
 
     def close_stdin(self):
         self.proc.stdin.close()
@@ -189,15 +213,23 @@ class IdeConnection(object):
         retcode = self.proc.wait()
         return (stdout_data, stderr_data, retcode)
 
+    def make_absolute(self, file):
+        return self.root + "/" + file
+
     def open(self, file):
+        file = self.make_absolute(file)
+        f = open(file)
+        contents = f.read()
+        f.close()
         return(
             '{"protocol" : "service_framework3_rpc","id" : 123,"type" : ' +
             '"call","method" : "didOpenFile","args" : {"filename":"' +
             file +
-            '"}}\n'
+            '","contents" : ' + json.dumps(contents) + '}}\n'
         )
 
     def close(self, file):
+        file = self.make_absolute(file)
         return(
             '{"protocol" : "service_framework3_rpc","id" : 123,"type" : ' +
             '"call","method" : "didCloseFile","args" : {"filename":"' +
@@ -206,6 +238,7 @@ class IdeConnection(object):
         )
 
     def edit(self, file, st_line, st_column, ed_line, ed_column, text):
+        file = self.make_absolute(file)
         return(
             '{"protocol" : "service_framework3_rpc","id" : 456,"type" : ' +
             '"call","method" : "didChangeFile","args" : {"filename" : "' +
@@ -224,6 +257,7 @@ class IdeConnection(object):
         )
 
     def auto_complete(self, file, line, column):
+        file = self.make_absolute(file)
         return(
             '{"protocol" : "service_framework3_rpc","id" : 789,"type" : ' +
             '"call","method" : "getCompletions","args" : {"filename" : "' +
@@ -241,7 +275,7 @@ class IdeConnection(object):
 
     def disconnect(self):
         return('{"protocol" : "service_framework3_rpc","id" : 233,"type" : ' +
-                '"call","method" : "disconnect","args" : {}}')
+                '"call","method" : "disconnect","args" : {}}\n')
 
     def subscribe_diagnostic(self, id):
         return('{"protocol" : "service_framework3_rpc","id" : ' + id +
@@ -252,6 +286,7 @@ class IdeConnection(object):
                ',"type":"unsubscribe"}\n')
 
     def highlight_ref(self, file, line, column):
+        file = self.make_absolute(file)
         return(
             '{"protocol" : "service_framework3_rpc","id" : 987,"type" : ' +
             '"call","method" : "getSourceHighlights","args" : {"filename" : "' +
@@ -264,6 +299,7 @@ class IdeConnection(object):
         )
 
     def identify_function(self, file, line, column):
+        file = self.make_absolute(file)
         return(
             '{"protocol" : "service_framework3_rpc","id" : 987,"type" : ' +
             '"call","method" : "getDefinition","args" : {"filename" : "' +
@@ -274,6 +310,30 @@ class IdeConnection(object):
             column +
             '}}}\n'
         )
+
+    def json_rpc_init(self):
+        return '''{ \
+            "jsonrpc" : "2.0", \
+            "id" : 234, \
+            "method" : "init", \
+            "params" : { \
+                "client_name" : "python_test", \
+                "client_api_version" : 4 \
+            }   \
+        }\n'''
+
+    def json_rpc_open(self, file, contents):
+        file = self.make_absolute(file)
+        contents = json.dumps(contents)
+        return '''{ \
+            "jsonrpc" : "2.0", \
+            "id" : 654, \
+            "method" : "didOpenFile", \
+            "params" : { \
+                "filename" : "%s", \
+                "text" : %s \
+            }   \
+        }\n''' % (file, contents)
 
 
 class CommonTests(object):
@@ -340,6 +400,30 @@ class CommonTests(object):
             '{root}foo_4.php:4:24,26: Invalid return type (Typing[4110])',
             '  {root}foo_4.php:3:27,29: This is an int',
             '  {root}foo_4.php:4:24,26: It is incompatible with a string',
+        ])
+
+    def test_new_naming_error(self):
+        """
+        Add a new file which contains a naming collisions with an old file
+        """
+        with open(os.path.join(self.repo_dir, 'foo_4.php'), 'w') as f:
+            f.write("""
+            <?hh
+            class FOO {}
+            function H () {}
+            """)
+
+        self.write_load_config('foo_4.php')
+
+        self.check_cmd([
+            '{root}foo_4.php:3:19,21: Could not find FOO (Naming[2006])',
+            '  {root}foo_3.php:7:15,17: Did you mean Foo?',
+            '{root}foo_4.php:3:19,21: Name already bound: FOO (Naming[2012])',
+            '  {root}foo_3.php:7:15,17: Previous definition Foo differs only in capitalization ',
+            '{root}foo_4.php:4:22,22: Could not find H (Naming[2006])',
+            '  {root}foo_3.php:3:18,18: Did you mean h?',
+            '{root}foo_4.php:4:22,22: Name already bound: H (Naming[2012])',
+            '  {root}foo_3.php:3:18,18: Previous definition h differs only in capitalization ',
         ])
 
     def test_deleted_file(self):
@@ -453,11 +537,11 @@ class CommonTests(object):
 
         self.check_cmd_and_json_cmd(
             [
-                'File "{root}foo_3.php", line 10, characters 17-19: '
-                'Foo::__construct',
+                'Foo',
+                'File "{root}foo_3.php", line 10, characters 17-19:',
                 '1 total results'
             ], [
-                '[{{"name":"Foo::__construct","filename":"{root}foo_3.php",'
+                '[{{"name":"Foo","filename":"{root}foo_3.php",'
                 '"line":10,"char_start":17,"char_end":19}}]'
             ],
             options=['--ide-find-refs', '1:20'],
@@ -472,8 +556,8 @@ class CommonTests(object):
                 'line 1, characters 36-38',
                 '2 total results',
             ], [
-                '[{{"filename":"","line":1,"char_start":20,"char_end":22}},'
-                '{{"filename":"","line":1,"char_start":36,"char_end":38}}]'
+                '[{{"line":1,"char_start":20,"char_end":22}},'
+                '{{"line":1,"char_start":36,"char_end":38}}]'
             ],
             options=['--ide-highlight-refs', '1:20'],
             stdin='<?hh function test(Foo $foo) { new Foo(); }')
@@ -557,27 +641,16 @@ class CommonTests(object):
 
     def test_misc_ide_tools(self):
         """
-        Test hh_client --type-at-pos and --identify-function
+        Test hh_client --type-at-pos
         """
         self.write_load_config()
 
         self.check_cmd_and_json_cmd([
             'string'
             ], [
-            '{{"type":"string","pos":{{"filename":"{root}foo_3.php","line":3,"char_start":23,"char_end":28}}}}'
+            '{{"type":"string",' +
+            '"pos":{{"filename":"","line":0,"char_start":0,"char_end":-1}}}}'
             ], options=['--type-at-pos', '{root}foo_3.php:11:13'])
-
-        self.check_cmd_and_json_cmd([
-            'Foo::bar'
-            ], [
-            # looks like identify-function doesn't support JSON -
-            # but still be careful changing this, since tools
-            # may just call everything with --json flag and it would
-            # be a breaking change
-            'Foo::bar'
-            ],
-            options=['--identify-function', '1:51'],
-            stdin='<?hh class Foo { private function bar() { $this->bar() }}')
 
     def test_ide_get_definition(self):
         """
@@ -586,9 +659,17 @@ class CommonTests(object):
         self.write_load_config()
 
         self.check_cmd_and_json_cmd([
-            'Name: \\bar, type: function, position: line 1, '
-            'characters 42-44, defined: line 1, characters 15-17, '
-            'definition span: line 1, character 15 - line 1, character 17'
+            'name: \\bar, kind: function, span: line 1, characters 42-44, '
+            'definition: ',
+            ' bar',
+            '   kind: function',
+            '   id: function::bar',
+            '   position: File "", line 1, characters 15-17:',
+            '   span: File "", line 1, character 6 - line 1, character 22:',
+            '   modifiers: ',
+            '   params:',
+            '',
+            ''
             ], [
             '[{{"name":"\\\\bar","result_type":"function",'
             '"pos":{{"filename":"","line":1,"char_start":42,"char_end":44}},'
@@ -640,10 +721,18 @@ class CommonTests(object):
         self.write_load_config()
 
         self.check_cmd_and_json_cmd([
-            'Name: \\ClassToBeIdentified::methodToBeIdentified, type: method, '
-            'position: line 1, characters 45-64, defined: line 4, '
-            'characters 26-45, definition span: line 4, character 26 - line 4, '
-            'character 45'
+            'name: \\ClassToBeIdentified::methodToBeIdentified, kind: method,'
+            ' span: line 1, characters 45-64, definition: ',
+            ' methodToBeIdentified',
+            '   kind: method',
+            '   id: method::ClassToBeIdentified::methodToBeIdentified',
+            '   position: File "{root}foo_5.php", line 4, characters 26-45:',
+            '   span: File "{root}foo_5.php", line 4, character 3 - line 4,'
+            ' character 50:',
+            '   modifiers: public static ',
+            '   params:',
+            '',
+            '',
             ], [
             '[{{"name":"\\\\ClassToBeIdentified::methodToBeIdentified",'
             '"result_type":"method","pos":{{"filename":"","line":1,'
@@ -657,32 +746,6 @@ class CommonTests(object):
             options=['--ide-get-definition', '1:50'],
             stdin='<?hh function test() { '
                   'ClassToBeIdentified::methodToBeIdentified () }')
-
-    def test_get_method_name(self):
-        """
-        Test --get-method-name
-        """
-        os.remove(os.path.join(self.repo_dir, 'foo_2.php'))
-        self.write_load_config('foo_2.php')
-
-        self.check_cmd_and_json_cmd([
-            'Name: \\C::foo, type: method, position: line 8, characters 7-9'
-            ], [
-            '{{"name":"\\\\C::foo","result_type":"method",'
-            '"pos":{{"filename":"","line":8,"char_start":7,"char_end":9}},'
-            '"internal_error":false}}'
-            ],
-            options=['--get-method-name', '8:7'],
-            stdin='''<?hh
-
-class C {
-  public function foo() {}
-}
-
-function test(C $c) {
-  $c->foo();
-}
-''')
 
     def test_ide_get_definition_by_id(self):
         self.write_load_config()
@@ -934,6 +997,53 @@ function test2(int $x) { $x = $x*x + 3; return f($x); }
         }
 """)
 
+    def test_refactor_typedefs(self):
+        with open(os.path.join(self.repo_dir, 'foo_4.php'), 'w') as f:
+            f.write("""
+            <?hh
+            newtype NewType = int;
+            type Type = int;
+
+            class MyClass {
+                public function myFunc(Type $x): NewType {
+                    return $x;
+                }
+            }
+            """)
+        self.write_load_config('foo_4.php')
+
+        self.check_cmd_and_json_cmd(['Rewrote 1 files.'],
+        ['[{{"filename":"{root}foo_4.php","patches":[{{'
+        '"char_start":38,"char_end":45,"line":3,"col_start":21,'
+        '"col_end":27,"patch_type":"replace","replacement":"NewTypeX"}},'
+        '{{"char_start":160,"char_end":167,"line":7,"col_start":50,'
+        '"col_end":56,"patch_type":"replace","replacement":"NewTypeX"}}]'
+        '}}]'],
+        options=['--refactor', 'Class', 'NewType', 'NewTypeX'])
+
+        self.check_cmd_and_json_cmd(['Rewrote 1 files.'],
+        ['[{{"filename":"{root}foo_4.php","patches":[{{'
+        '"char_start":71,"char_end":75,"line":4,"col_start":18,'
+        '"col_end":21,"patch_type":"replace","replacement":"TypeX"}},'
+        '{{"char_start":151,"char_end":155,"line":7,"col_start":40,'
+        '"col_end":43,"patch_type":"replace","replacement":"TypeX"}}]'
+        '}}]'],
+        options=['--refactor', 'Class', 'Type', 'TypeX'])
+
+        with open(os.path.join(self.repo_dir, 'foo_4.php')) as f:
+            out = f.read()
+            self.assertEqual(out, """
+            <?hh
+            newtype NewTypeX = int;
+            type TypeX = int;
+
+            class MyClass {
+                public function myFunc(TypeX $x): NewTypeX {
+                    return $x;
+                }
+            }
+            """)
+
     def test_ide_exit_status(self):
         """
         Test multiple exit status of "hh_client ide"
@@ -946,18 +1056,22 @@ function test2(int $x) { $x = $x*x + 3; return f($x); }
 
         # Test the exit status of ide call when another ide client exists
         self.check_cmd(['No errors!'])
-        ide_con = self.connect_ide()
+        first_ide_con = self.connect_ide()
         time.sleep(1)
-        (_, _, exit_code) = self.proc_call([hh_client, 'ide', self.repo_dir])
-        self.assertEqual(
-            exit_code,
-            207,
-            msg="Test IDE_persistent_client_already_exists status failed")
+        second_ide_con = self.connect_ide()
 
         # Test ide abnormally exit. It make sure exit ide connection with EOF
         # does not crash the server. (This is assured by the test below since
         # ide connection cannot exit with code 0 if there is no server exists)
-        ide_con.close_stdin()
+        second_ide_con.close_stdin()
+
+        time.sleep(1)
+
+        (_, _, exit_code) = first_ide_con.get_return()
+        self.assertEqual(
+            exit_code,
+            207,
+            msg="Test IDE_new_client_connected status failed")
 
         # Test the exit status of ide call when normally exit
         ide_con = self.connect_ide()
@@ -966,62 +1080,44 @@ function test2(int $x) { $x = $x*x + 3; return f($x); }
         self.assertEqual(exit_code, 0, msg="Test normal exit status failed")
         self.check_cmd(['No errors!'])
 
-    def test_ide_highlight_ref(self):
+    def test_auto_namespace_alias_addition(self):
         """
-        Test highlight reference for ide files
-        """
-
-        self.write_load_config()
-        self.check_cmd(['No errors!'])
-        ide_con = self.connect_ide()
-        cmd = (ide_con.open('foo_3.php') +
-                ide_con.edit('foo_3.php', '11', '13', '11', '13',
-                             '$f = new Foo();') +
-                ide_con.highlight_ref('foo_3.php', '7', '16') +
-                ide_con.disconnect())
-        ide_con.write_cmd(cmd)
-        (stdout, _, exit_code) = ide_con.get_return()
-        self.assertEqual(
-            stdout,
-            '{"protocol":"service_framework3_rpc","type":"response","id":987,' +
-            '"result":[{"filename":"","line":10,"char_start":17,"char_end":19' +
-            '},{"filename":"","line":11,"char_start":22,"char_end":24}]}\n',
-            msg="Highlight ref result does not match"
-        )
-        self.assertEqual(
-            exit_code,
-            0,
-            msg="Exit status does not match"
-        )
-
-    def test_ide_identify_function(self):
-        """
-        Test identify function for ide files
+        Add namespace alias and check if it is still good
         """
 
         self.write_load_config()
         self.check_cmd(['No errors!'])
+
+        with open(os.path.join(self.repo_dir, 'auto_ns_2.php'), 'w') as f:
+            f.write("""
+            <?hh
+            function haha() {
+                Herp\\f();
+                return 1;
+            }
+            """)
+
+        self.check_cmd(['No errors!'])
+
+    def test_json_rpc(self):
+        self.write_load_config()
+        self.check_cmd(['No errors!'])
         ide_con = self.connect_ide()
-        cmd = (ide_con.open('foo_3.php') +
-                ide_con.edit('foo_3.php', '11', '13', '11', '13',
-                             '$f = new Foo();') +
-                ide_con.identify_function('foo_3.php', '11', '23') +
-                ide_con.disconnect())
-        ide_con.write_cmd(cmd)
-        (stdout, _, exit_code) = ide_con.get_return()
-        self.assertEqual(
-            stdout,
-            '{"protocol":"service_framework3_rpc","type":"response","id":987,' +
-            '"result":[{"name":"\\\\Foo::__construct","result_type":"method",' +
-            '"pos":{"filename":"","line":11,"char_start":18,"char_end":26},"d' +
-            'efinition_pos":null,"definition_span":null,"definition_id":null}' +
-            ',{"name":"\\\\Foo","result_type":"class","pos":{"filename":"","l' +
-            'ine":11,"char_start":22,"char_end":24},"definition_pos":null,"de' +
-            'finition_span":null,"definition_id":null}]}\n',
-            msg="Identify function result does not match"
+        cmd = (
+            ide_con.json_rpc_init() +
+            ide_con.json_rpc_open("a.php", "<?hh // strict\n {") +
+            ide_con.sleep()
         )
-        self.assertEqual(
-            exit_code,
-            0,
-            msg="Exit status does not match"
+        ide_con.write_cmd(cmd)
+
+        (stdout, _, _) = ide_con.get_return()
+
+        self.assertEqualString(
+            stdout,
+            '{{"jsonrpc":"2.0","id":234,"result":' +
+            '{{"server_api_version":0}}}}\n' +
+            '{{"jsonrpc":"2.0","method":"diagnostics","params":{{"filename":"' +
+            '{root}a.php","errors":[[{{"message":"Expected }}","range":' +
+            '{{"filename":"{root}a.php","range":{{"start":' +
+            '{{"line":3,"column":1}},"end":{{"line":3,"column":1}}}}}}}}]]}}}}\n'
         )

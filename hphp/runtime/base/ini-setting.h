@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -142,9 +142,6 @@ public:
   bool isObject() const { return m_map.isObject();}
   Variant& toVariant() { return m_map; }
   void set(const String& key, const Variant& v);
-  template<class F> void scan(F& mark) const {
-    mark(m_map);
-  }
   TypedValue detach() noexcept {
     return m_map.detach();
   }
@@ -238,6 +235,7 @@ public:
   static bool Get(const String& name, String& value);
   static std::string Get(const std::string& name);
   static Array GetAll(const String& extension, bool details);
+  static std::string GetAllAsJSON();
 
   /**
    * Change an INI setting as if it was in the php.ini file
@@ -252,6 +250,13 @@ public:
    * Change an INI setting as if there was a call to ini_set()
    */
   static bool SetUser(const String& name, const Variant& value);
+
+  /**
+   * Restore an INI setting to the default value before the first call to
+   * SetUser().
+   */
+  static void RestoreUser(const String& name);
+
   /**
    * Fill in constant that may not have been bound when an
    * ini file was initially parsed

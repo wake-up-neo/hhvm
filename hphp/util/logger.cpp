@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -141,6 +141,13 @@ void Logger::SetBatchSize(size_t bsize) {
   for (auto& l : s_loggers) {
     auto& logger = l.second;
     logger->setBatchSize(bsize);
+  }
+}
+
+void Logger::SetFlushTimeout(std::chrono::milliseconds timeoutMs) {
+  for (auto& l : s_loggers) {
+    auto& logger = l.second;
+    logger->setFlushTimeout(timeoutMs);
   }
 }
 

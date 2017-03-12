@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -56,24 +56,6 @@ struct VMState {
   TypedValue* sp;
   MInstrState mInstrState;
   ActRec* jitCalledFrame;
-
-  template<class F> void scan(F& mark) const {
-    mInstrState.scan(mark);
-    mark(&jitCalledFrame, sizeof(jitCalledFrame));
-  }
-};
-
-enum class CallType {
-  ClsMethod,
-  ObjMethod,
-  CtorMethod,
-};
-enum class LookupResult {
-  MethodFoundWithThis,
-  MethodFoundNoThis,
-  MagicCallFound,
-  MagicCallStaticFound,
-  MethodNotFound,
 };
 
 enum class InclOpFlags {
@@ -128,11 +110,21 @@ struct DebuggerSettings {
   int printLevel = -1;
 };
 
+struct ThrowAllErrorsSetter {
+  ThrowAllErrorsSetter();
+  ~ThrowAllErrorsSetter();
+
+private:
+  bool m_throwAllErrors;
+};
+
 using InvokeArgs = folly::Range<const TypedValue*>;
 
 ///////////////////////////////////////////////////////////////////////////////
 
 struct ExecutionContext {
+  friend ThrowAllErrorsSetter;
+
   enum ShutdownType {
     ShutDown,
     PostSend,
@@ -249,6 +241,7 @@ public:
   Variant pushUserExceptionHandler(const Variant& function);
   void popUserErrorHandler();
   void popUserExceptionHandler();
+  void clearUserErrorHandlers();
   bool errorNeedsHandling(int errnum,
                           bool callUserHandler,
                           ErrorThrowMode mode);
@@ -286,7 +279,6 @@ public:
   void setTimeZone(const String&);
 
   bool getThrowAllErrors() const;
-  void setThrowAllErrors(bool);
 
   Variant getExitCallback();
   void setExitCallback(Variant);
@@ -314,17 +306,13 @@ private:
     Variant handler;
     int chunk_size;
     OBFlags flags;
-    template<class F> void scan(F& mark) {
-      mark(oss);
-      mark(handler);
-      mark(chunk_size);
-    }
   };
 
 private:
   // helper functions
   void resetCurrentBuffer();
   void executeFunctions(ShutdownType type);
+  void setThrowAllErrors(bool);
 
 public:
   void requestInit();
@@ -335,25 +323,6 @@ public:
   void cleanup();
 
 public:
-  const Func* lookupMethodCtx(const Class* cls,
-                                        const StringData* methodName,
-                                        const Class* pctx,
-                                        CallType lookupType,
-                                        bool raise = false);
-  LookupResult lookupObjMethod(const Func*& f,
-                               const Class* cls,
-                               const StringData* methodName,
-                               const Class* ctx,
-                               bool raise = false);
-  LookupResult lookupClsMethod(const Func*& f,
-                               const Class* cls,
-                               const StringData* methodName,
-                               ObjectData* this_,
-                               const Class* ctx,
-                               bool raise = false);
-  LookupResult lookupCtorMethod(const Func*& f,
-                                const Class* cls,
-                                bool raise = false);
   ObjectData* createObject(const Class* cls,
                            const Variant& params,
                            bool init);
@@ -392,18 +361,22 @@ public:
   int getLine();
   Array getCallerInfo();
   bool evalUnit(Unit* unit, PC& pc, int funcType);
-  void invokeUnit(TypedValue* retval, const Unit* unit);
+  TypedValue invokeUnit(const Unit* unit);
   Unit* compileEvalString(StringData* code,
                                 const char* evalFilename = nullptr);
   StrNR createFunction(const String& args, const String& code);
 
-  // Compiles the passed string and evaluates it in the given frame. Returns
-  // false on failure.
-  bool evalPHPDebugger(TypedValue* retval, StringData* code, int frame);
+  struct EvaluationResult {
+    bool failed;
+    Variant result;
+    std::string error;
+  };
+
+  // Compiles the passed string and evaluates it in the given frame.
+  EvaluationResult evalPHPDebugger(StringData* code, int frame);
 
   // Evaluates the a unit compiled via compile_string in the given frame.
-  // Returns false on failure.
-  bool evalPHPDebugger(TypedValue* retval, Unit* unit, int frame);
+  EvaluationResult evalPHPDebugger(Unit* unit, int frame);
 
   void enterDebuggerDummyEnv();
   void exitDebuggerDummyEnv();
@@ -429,7 +402,10 @@ public:
                          Offset* prevPc = nullptr,
                          TypedValue** prevSp = nullptr,
                          bool* fromVMEntry = nullptr);
-
+  ActRec* getPrevVMStateSkipFrame(const ActRec* fp,
+                                  Offset* prevPc = nullptr,
+                                  TypedValue** prevSp = nullptr,
+                                  bool* fromVMEntry = nullptr);
   /*
    * Returns the caller of the given frame.
    */
@@ -457,38 +433,33 @@ public:
     InvokePseudoMain
   };
 
-  void invokeFunc(TypedValue* retval,
-                  const Func* f,
-                  const Variant& args_ = init_null_variant,
-                  ObjectData* this_ = nullptr,
-                  Class* class_ = nullptr,
-                  VarEnv* varEnv = nullptr,
-                  StringData* invName = nullptr,
-                  InvokeFlags flags = InvokeNormal,
-                  bool useWeakTypes = false);
+  TypedValue invokeFunc(const Func* f,
+                        const Variant& args_ = init_null_variant,
+                        ObjectData* this_ = nullptr,
+                        Class* class_ = nullptr,
+                        VarEnv* varEnv = nullptr,
+                        StringData* invName = nullptr,
+                        InvokeFlags flags = InvokeNormal,
+                        bool useWeakTypes = false);
 
-  void invokeFunc(TypedValue* retval,
-                  const CallCtx& ctx,
-                  const Variant& args_,
-                  VarEnv* varEnv = nullptr);
+  TypedValue invokeFunc(const CallCtx& ctx,
+                        const Variant& args_,
+                        VarEnv* varEnv = nullptr);
 
-  void invokeFuncFew(TypedValue* retval,
-                     const Func* f,
-                     void* thisOrCls,
-                     StringData* invName,
-                     int argc,
-                     const TypedValue* argv,
-                     bool useWeakTypes = false);
+  TypedValue invokeFuncFew(const Func* f,
+                           void* thisOrCls,
+                           StringData* invName,
+                           int argc,
+                           const TypedValue* argv,
+                           bool useWeakTypes = false);
 
-  void invokeFuncFew(TypedValue* retval,
-                     const Func* f,
-                     void* thisOrCls,
-                     StringData* invName = nullptr);
+  TypedValue invokeFuncFew(const Func* f,
+                           void* thisOrCls,
+                           StringData* invName = nullptr);
 
-  void invokeFuncFew(TypedValue* retval,
-                     const CallCtx& ctx,
-                     int argc,
-                     const TypedValue* argv);
+  TypedValue invokeFuncFew(const CallCtx& ctx,
+                           int argc,
+                           const TypedValue* argv);
 
   TypedValue invokeMethod(
     ObjectData* obj,
@@ -511,67 +482,12 @@ public:
 
 private:
   template<class FStackCheck, class FInitArgs, class FEnterVM>
-  void invokeFuncImpl(TypedValue* retptr, const Func* f,
-                      ObjectData* thiz, Class* cls, uint32_t argc,
-                      StringData* invName, bool useWeakTypes,
-                      FStackCheck doStackCheck,
-                      FInitArgs doInitArgs,
-                      FEnterVM doEnterVM);
-
-public:
-  template<class F> void scan(F& mark) {
-    //mark(m_transport); Transport &subclasses must not contain heap ptrs.
-    mark(m_cwd);
-    //mark(m_sb); // points into m_buffers
-    //mark(m_out); // points into m_buffers
-    mark(m_remember_chunk);
-    for (auto& b : m_buffers) b.scan(mark);
-    mark(m_insideOBHandler);
-    mark(m_implicitFlush);
-    mark(m_protectedLevel);
-    //mark(m_stdout);
-    //mark(m_stdoutData);
-    mark(m_stdoutBytesWritten);
-    mark(m_rawPostData);
-    mark(m_requestEventHandlers);
-    mark(m_shutdowns);
-    mark(m_userErrorHandlers);
-    mark(m_userExceptionHandlers);
-    //mark(m_errorState);
-    mark(m_lastError);
-    mark(m_errorPage);
-    mark(m_envs);
-    mark(m_timezone);
-    mark(m_throwAllErrors);
-    //mark(m_streamContext);
-    mark(m_shutdownsBackup);
-    mark(m_userErrorHandlersBackup);
-    mark(m_userExceptionHandlersBackup);
-    mark(m_exitCallback);
-    mark(m_sandboxId);
-    //mark(m_vhost); // VirtualHost* not allocated in php request heap
-    //mark(debuggerSettings);
-    mark.implicit(m_liveBCObjs); // exact ptrs, but not refcounted.
-    mark(m_apcMemSize);
-    //mark(m_apcHandles);
-    //mark(dynPropTable); // don't root objects with dyn props
-    mark(m_globalVarEnv);
-    mark(m_evaledFiles);
-    mark(m_evaledFilesOrder);
-    mark(m_createdFuncs);
-    //for (auto& f : m_faults) mark(f);
-    mark(m_lambdaCounter);
-    for (auto& vmstate : m_nestedVMs) vmstate.scan(mark);
-    mark(m_nesting);
-    mark(m_dbgNoBreak);
-    mark(m_evaledArgs);
-    mark(m_lastErrorPath);
-    mark(m_lastErrorLine);
-    mark(m_setprofileCallback);
-    mark(m_memThresholdCallback);
-    mark(m_executingSetprofileCallback);
-    mark(m_headerCallback);
-  }
+  TypedValue invokeFuncImpl(const Func* f,
+                            ObjectData* thiz, Class* cls, uint32_t argc,
+                            StringData* invName, bool useWeakTypes,
+                            FStackCheck doStackCheck,
+                            FInitArgs doInitArgs,
+                            FEnterVM doEnterVM);
 
 ///////////////////////////////////////////////////////////////////////////////
 // only fields past here, please.
@@ -631,7 +547,12 @@ public:
   // destroying the context, so C++ order of destruction is not an issue.
   req::hash_map<const ObjectData*,ArrayNoDtor> dynPropTable;
   VarEnv* m_globalVarEnv;
-  req::hash_map<const StringData*,Unit*,string_data_hash,string_data_same>
+  struct FileInfo {
+    Unit* unit;
+    time_t ts_sec; // timestamp seconds
+    unsigned long ts_nsec; // timestamp nanoseconds (or 0 if ns not supported)
+  };
+  req::hash_map<const StringData*, FileInfo, string_data_hash, string_data_same>
     m_evaledFiles;
   req::vector<const StringData*> m_evaledFilesOrder;
   req::vector<Unit*> m_createdFuncs;

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -16,7 +16,6 @@
 */
 
 #include "hphp/runtime/ext/stream/ext_stream-user-filters.h"
-#include "hphp/runtime/ext/stream/ext_stream.h"
 #include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/base/builtin-functions.h"
@@ -81,10 +80,6 @@ struct StreamFilterRepository {
 
   bool isNull() const {
     return m_filters.isNull();
-  }
-
-  template<class F> void scan(F& mark) const {
-    mark(m_filters);
   }
 
 private:
@@ -255,11 +250,6 @@ private:
     }
 
     return req::make<StreamFilter>(obj, stream);
-  }
-
-public:
-  void vscan(IMarker& mark) const override {
-    m_registeredFilters.scan(mark);
   }
 
 public:

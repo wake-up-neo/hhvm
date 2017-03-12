@@ -28,6 +28,8 @@ namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
 
+bool is_valid_class_name(folly::StringPiece className);
+
 struct AutoloadHandler final : RequestEventHandler {
 private:
   enum Result {
@@ -44,10 +46,6 @@ private:
                   req::unique_ptr<CufIter>& cufIter) :
       m_handler(handler) {
       m_cufIter = std::move(cufIter);
-    }
-    template<class F> void scan(F& mark) const {
-      mark(m_handler);
-      if (m_cufIter) m_cufIter->scan(mark);
     }
     Variant m_handler; // used to respond to f_spl_autoload_functions
     req::unique_ptr<CufIter> m_cufIter; // used to invoke handlers
@@ -145,25 +143,18 @@ private:
 
   static String getSignature(const Variant& handler);
 
-public:
-  void vscan(IMarker& mark) const override {
-    mark(m_map);
-    mark(m_map_root);
-    mark(m_loading);
-    // handlers are only valid after requestInit. need guard?
-    for (auto& bundle : m_handlers) {
-      bundle.scan(mark);
-    }
-  }
-
 private:
   Array m_map;
   String m_map_root;
-  bool m_spl_stack_inited;
+  bool m_spl_stack_inited{false};
   union {
     req::deque<HandlerBundle> m_handlers;
   };
+  bool m_handlers_valid{false};
   Array m_loading;
+  TYPE_SCAN_CUSTOM_FIELD(m_handlers) {
+    if (m_handlers_valid) { scanner.scan(m_handlers); }
+  }
 };
 
 //////////////////////////////////////////////////////////////////////

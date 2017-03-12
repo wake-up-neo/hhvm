@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -44,7 +44,7 @@ WddxPacket::WddxPacket(const Variant& comment, bool manualPacket, bool sVar) :
 bool WddxPacket::add_var(const String& varName, bool hasVarTag) {
   VarEnv* v = g_context->getOrCreateVarEnv();
   if (!v) return false;
-  Variant varVariant = *reinterpret_cast<Variant*>(v->lookup(varName.get()));
+  Variant varVariant = tvAsVariant(v->lookup(varName.get()));
   return recursiveAddVar(varName, varVariant, hasVarTag);
 }
 
@@ -119,7 +119,7 @@ bool WddxPacket::recursiveAddVarImpl(const String& varName,
         m_packetString.append(std::to_string(length));
         m_packetString.append("'>");
       }
-      for (ArrayIter it(varAsArray); it; ++it) {
+      for (; it; ++it) {
         auto key = it.first();
         auto const& value = it.secondRef();
         recursiveAddVarImpl(key.toString(), value, isObject, seen);

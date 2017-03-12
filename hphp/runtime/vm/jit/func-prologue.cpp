@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -26,6 +26,7 @@
 #include "hphp/runtime/vm/jit/irgen.h"
 #include "hphp/runtime/vm/jit/irlower.h"
 #include "hphp/runtime/vm/jit/phys-reg.h"
+#include "hphp/runtime/vm/jit/print.h"
 #include "hphp/runtime/vm/jit/relocation.h"
 #include "hphp/runtime/vm/jit/srcdb.h"
 #include "hphp/runtime/vm/jit/tc.h"
@@ -74,7 +75,7 @@ TCA genFuncPrologue(TransID transID, TransKind kind, Func* func, int argc,
   auto context = prologue_context(transID, kind, func,
                                   func->getEntryForNumArgs(argc));
   IRUnit unit{context};
-  irgen::IRGS env{unit};
+  irgen::IRGS env{unit, nullptr};
 
   auto& cb = code.main();
 
@@ -84,6 +85,8 @@ TCA genFuncPrologue(TransID transID, TransKind kind, Func* func, int argc,
 
   irgen::emitFuncPrologue(env, argc, transID);
   irgen::sealUnit(env);
+
+  printUnit(2, unit, "After initial prologue generation");
 
   auto vunit = irlower::lowerUnit(env.unit, CodeKind::CrossTrace);
   emitVunit(*vunit, env.unit, code, fixups);
@@ -96,7 +99,7 @@ TCA genFuncBodyDispatch(Func* func, const DVFuncletsVec& dvs,
   auto context = prologue_context(kInvalidTransID, TransKind::Live,
                                   func, func->base());
   IRUnit unit{context};
-  irgen::IRGS env{unit};
+  irgen::IRGS env{unit, nullptr};
 
   irgen::emitFuncBodyDispatch(env, dvs);
   irgen::sealUnit(env);
@@ -114,8 +117,7 @@ TCA genFuncBodyDispatch(Func* func, const DVFuncletsVec& dvs,
     auto& frozen = code.frozen();
     tc::recordPerfRelocMap(start, main.frontier(),
                            frozen.frontier(), frozen.frontier(),
-                           SrcKey { func, dvs[0].second, false },
-                           0, ibs, fixups);
+                           context.srcKey(), 0, ibs, fixups);
   }
   fixups.process(nullptr);
 

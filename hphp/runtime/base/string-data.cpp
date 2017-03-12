@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -70,7 +70,7 @@ static_assert(kSmallIndex2Size[sizeClass] == maxSimpleAlloc,
 }
 
 // Allocate a string with length <= kMaxStringSimpleLen, initialize `m_data'
-// and `m_hdr', but not `m_lenAndHash'.
+// and HeapObject, but not `m_lenAndHash'.
 ALWAYS_INLINE StringData* allocFlatSmallImpl(size_t len) {
   assertx(len <= kMaxStringSimpleLen);
   static_assert(kMaxStringSimpleLen + kCapOverhead <= kMaxSmallSizeLookup, "");
@@ -88,13 +88,13 @@ ALWAYS_INLINE StringData* allocFlatSmallImpl(size_t len) {
   sd->m_data = reinterpret_cast<char*>(sd + 1);
 #endif
   // Refcount initialized to 1.
-  sd->m_hdr.init(CapCode::exact(cap), HeaderKind::String, 1);
+  sd->initHeader(CapCode::exact(cap), HeaderKind::String, 1);
   return sd;
 }
 
 // Allocate a string with length > kMaxStringSimpleLen, initialize `m_data'
-// and `m_hdr', but not `m_lenAndHash'.  We sometimes want to inline this slow
-// path, too.
+// and HeapObject, but not `m_lenAndHash'. We sometimes want to inline this
+// slow path, too.
 ALWAYS_INLINE StringData* allocFlatSlowImpl(size_t len) {
   // Slow path when length is large enough to need the real CapCode encoding.
   if (UNLIKELY(len > StringData::MaxSize)) {
@@ -125,7 +125,7 @@ ALWAYS_INLINE StringData* allocFlatSlowImpl(size_t len) {
   sd->m_data = reinterpret_cast<char*>(sd + 1);
 #endif
   // Refcount initialized to 1.
-  sd->m_hdr.init(cc, HeaderKind::String, 1);
+  sd->initHeader(cc, HeaderKind::String, 1);
   return sd;
 }
 
@@ -177,7 +177,7 @@ StringData* StringData::MakeShared(folly::StringPiece sl, bool trueStatic) {
   auto const cc = CapCode::ceil(sl.size());
   auto const need = cc.decode() + kCapOverhead;
   auto const sd = static_cast<StringData*>(
-    trueStatic ? low_malloc_data(need) : malloc(need)
+    trueStatic ? low_malloc_data(need) : malloc_huge(need)
   );
   auto const data = reinterpret_cast<char*>(sd + 1);
 
@@ -185,7 +185,7 @@ StringData* StringData::MakeShared(folly::StringPiece sl, bool trueStatic) {
   sd->m_data = data;
 #endif
   auto const count = trueStatic ? StaticValue : UncountedValue;
-  sd->m_hdr.init(cc, HeaderKind::String, count);
+  sd->initHeader(cc, HeaderKind::String, count);
   sd->m_len = sl.size(); // m_hash is computed soon.
 
   data[sl.size()] = 0;
@@ -218,14 +218,14 @@ StringData* StringData::MakeEmpty() {
 #ifndef NO_M_DATA
   sd->m_data        = data;
 #endif
-  sd->m_hdr.init(HeaderKind::String, StaticValue);
+  sd->initHeader(HeaderKind::String, StaticValue);
   sd->m_lenAndHash  = 0; // len=0, hash=0
   data[0] = 0;
   sd->preCompute();
 
   assert(sd->m_len == 0);
   assert(sd->capacity() == 0);
-  assert(sd->m_hdr.kind == HeaderKind::String);
+  assert(sd->m_kind == HeaderKind::String);
   assert(sd->isFlat());
   assert(sd->isStatic());
   assert(sd->checkSane());
@@ -241,7 +241,7 @@ void StringData::destructStatic() {
 void StringData::destructUncounted() {
   assert(checkSane() && isUncounted());
   assert(isFlat());
-  free(this);
+  free_huge(this);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -437,15 +437,15 @@ StringData* StringData::MakeProxySlowPath(const APCString* apcstr) {
   );
   auto const data = apcstr->getStringData();
   sd->m_data = const_cast<char*>(data->m_data);
-  sd->m_hdr.init(data->m_hdr, 1);
+  sd->initHeader(*data, 1);
   sd->m_lenAndHash = data->m_lenAndHash;
   sd->proxy()->apcstr = apcstr;
   sd->enlist();
   apcstr->reference();
 
   assert(sd->m_len == data->size());
-  assert(sd->m_hdr.aux == data->m_hdr.aux);
-  assert(sd->m_hdr.kind == HeaderKind::String);
+  assert(sd->m_aux16 == data->m_aux16);
+  assert(sd->m_kind == HeaderKind::String);
   assert(sd->hasExactlyOneRef());
   assert(sd->m_hash == data->m_hash);
   assert(sd->isProxy());
@@ -502,8 +502,8 @@ void StringData::release() noexcept {
   // In CapCode encoding, we always minimize the exponent.  Thus if the
   // encoded value is above Threshold, the value after decoding is also
   // above Threshold.
-  if (LIKELY(m_hdr.aux.code <= kMaxStringSimpleLen)) {
-    auto const size = kCapOverhead + m_hdr.aux.code;
+  if (LIKELY(aux<CapCode>().code <= kMaxStringSimpleLen)) {
+    auto const size = kCapOverhead + aux<CapCode>().code;
     auto const sizeClass = MemoryManager::lookupSmallSize2Index(size);
     MM().freeSmallIndex(this, sizeClass, size);
     return;
@@ -651,13 +651,13 @@ StringData* StringData::reserve(size_t cap) {
   // Request-allocated StringData are always aligned at 16 bytes, thus it is
   // safe to copy in 16-byte groups.
 #ifdef NO_M_DATA
-  // layout: [m_lenAndHash][header][...data]
+  // layout: [header][m_lenAndHash][...data]
   sd->m_lenAndHash = m_lenAndHash;
   // This copies the characters (m_len bytes), and the trailing zero (1 byte)
   memcpy16_inline(sd+1, this+1, (m_len + 1 + 15) & ~0xF);
   assertx(reinterpret_cast<uintptr_t>(this+1) % 16 == 0);
 #else
-  // layout: [m_data][header][m_lenAndHash][...data]
+  // layout: [header][m_data][m_lenAndHash][...data]
   // This copies m_lenAndHash (8 bytes), the characters (m_len bytes),
   // and the trailing zero (1 byte).
   memcpy16_inline(&sd->m_lenAndHash, &m_lenAndHash,
@@ -715,7 +715,7 @@ StringData* StringData::escalate(size_t cap) {
 void StringData::dump() const {
   auto s = slice();
 
-  printf("StringData(%d) (%s%s%s%d): [", m_hdr.count,
+  printf("StringData(%d) (%s%s%s%d): [", m_count,
          isProxy() ? "proxy " : "",
          isStatic() ? "static " : "",
          isUncounted() ? "uncounted " : "",
@@ -751,6 +751,9 @@ StringData* StringData::increment() {
 }
 
 void StringData::incrementHelper() {
+  if (RuntimeOption::EnableHipHopSyntax) {
+    raise_notice("Increment on string '%s'", data());
+  }
   m_hash = 0;
 
   enum class CharKind {
@@ -843,6 +846,9 @@ void StringData::preCompute() {
   }
 }
 
+#if !defined(__SSE4_2__) || defined(NO_HWCRC) || !defined(NO_M_DATA) || \
+  defined(_MSC_VER)
+// This function is implemented directly in ASM in string-data-*.S otherwise.
 NEVER_INLINE strhash_t StringData::hashHelper() const {
   assert(!isProxy());
   strhash_t h = hash_string_i_unsafe(data(), m_len);
@@ -850,6 +856,7 @@ NEVER_INLINE strhash_t StringData::hashHelper() const {
   m_hash |= h;
   return h;
 }
+#endif
 
 ///////////////////////////////////////////////////////////////////////////////
 // type conversions
@@ -900,7 +907,6 @@ bool StringData::isNumeric() const {
     case KindOfObject:
     case KindOfResource:
     case KindOfRef:
-    case KindOfClass:
       break;
   }
   not_reached();
@@ -931,7 +937,6 @@ bool StringData::isInteger() const {
     case KindOfObject:
     case KindOfResource:
     case KindOfRef:
-    case KindOfClass:
       break;
   }
   not_reached();
@@ -1051,8 +1056,12 @@ bool StringData::checkSane() const {
   static_assert(sizeof(StringData) == use_lowptr ? 16 : 24,
                 "StringData size changed---update assertion if you mean it");
   static_assert(size_t(MaxSize) <= size_t(INT_MAX), "Beware int wraparound");
-  static_assert(offsetof(StringData, m_hdr) == HeaderOffset, "");
-
+#ifdef NO_M_DATA
+  static_assert(sizeof(StringData) == SD_DATA, "");
+  static_assert(offsetof(StringData, m_len) == SD_LEN, "");
+  static_assert(offsetof(StringData, m_hash) == SD_HASH, "");
+#endif
+  assert(kindIsValid());
   assert(uint32_t(size()) <= MaxSize);
   assert(capacity() <= MaxSize);
   assert(size() >= 0);

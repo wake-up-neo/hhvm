@@ -25,7 +25,7 @@ let empty_file_info : FileInfo.t = {
   classes = [];
   typedefs = [];
   consts = [];
-  comments = [];
+  comments = Some [];
   consider_names_just_for_autoload = false;
 }
 
@@ -38,16 +38,21 @@ let legacy_php_file_info = ref (fun fn ->
  * errorl is a list of errors
  * error_files is Relative_path.Set.t of files that we failed to parse
  *)
-let really_parse (acc, errorl, error_files) fn =
-  let errorl', {Parser_hack.file_mode; comments; ast}, _ =
-    Errors.do_ begin fun () ->
-      Parser_hack.from_file fn
-    end
-  in
+let process_parse_result
+  ?(ide = false) ~quick (acc, errorl, error_files) fn res =
+  let errorl', {Parser_hack.file_mode; comments; ast; content;}, _ = res in
   Parsing_hooks.dispatch_file_parsed_hook fn ast;
+
   if file_mode <> None then begin
     let funs, classes, typedefs, consts = Ast_utils.get_defs ast in
-    Parser_heap.ParserHeap.write_through fn ast;
+    (* We only have to write to the disk heap on initialization, and only *)
+    (* if quick mode is on: otherwise Full Asts means the ParserHeap will *)
+    (* never use the DiskHeap, and the Ide services update DiskHeap directly *)
+    if quick then
+    File_heap.FileHeap.write_through fn (File_heap.Disk content);
+    let mode = if quick then Parser_heap.Decl else Parser_heap.Full in
+    Parser_heap.ParserHeap.write_through fn (ast, mode);
+    let comments = Some comments in
     let defs =
       {FileInfo.funs; classes; typedefs; consts; comments; file_mode;
        consider_names_just_for_autoload = false}
@@ -70,13 +75,21 @@ let really_parse (acc, errorl, error_files) fn =
     acc, errorl, error_files
   end
 
-let parse (acc, errorl, error_files) fn =
+let really_parse ~quick popt acc fn =
+  let res =
+    Errors.do_ begin fun () ->
+      Parser_hack.from_file ~quick popt fn
+    end
+  in
+  process_parse_result ~quick acc fn res
+
+let parse ?(quick = false) popt (acc, errorl, error_files) fn =
   (* Ugly hack... hack build requires that we keep JS files in our
    * files_info map, but we don't want to actually read them from disk
    * because we don't do anything with them. See also
    * ServerMain.Program.make_next_files *)
   if FindUtils.is_php (Relative_path.suffix fn) then
-    really_parse (acc, errorl, error_files) fn
+    really_parse ~quick popt (acc, errorl, error_files) fn
   else
     let info = empty_file_info in
     let acc = Relative_path.Map.add acc ~key:fn ~data:info in
@@ -90,79 +103,61 @@ let merge_parse
   Errors.merge status1 status2,
   Relative_path.Set.union files1 files2
 
-let parse_files acc fnl =
+let parse_files ?(quick = false) popt acc fnl =
   let parse =
     if !Utils.profile
     then (fun acc fn ->
       let t = Unix.gettimeofday () in
-      let result = parse acc fn in
+      let result = parse ~quick popt acc fn in
       let t' = Unix.gettimeofday () in
       let msg =
         Printf.sprintf "%f %s [parsing]" (t' -. t) (Relative_path.suffix fn) in
       !Utils.log msg;
       result)
-    else parse in
+    else parse ~quick popt in
   List.fold_left fnl ~init:acc ~f:parse
 
-let parse_parallel workers get_next =
+let parse_parallel ?(quick = false) workers get_next popt =
   MultiWorker.call
       workers
-      ~job:parse_files
+      ~job:(parse_files ~quick popt)
       ~neutral:neutral
       ~merge:merge_parse
       ~next:get_next
 
-(* sequentially parse IDE files opened by persistent connection *)
-let parse_sequential fn content (acc, errorl, error_files) =
-  let errorl', {Parser_hack.file_mode; comments; ast}, _ =
+let parse_sequential ~quick fn content acc popt =
+  let res =
     Errors.do_ begin fun () ->
-      Parser_hack.program fn content
+      (* DISGUSTING: so far, parser was used only for text files from disk, and
+      * those files are (or our reading primitives make them?) terminated with
+      * newline. Files that come from memory don't have this guarantee, and it
+      * breaks the parser in few places. Appending a sentinel newline doesn't
+      * change the parse tree, and is much easier than debugging the parser. *)
+      let length = String.length content in
+      let content =
+        if length > 0 && content.[length - 1] <> '\n' then
+          content ^ "\n"
+        else
+          content
+      in
+      Parser_hack.program popt fn content
     end
   in
-  Parsing_hooks.dispatch_file_parsed_hook fn ast;
-  if file_mode <> None then begin
-    let funs, classes, typedefs, consts = Ast_utils.get_defs ast in
-    (* AST won't be updated if there are parsing errors in IDE files *)
-    if (Errors.is_empty errorl')
-    then begin
-      let set = Relative_path.Set.add Relative_path.Set.empty fn in
-      Parser_heap.ParserHeap.remove_batch set;
-      Parser_heap.ParserHeap.write_through fn ast;
-    end;
-    let defs =
-      {FileInfo.funs; classes; typedefs; consts; comments; file_mode;
-       consider_names_just_for_autoload = false}
-    in
-    let acc = Relative_path.Map.add acc ~key:fn ~data:defs in
-    let errorl = Errors.merge errorl' errorl in
-    let error_files =
-      if Errors.is_empty errorl'
-      then error_files
-      else Relative_path.Set.add error_files fn
-    in
-    acc, errorl, error_files
-  end
-  else begin
-    let info = try !legacy_php_file_info fn with _ -> empty_file_info in
-    (* we also now keep in the file_info regular php files
-     * as we need at least their names in hack build
-     *)
-    let acc = Relative_path.Map.add acc ~key:fn ~data:info in
-    acc, errorl, error_files
-  end
+  process_parse_result ~ide:true ~quick acc fn res
 
 (*****************************************************************************)
 (* Main entry points *)
 (*****************************************************************************)
 
-let go workers files_map ~get_next =
-  let acc = parse_parallel workers get_next in
+let go ?(quick = false) workers files_set ~get_next popt =
+  let acc = parse_parallel ~quick workers get_next popt in
   let fast, errorl, failed_parsing =
-    Relative_path.Map.fold files_map ~init:acc ~f:(
-      fun fn content (acc, errorl, error_files) ->
+    Relative_path.Set.fold files_set ~init:acc ~f:(
+      fun fn (acc, errorl, error_files) ->
+        let content = File_heap.get_ide_contents_unsafe fn in
         if FindUtils.is_php (Relative_path.suffix fn) then
-          let content = File_content.get_content content in
-          parse_sequential fn content (acc, errorl, error_files)
+          parse_sequential ~quick fn content
+            (acc, errorl, error_files) popt
         else
           let info = empty_file_info in
           let acc = Relative_path.Map.add acc ~key:fn ~data:info in

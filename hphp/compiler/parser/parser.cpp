@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -297,13 +297,29 @@ void Parser::completeScope(BlockScopePtr inner) {
   }
 }
 
+static const std::string empty = "";
+static const std::string closure = "{closure}";
+
+const std::string& Parser::realFuncName() const {
+  for (auto i = m_funcContexts.size(); i--; ) {
+    auto const& ctx = m_funcContexts[i];
+    if (!ctx.name.empty()) return ctx.name;
+  }
+  return empty;
+}
+
+const std::string& Parser::funcName() const {
+  if (m_funcContexts.empty()) return empty;
+  auto const& name = m_funcContexts.back().name;
+  return name.empty() ? closure : name;
+}
+
 const std::string& Parser::clsName() const {
-  const static std::string empty = "";
-  return m_clsContexts.empty () ? empty : m_clsContexts.top().name;
+  return m_clsContexts.empty() ? empty : m_clsContexts.top().name;
 }
 
 bool Parser::inTrait() const {
-  return m_clsContexts.empty () ? false : m_clsContexts.top().type == T_TRAIT;
+  return m_clsContexts.empty() ? false : m_clsContexts.top().type == T_TRAIT;
 }
 
 LabelScopePtr Parser::getLabelScope() const {
@@ -548,9 +564,6 @@ void Parser::onCall(Token &out, bool dynamic, Token &name, Token &params,
           stripped == "func_get_args" ||
           stripped == "func_get_arg") {
         funcName = stripped;
-        if (m_funcContexts.size() > 0) {
-          m_funcContexts.back().hasCallToGetArgs = true;
-        }
       }
       // Auto import a few functions from the HH namespace
       // TODO(#4245628): merge those into m_fnAliasTable
@@ -573,7 +586,6 @@ void Parser::onCall(Token &out, bool dynamic, Token &name, Token &params,
            stripped == "objprof_get_strings" ||
            stripped == "objprof_get_data" ||
            stripped == "objprof_get_paths" ||
-           stripped == "objprof_start" ||
            stripped == "heapgraph_create" ||
            stripped == "heapgraph_stats" ||
            stripped == "heapgraph_foreach_node" ||
@@ -756,13 +768,16 @@ void Parser::onScalar(Token &out, int type, Token &scalar) {
     case T_METHOD_C:
       if (inTrait()) {
         exp = NEW_EXP(ScalarExpression, type, scalar->text(),
-                      clsName() + "::" + m_funcName);
+                      clsName() + "::" + realFuncName());
+      } else if (IsAnonymousClassName(clsName())) {
+        onUnaryOpExp(out, scalar, type, true);
+        return;
       } else {
         exp = NEW_EXP(ScalarExpression, type, scalar->text());
       }
       break;
     case T_CLASS_C:
-      if (inTrait()) {
+      if (inTrait() || IsAnonymousClassName(clsName())) {
         // Inside traits we already did the magic for static::class so lets
         // reuse that
         out->exp = NEW_EXP(SimpleFunctionCall, "get_class", true,
@@ -1011,22 +1026,6 @@ void Parser::onEmptyCollection(Token &out) {
   out->exp = NEW_EXP0(ExpressionList);
 }
 
-void
-Parser::onCollectionPair(Token &out, Token *pairs, Token *name, Token &value) {
-  if (!value->exp) return;
-
-  ExpressionPtr expList;
-  if (pairs && pairs->exp) {
-    expList = pairs->exp;
-  } else {
-    expList = NEW_EXP0(ExpressionList);
-  }
-  ExpressionPtr nameExp = name ? name->exp : ExpressionPtr();
-  expList->addElement(NEW_EXP(ArrayPairExpression, nameExp, value->exp, false,
-                              true));
-  out->exp = expList;
-}
-
 void Parser::onUserAttribute(Token &out, Token *attrList, Token &name,
                              Token &value) {
   ExpressionPtr expList;
@@ -1099,8 +1098,7 @@ void Parser::onFunctionStart(Token &name, bool doPushComment /* = true */) {
     pushComment();
   }
   newScope();
-  m_funcContexts.push_back(FunctionContext());
-  m_funcName = name.text();
+  m_funcContexts.push_back(FunctionContext(name.text()));
   m_staticVars.emplace_back();
 }
 
@@ -1207,7 +1205,7 @@ void Parser::prepareConstructorParameters(StatementListPtr stmts,
 std::string Parser::getFunctionName(FunctionType type, Token* name) {
   switch (type) {
     case FunctionType::Closure:
-      return newClosureName(m_namespace, clsName(), m_containingFuncName);
+      return newClosureName(m_namespace, clsName(), realFuncName());
     case FunctionType::Function:
       assert(name);
       if (!m_lambdaMode) {
@@ -1288,16 +1286,12 @@ StatementPtr Parser::onFunctionHelper(FunctionType type,
 
     func->onParse(m_ar, m_file);
     completeScope(func->getFunctionScope());
-    if (func->ignored()) {
-      return NEW_STMT0(StatementList);
-    }
     mth = func;
   }
 
   // check and set generator/async flags
   FunctionContext funcContext = m_funcContexts.back();
   checkFunctionContext(funcName, funcContext, modifiersExp, ref->num());
-  mth->setHasCallToGetArgs(funcContext.hasCallToGetArgs);
   mth->setMayCallSetFrameMetadata(funcContext.mayCallSetFrameMetadata);
   mth->getFunctionScope()->setGenerator(funcContext.isGenerator);
   mth->getFunctionScope()->setAsync(modifiersExp->isAsync());
@@ -1332,11 +1326,6 @@ void Parser::onVariadicParam(Token &out, Token *params,
                 "; variadic params with type constraints are not supported"
                 " in non-Hack files",
                 var.text().c_str(), type.text().c_str());
-  }
-  if (ref) {
-    PARSE_ERROR("Parameter $%s is both variadic and by reference"
-                "; this is unsupported",
-                var.text().c_str());
   }
 
   ExpressionPtr expList;
@@ -1503,7 +1492,6 @@ StatementPtr Parser::onClassHelper(int type, const std::string &name,
     auto param =
         dynamic_pointer_cast<ParameterExpression>((*promote)[i]);
     TokenID mod = param->getModifier();
-    std::string name = param->getName();
     std::string type = param->hasUserType() ? param->getUserTypeHint() : "";
 
     // create the class variable and change the location to
@@ -1513,7 +1501,7 @@ StatementPtr Parser::onClassHelper(int type, const std::string &name,
       BlockScopePtr(), range);
     modifier->add(mod);
     SimpleVariablePtr svar = std::make_shared<SimpleVariable>(
-      BlockScopePtr(), range, name);
+      BlockScopePtr(), range, param->getName());
     ExpressionListPtr expList = std::make_shared<ExpressionList>(
       BlockScopePtr(), range);
     expList->addElement(svar);
@@ -1540,8 +1528,10 @@ void Parser::onClassExpressionStart() {
   pushClass(false);
   pushComment();
   newScope();
-  auto name = newAnonClassName("class@anonymous", m_namespace, clsName(),
-      m_containingFuncName);
+  auto name = newAnonClassName("class@anonymous",
+                               m_namespace,
+                               clsName(),
+                               realFuncName());
   m_clsContexts.push(ClassContext(T_CLASS, name));
 }
 
@@ -1948,7 +1938,7 @@ void Parser::setIsGenerator() {
     PARSE_ERROR("Yield can only be used inside a function");
   }
 
-  if (!canBeAsyncOrGenerator(m_funcName, clsName())) {
+  if (!canBeAsyncOrGenerator(funcName(), clsName())) {
     invalidYield();
     PARSE_ERROR("'yield' is not allowed in constructor, destructor, or "
                 "magic methods");
@@ -1992,7 +1982,7 @@ void Parser::setIsAsync() {
     PARSE_ERROR("'await' can only be used inside a function");
   }
 
-  if (!canBeAsyncOrGenerator(m_funcName, clsName())) {
+  if (!canBeAsyncOrGenerator(funcName(), clsName())) {
     invalidAwait();
     PARSE_ERROR("'await' is not allowed in constructors, destructors, or "
                     "magic methods.");
@@ -2162,11 +2152,6 @@ void Parser::onThrow(Token &out, Token &expr) {
 }
 
 void Parser::onClosureStart(Token &name) {
-  if (!m_funcName.empty()) {
-    m_containingFuncName = m_funcName;
-  } else {
-    // pseudoMain
-  }
   onFunctionStart(name, true);
 }
 
@@ -2366,10 +2351,14 @@ void Parser::onClsCnsShapeField(Token& out,
   out.typeAnnotation->setClsCnsShapeField();
 }
 
-void Parser::onShape(Token &out, const Token &shapeFieldsList) {
+void Parser::onShape(
+    Token &out, const Token &shapeFieldsList, bool terminatedWithEllipsis) {
   out.typeAnnotation = std::make_shared<TypeAnnotation>(
     "array", shapeFieldsList.typeAnnotation);
   out.typeAnnotation->setShape();
+  if (terminatedWithEllipsis) {
+    out.typeAnnotation->setAllowsUnknownFields();
+  }
 }
 
 void Parser::onTypeSpecialization(Token& type, char specialization) {
@@ -2394,6 +2383,13 @@ void Parser::onTypeSpecialization(Token& type, char specialization) {
       type.typeAnnotation->setTypeAccess();
       break;
     }
+  }
+}
+
+void Parser::onShapeFieldSpecialization(
+    Token& shapeField, char specialization) {
+  if (specialization == '?') {
+    shapeField.typeAnnotation->setOptionalShapeField();
   }
 }
 

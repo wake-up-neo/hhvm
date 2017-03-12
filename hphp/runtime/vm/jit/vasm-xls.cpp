@@ -642,16 +642,26 @@ jit::vector<LiveRange> computePositions(Vunit& unit,
 /*
  * Return the effect this instruction has on the value of `sp'.
  *
- * Asserts if an instruction mutates `sp' in an untrackable way.
+ * Asserts (if `do_assert' is set) if an instruction mutates `sp' in an
+ * untrackable way.
  */
-int spEffect(const Vunit& unit, const Vinstr& inst, PhysReg sp) {
+int spEffect(const Vunit& unit, const Vinstr& inst, PhysReg sp,
+             bool do_assert = debug) {
   switch (inst.op) {
     case Vinstr::push:
+    case Vinstr::pushf:
     case Vinstr::pushm:
       return -8;
+    case Vinstr::pushp:
+    case Vinstr::pushpm:
+      return -16;
     case Vinstr::pop:
+    case Vinstr::popf:
     case Vinstr::popm:
       return 8;
+    case Vinstr::popp:
+    case Vinstr::poppm:
+      return 16;
     case Vinstr::lea: {
       auto& i = inst.lea_;
       if (i.d == Vreg64(sp)) {
@@ -661,7 +671,7 @@ int spEffect(const Vunit& unit, const Vinstr& inst, PhysReg sp) {
       return 0;
     }
     default:
-      if (debug) {
+      if (do_assert) {
         visitDefs(unit, inst, [&] (Vreg r) { assertx(r != sp); });
       }
       return 0;
@@ -2396,19 +2406,11 @@ void optimize(Vunit& unit, ldimmq& inst, Vlabel b, size_t i, F sf_live) {
   optimize_ldimm<xorq>(unit, inst, b, i, sf_live);
 }
 
-template <typename F>
+template<typename F>
 void optimize(Vunit& unit, lea& inst, Vlabel b, size_t i, F sf_live) {
   if (!sf_live() && inst.d == rsp()) {
     assertx(inst.s.base == inst.d && !inst.s.index.isValid());
     unit.blocks[b].code[i] = addqi{inst.s.disp, inst.d, inst.d, RegSF{0}};
-  }
-}
-
-template <typename F>
-void optimize(Vunit& unit, andqi& inst, Vlabel b, size_t i, F sf_live) {
-  if (!sf_live() && inst.s0.q() == 0xff) {
-    Vreg8 src = Reg8(inst.s1);
-    unit.blocks[b].code[i] = movzbq{src, inst.d};
   }
 }
 
@@ -2717,7 +2719,7 @@ struct SpillStates {
  */
 bool instrNeedsSpill(const Vunit& unit, const Vinstr& inst, PhysReg sp) {
   // Implicit sp input/output.
-  if (inst.op == Vinstr::push || inst.op == Vinstr::pop) return true;
+  if (spEffect(unit, inst, sp, false) != 0) return true;
 
   auto foundSp = false;
   visitDefs(unit, inst, [&] (Vreg r) { if (r == sp) foundSp = true; });
@@ -2907,7 +2909,7 @@ void allocateSpillSpace(Vunit& unit, const VxlsContext& ctx,
     spi.used_spill_slots += extra;
   }
   if (spi.used_spill_slots == 0) return;
-  Timer t(Timer::vasm_xls_spill);
+  Timer t(Timer::vasm_xls_spill, unit.log_entry);
   always_assert(ctx.abi.canSpill);
 
   // Make sure we always allocate spill space in multiples of 16 bytes, to keep
@@ -3076,10 +3078,10 @@ const char* draw(Variable* var, unsigned pos, Mode m, Pred covers) {
   static const char* bottom[] = { u8"\u2577", u8"\u257B" };
   static const char* both[]   = { u8"\u2502", u8"\u2503" };
   static const char* empty[]  = { " ", " " };
-  auto f = [&](unsigned pos) {
+  auto f = [&](unsigned position) {
     if (!var) return false;
     for (auto ivl = var->ivl(); ivl; ivl = ivl->next) {
-      if (covers(ivl, pos)) return true;
+      if (covers(ivl, position)) return true;
     }
     return false;
   };
@@ -3160,16 +3162,15 @@ DEBUG_ONLY void printVariables(const char* caption,
 ///////////////////////////////////////////////////////////////////////////////
 
 struct XLSStats {
-  size_t instrs{0};
-  size_t moves{0};
-  size_t loads{0};
-  size_t spills{0};
-  size_t consts{0};
-  size_t total_copies{0};
+  size_t instrs{0}; // total instruction count after xls
+  size_t moves{0}; // number of movs inserted
+  size_t loads{0}; // number of loads inserted
+  size_t spills{0}; // number of spill-stores inserted
+  size_t consts{0}; // number of const-loads inserted
+  size_t total_copies{0}; // moves+loads+spills
 };
 
-DEBUG_ONLY void dumpStats(const Vunit& unit,
-                          const ResolutionPlan& resolution) {
+void dumpStats(const Vunit& unit, const ResolutionPlan& resolution) {
   XLSStats stats;
 
   for (auto const& blk : unit.blocks) {
@@ -3207,13 +3208,21 @@ DEBUG_ONLY void dumpStats(const Vunit& unit,
     stats.instrs, stats.moves, stats.loads, stats.spills,
     stats.consts, stats.total_copies
   );
+
+  if (auto entry = unit.log_entry) {
+    entry->setInt("xls_instrs", stats.instrs);
+    entry->setInt("xls_moves", stats.moves);
+    entry->setInt("xls_loads", stats.loads);
+    entry->setInt("xls_spills", stats.spills);
+    entry->setInt("xls_consts", stats.consts);
+  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 }
 
 void allocateRegisters(Vunit& unit, const Abi& abi) {
-  Timer timer(Timer::vasm_xls);
+  Timer timer(Timer::vasm_xls, unit.log_entry);
   auto const counter = s_counter.fetch_add(1, std::memory_order_relaxed);
 
   splitCriticalEdges(unit);
@@ -3253,9 +3262,15 @@ void allocateRegisters(Vunit& unit, const Abi& abi) {
 
   // Insert instructions for creating spill space.
   allocateSpillSpace(unit, ctx, spill_info);
+  if (auto entry = unit.log_entry) {
+    entry->setInt("num_spills", spill_info.num_spills);
+    entry->setInt("used_spill_slots", spill_info.used_spill_slots);
+  }
 
   printUnit(kVasmRegAllocLevel, "after vasm-xls", unit);
-  ONTRACE_MOD(Trace::xls_stats, 1, dumpStats(unit, resolution));
+  if (HPHP::Trace::moduleEnabled(Trace::xls_stats, 1) || unit.log_entry) {
+    dumpStats(unit, resolution);
+  }
 
   // Free the variable metadata.
   for (auto var : variables) {

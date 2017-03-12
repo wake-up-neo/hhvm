@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -219,7 +219,7 @@ bool HHVM_FUNCTION(rename,
                    const String& newname,
                    const Variant& context = uninit_null());
 int64_t HHVM_FUNCTION(umask,
-                      const Variant& mask = null_variant);
+                      const Variant& mask = uninit_variant);
 bool HHVM_FUNCTION(unlink,
                    const String& filename,
                    const Variant& context = uninit_null());
@@ -291,7 +291,7 @@ Variant HHVM_FUNCTION(lstat,
                       const String& filename);
 void HHVM_FUNCTION(clearstatcache,
                    bool clear_realpath_cache = false,
-                   const Variant& filename = null_variant);
+                   const Variant& filename = uninit_variant);
 Variant HHVM_FUNCTION(readlink_internal,
                       const String& path,
                       bool warning_compliance);
@@ -333,15 +333,15 @@ Variant HHVM_FUNCTION(opendir,
                       const String& path,
                       const Variant& context = uninit_null());
 Variant HHVM_FUNCTION(readdir,
-                      const Variant& dir_handle = null_variant);
+                      const Variant& dir_handle = uninit_variant);
 void HHVM_FUNCTION(rewinddir,
-                   const Variant& dir_handle = null_variant);
+                   const Variant& dir_handle = uninit_variant);
 Variant HHVM_FUNCTION(scandir,
                       const String& directory,
                       bool descending = false,
                       const Variant& context = uninit_null());
 void HHVM_FUNCTION(closedir,
-                   const Variant& dir_handle = null_variant);
+                   const Variant& dir_handle = uninit_variant);
 
 ///////////////////////////////////////////////////////////////////////////////
 }

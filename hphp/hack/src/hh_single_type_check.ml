@@ -9,7 +9,7 @@
  *)
 
 open Core
-open Coverage_level
+open Ide_api_types
 open String_utils
 open Sys_utils
 
@@ -20,14 +20,14 @@ module TNBody       = Typing_naming_body
 (*****************************************************************************)
 
 type mode =
-  | Ai of Ai_options.prepared
+  | Ai of Ai_options.t
   | Autocomplete
   | Color
   | Coverage
   | Dump_symbol_info
   | Dump_inheritance
-  | Dump_tast
   | Errors
+  | AllErrors
   | Lint
   | Suggest
   | Dump_deps
@@ -37,6 +37,7 @@ type mode =
   | Find_refs of int * int
   | Symbol_definition_by_id of string
   | Highlight_refs of int * int
+  | Decl_compare
 
 type options = {
   filename : string;
@@ -111,6 +112,7 @@ let builtins =
   "interface Stringish {public function __toString(): string {}}\n"^
   "interface XHPChild {}\n"^
   "function hh_show($val) {}\n"^
+  "function hh_show_env() {}\n"^
   "interface Countable { public function count(): int; }\n"^
   "interface AsyncIterator<+Tv> {}\n"^
   "interface AsyncKeyedIterator<+Tk, +Tv> extends AsyncIterator<Tv> {}\n"^
@@ -202,7 +204,11 @@ let builtins =
   "function dict<Tk, Tv>(KeyedTraversable<Tk, Tv> $arr): dict<Tk, Tv> {}\n"^
   "abstract final class keyset<+T as arraykey> implements Indexish<T, T> {}\n"^
   "abstract final class vec<+Tv> implements Indexish<int, Tv> {}\n"^
-  "function meth_caller(string $cls_name, string $meth_name);\n"
+  "function meth_caller(string $cls_name, string $meth_name);\n"^
+  "namespace HH\\Asio {"^
+  "  function va(...$args);\n"^
+  "}\n"^
+  "function hh_log_level(int $level) {}\n"
 
 (*****************************************************************************)
 (* Helpers *)
@@ -214,7 +220,8 @@ let die str =
   close_out oc;
   exit 2
 
-let error l = output_string stderr (Errors.to_string (Errors.to_absolute l))
+let error ?(indent=false) l =
+  output_string stderr (Errors.to_string ~indent (Errors.to_absolute l))
 
 let parse_options () =
   let fn_ref = ref None in
@@ -230,72 +237,76 @@ let parse_options () =
   let options = [
     "--ai",
       Arg.String (set_ai),
-      "Run the abstract interpreter";
+    " Run the abstract interpreter";
+    "--all-errors",
+      Arg.Unit (set_mode AllErrors),
+      " List all errors not just the first one";
     "--auto-complete",
       Arg.Unit (set_mode Autocomplete),
-      "Produce autocomplete suggestions";
+      " Produce autocomplete suggestions";
     "--colour",
       Arg.Unit (set_mode Color),
-      "Produce colour output";
+      " Produce colour output";
     "--color",
       Arg.Unit (set_mode Color),
-      "Produce color output";
+      " Produce color output";
     "--coverage",
       Arg.Unit (set_mode Coverage),
-      "Produce coverage output";
+      " Produce coverage output";
     "--dump-symbol-info",
       Arg.Unit (set_mode Dump_symbol_info),
-      "Dump all symbol information";
-    "--dump-tast",
-      Arg.Unit (set_mode Dump_tast),
-      "Check for errors then dump the Typed AST";
+      " Dump all symbol information";
     "--lint",
       Arg.Unit (set_mode Lint),
-      "Produce lint errors";
+      " Produce lint errors";
     "--suggest",
       Arg.Unit (set_mode Suggest),
-      "Suggest missing typehints";
+      " Suggest missing typehints";
     "--no-builtins",
       Arg.Set no_builtins,
-      "Don't use builtins (e.g. ConstSet)";
+      " Don't use builtins (e.g. ConstSet)";
     "--dump-deps",
       Arg.Unit (set_mode Dump_deps),
-      "Print dependencies";
+      " Print dependencies";
     "--dump-inheritance",
       Arg.Unit (set_mode Dump_inheritance),
-      "Print inheritance";
+      " Print inheritance";
     "--identify-symbol",
       Arg.Tuple ([
         Arg.Int (fun x -> line := x);
         Arg.Int (fun column -> set_mode (Identify_symbol (!line, column)) ());
       ]),
-      "Show info about symbol at given line and column";
+      "<pos> Show info about symbol at given line and column";
     "--symbol-by-id",
       Arg.String (fun s -> set_mode (Symbol_definition_by_id s) ()),
-      "Show info about symbol with given id";
+      "<id> Show info about symbol with given id";
     "--find-local",
       Arg.Tuple ([
         Arg.Int (fun x -> line := x);
         Arg.Int (fun column -> set_mode (Find_local (!line, column)) ());
       ]),
-      "Find all usages of local at given line and column";
+      "<pos> Find all usages of local at given line and column";
     "--outline",
       Arg.Unit (set_mode Outline),
-      "Print file outline";
+      " Print file outline";
     "--find-refs",
       Arg.Tuple ([
         Arg.Int (fun x -> line := x);
         Arg.Int (fun column -> set_mode (Find_refs (!line, column)) ());
       ]),
-      "Find all usages of a symbol at given line and column";
+      "<pos> Find all usages of a symbol at given line and column";
     "--highlight-refs",
       Arg.Tuple ([
         Arg.Int (fun x -> line := x);
         Arg.Int (fun column -> set_mode (Highlight_refs (!line, column)) ());
       ]),
-      "Highlight all usages of a symbol at given line and column";
+      "<pos> Highlight all usages of a symbol at given line and column";
+    "--decl-compare",
+      Arg.Unit (set_mode Decl_compare),
+      " Test comparison functions used in incremental mode on declarations" ^
+      " in provided file";
   ] in
-  let options = Arg.align options in
+  let options = Arg.align ~limit:25 options in
   Arg.parse options (fun fn -> fn_ref := Some fn) usage;
   let fn = match !fn_ref with
     | Some fn -> fn
@@ -305,7 +316,7 @@ let parse_options () =
     no_builtins = !no_builtins;
   }
 
-let suggest_and_print fn { FileInfo.funs; classes; typedefs; consts; _ } =
+let suggest_and_print tcopt fn { FileInfo.funs; classes; typedefs; consts; _ } =
   let make_set =
     List.fold_left ~f: (fun acc (_, x) -> SSet.add x acc) ~init: SSet.empty in
   let n_funs = make_set funs in
@@ -314,14 +325,14 @@ let suggest_and_print fn { FileInfo.funs; classes; typedefs; consts; _ } =
   let n_consts = make_set consts in
   let names = { FileInfo.n_funs; n_classes; n_types; n_consts } in
   let fast = Relative_path.Map.singleton fn names in
-  let patch_map = Typing_suggest_service.go None fast in
+  let patch_map = Typing_suggest_service.go None fast tcopt in
   match Relative_path.Map.get patch_map fn with
     | None -> ()
     | Some l -> begin
       (* Sort so that the unit tests come out in a consistent order, normally
        * doesn't matter. *)
       let l = List.sort ~cmp: (fun (x, _, _) (y, _, _) -> x - y) l in
-      List.iter ~f: (ServerConvert.print_patch fn) l
+      List.iter ~f: (ServerConvert.print_patch fn tcopt) l
     end
 
 (* This allows one to fake having multiple files in one file. This
@@ -395,71 +406,155 @@ let print_colored fn type_acc =
 
 let print_coverage fn type_acc =
   let counts = ServerCoverageMetric.count_exprs fn type_acc in
-  ClientCoverageMetric.go ~json:false (Some (Leaf counts))
+  ClientCoverageMetric.go ~json:false (Some (Coverage_level.Leaf counts))
 
-let print_symbol (symbol, definition) =
-  let open SymbolOccurrence in
-  Printf.printf "%s\n%s\n%s\n"
-    symbol.name
-    begin match symbol.type_ with
-    | Class -> "Class"
-    | Function -> "Function"
-    | Method _ -> "Method"
-    | LocalVar -> "LocalVar"
-    | Property _ -> "Property"
-    | ClassConst _ -> "ClassConst"
-    | Typeconst _ -> "Typeconst"
-    | GConst -> "GlobalConst"
-    end
-    (Pos.string_no_file symbol.pos);
-  Printf.printf "defined: %s\n"
-    (Option.value_map definition
-      ~f:(fun x -> Pos.string_no_file x.SymbolDefinition.pos)
-      ~default:"None");
-  Printf.printf "definition span: %s\n"
-    (Option.value_map definition
-      ~f:(fun x -> Pos.multiline_string_no_file x.SymbolDefinition.span)
-      ~default:"None")
-
-let check_errors tcopt errors files_info =
+let check_errors opts errors files_info =
   Relative_path.Map.fold files_info ~f:begin fun fn fileinfo errors ->
     errors @ Errors.get_error_list
-        (Typing_check_utils.check_defs tcopt fn fileinfo)
+        (Typing_check_utils.check_defs opts fn fileinfo)
   end ~init:errors
 
-let with_named_body tcopt n_fun =
+let with_named_body opts n_fun =
   (** In the naming heap, the function bodies aren't actually named yet, so
    * we need to invoke naming here.
    * See also docs in Naming.Make. *)
-  let n_f_body = TNBody.func_body tcopt n_fun in
+  let n_f_body = TNBody.func_body opts n_fun in
   { n_fun with Nast.f_body = Nast.NamedBody n_f_body }
 
-let n_fun_fold tcopt fn acc (_, fun_name) =
-  match Parser_heap.find_fun_in_file fn fun_name with
+let n_fun_fold opts fn acc (_, fun_name) =
+  match Parser_heap.find_fun_in_file ~full:true opts fn fun_name with
   | None -> acc
   | Some f ->
-    let n_fun = Naming.fun_ tcopt f in
-    (with_named_body tcopt n_fun) :: acc
+    let n_fun = Naming.fun_ opts f in
+    (with_named_body opts n_fun) :: acc
 
 let n_class_fold _tcopt _fn acc _class_name = acc
 let n_type_fold _tcopt _fn acc _type_name = acc
 let n_const_fold _tcopt _fn acc _const_name = acc
 
 (** Load the Nast for the file from the Nast heaps. *)
-let nast_for_file tcopt fn
+let nast_for_file opts fn
 { FileInfo.funs; classes; typedefs; consts; _} =
-  List.fold_left funs ~init:[] ~f:(n_fun_fold tcopt fn),
-  List.fold_left classes ~init:[] ~f:(n_class_fold tcopt fn),
-  List.fold_left typedefs ~init:[] ~f:(n_type_fold tcopt fn),
-  List.fold_left consts ~init:[] ~f:(n_const_fold tcopt fn)
+  List.fold_left funs ~init:[] ~f:(n_fun_fold opts fn),
+  List.fold_left classes ~init:[] ~f:(n_class_fold opts fn),
+  List.fold_left typedefs ~init:[] ~f:(n_type_fold opts fn),
+  List.fold_left consts ~init:[] ~f:(n_const_fold opts fn)
 
-let handle_mode mode filename tcopt files_contents files_info errors =
+let parse_name_and_decl popt files_contents tcopt =
+  Errors.do_ begin fun () ->
+    let parsed_files =
+      Relative_path.Map.mapi
+       (Parser_hack.program popt) files_contents in
+
+    let files_info =
+      Relative_path.Map.mapi begin fun fn parsed_file ->
+        let {Parser_hack.file_mode; comments; ast; _} = parsed_file in
+        Parser_heap.ParserHeap.add fn (ast, Parser_heap.Full);
+        let funs, classes, typedefs, consts = Ast_utils.get_defs ast in
+        { FileInfo.
+          file_mode; funs; classes; typedefs; consts; comments = Some comments;
+          consider_names_just_for_autoload = false }
+      end parsed_files in
+
+    Relative_path.Map.iter files_info begin fun fn fileinfo ->
+      let {FileInfo.funs; classes; typedefs; consts; _} = fileinfo in
+      NamingGlobal.make_env popt ~funs ~classes ~typedefs ~consts
+    end;
+
+    Relative_path.Map.iter files_info begin fun fn _ ->
+      Decl.make_env tcopt fn
+    end;
+
+    files_info
+  end
+
+let add_newline contents =
+  let x = String.index contents '\n' in
+  String.((sub contents 0 x) ^ "\n" ^ (sub contents x ((length contents) - x)))
+
+let get_decls defs =
+  SSet.fold (fun x acc -> (Decl_heap.Typedefs.find_unsafe x)::acc)
+  defs.FileInfo.n_types
+  [],
+  SSet.fold (fun x acc -> (Decl_heap.Funs.find_unsafe x)::acc)
+  defs.FileInfo.n_funs
+  [],
+  SSet.fold (fun x acc -> (Decl_heap.Classes.find_unsafe x)::acc)
+  defs.FileInfo.n_classes
+  []
+
+let fail_comparison s =
+  raise (Failure (
+    (Printf.sprintf "Comparing %s failed!\n" s) ^
+    "It's likely that you added new positions to decl types " ^
+    "without updating Decl_pos_utils.NormalizeSig\n"
+  ))
+
+let compare_typedefs t1 t2 =
+  let t1 = Decl_pos_utils.NormalizeSig.typedef t1 in
+  let t2 = Decl_pos_utils.NormalizeSig.typedef t2 in
+  if t1 <> t2 then fail_comparison "typedefs"
+
+let compare_funs f1 f2 =
+  let f1 = Decl_pos_utils.NormalizeSig.fun_type f1 in
+  let f2 = Decl_pos_utils.NormalizeSig.fun_type f2 in
+  if f1 <> f2 then fail_comparison "funs"
+
+let compare_classes c1 c2 =
+  if Decl_compare.class_big_diff c1 c2 then fail_comparison "class_big_diff";
+
+  let c1 = Decl_pos_utils.NormalizeSig.class_type c1 in
+  let c2 = Decl_pos_utils.NormalizeSig.class_type c2 in
+  let _, is_unchanged =
+    Decl_compare.ClassDiff.compare c1.Decl_defs.dc_name c1 c2 in
+  if not is_unchanged then fail_comparison "ClassDiff";
+
+  let _, is_unchanged = Decl_compare.ClassEltDiff.compare c1 c2 in
+  if is_unchanged = `Changed then fail_comparison "ClassEltDiff"
+
+let test_decl_compare filename popt files_contents tcopt files_info =
+  (* skip some edge cases that we don't handle now... ugly! *)
+  if (Relative_path.suffix filename) = "capitalization3.php" then () else
+  if (Relative_path.suffix filename) = "capitalization4.php" then () else
+  (* do not analyze builtins over and over *)
+  let files_info = Relative_path.Map.remove files_info builtins_filename in
+
+  let files = Relative_path.Map.fold files_info
+    ~f:(fun k _ acc -> Relative_path.Set.add acc k)
+    ~init:Relative_path.Set.empty
+  in
+
+  let defs = Relative_path.Map.fold files_info ~f:begin fun _ names1 names2 ->
+      FileInfo.(merge_names (simplify names1) names2)
+    end ~init:FileInfo.empty_names
+  in
+
+  let typedefs1, funs1, classes1 = get_decls defs in
+  (* For the purpose of this test, we can ignore other heaps *)
+  Parser_heap.ParserHeap.remove_batch files;
+
+  (* We need to oldify, not remove, for ClassEltDiff to work *)
+  Decl_redecl_service.oldify_type_decl
+    None files_info ~bucket_size:1 FileInfo.empty_names defs
+      ~collect_garbage:false;
+
+  let files_contents = Relative_path.Map.map files_contents ~f:add_newline in
+  let _, _, _ = parse_name_and_decl popt files_contents tcopt in
+
+  let typedefs2, funs2, classes2 = get_decls defs in
+
+  List.iter2_exn typedefs1 typedefs2 compare_typedefs;
+  List.iter2_exn funs1 funs2 compare_funs;
+  List.iter2_exn classes1 classes2 compare_classes;
+  ()
+
+let handle_mode mode filename opts popt files_contents files_info errors =
   match mode with
   | Ai _ -> ()
   | Autocomplete ->
       let file = cat (Relative_path.to_absolute filename) in
       let result =
-        ServerAutoComplete.auto_complete tcopt file in
+        ServerAutoComplete.auto_complete opts file in
       List.iter ~f: begin fun r ->
         let open AutocompleteService in
         Printf.printf "%s %s\n" r.res_name r.res_ty
@@ -468,7 +563,7 @@ let handle_mode mode filename tcopt files_contents files_info errors =
       Relative_path.Map.iter files_info begin fun fn fileinfo ->
         if fn = builtins_filename then () else begin
           let result = ServerColorFile.get_level_list begin fun () ->
-            ignore @@ Typing_check_utils.check_defs tcopt fn fileinfo;
+            ignore @@ Typing_check_utils.check_defs opts fn fileinfo;
             fn
           end in
           print_colored fn result;
@@ -477,7 +572,8 @@ let handle_mode mode filename tcopt files_contents files_info errors =
   | Coverage ->
       Relative_path.Map.iter files_info begin fun fn fileinfo ->
         if fn = builtins_filename then () else begin
-          let type_acc = ServerCoverageMetric.accumulate_types fn fileinfo in
+          let type_acc =
+            ServerCoverageMetric.accumulate_types fn fileinfo opts in
           print_coverage fn type_acc;
         end
       end
@@ -485,7 +581,7 @@ let handle_mode mode filename tcopt files_contents files_info errors =
       begin match Relative_path.Map.get files_info filename with
         | Some fileinfo ->
             let raw_result =
-              SymbolInfoService.helper [] [(filename, fileinfo)] in
+              SymbolInfoService.helper opts [] [(filename, fileinfo)] in
             let result = SymbolInfoService.format_result raw_result in
             let result_json = ClientSymbolInfo.to_json result in
             print_endline (Hh_json.json_to_multiline result_json)
@@ -495,7 +591,7 @@ let handle_mode mode filename tcopt files_contents files_info errors =
       let lint_errors = Relative_path.Map.fold files_contents ~init:[]
         ~f:begin fun fn content lint_errors ->
           lint_errors @ fst (Lint.do_ begin fun () ->
-            Linting_service.lint tcopt fn content
+            Linting_service.lint opts fn content
           end)
         end in
       if lint_errors <> []
@@ -510,7 +606,7 @@ let handle_mode mode filename tcopt files_contents files_info errors =
       else Printf.printf "No lint errors\n"
   | Dump_deps ->
     Relative_path.Map.iter files_info begin fun fn fileinfo ->
-      ignore @@ Typing_check_utils.check_defs tcopt fn fileinfo
+      ignore @@ Typing_check_utils.check_defs opts fn fileinfo
     end;
     Typing_deps.dump_deps stdout
   | Dump_inheritance ->
@@ -520,7 +616,7 @@ let handle_mode mode filename tcopt files_contents files_info errors =
         List.iter fileinfo.FileInfo.classes begin fun (_p, class_) ->
           Printf.printf "Ancestors of %s and their overridden methods:\n"
             class_;
-          let ancestors = MethodJumps.get_inheritance tcopt
+          let ancestors = MethodJumps.get_inheritance opts
             class_ ~find_children:false files_info None in
           ClientMethodJumps.print_readable ancestors ~find_children:false;
           Printf.printf "\n";
@@ -529,7 +625,7 @@ let handle_mode mode filename tcopt files_contents files_info errors =
         List.iter fileinfo.FileInfo.classes begin fun (_p, class_) ->
           Printf.printf "Children of %s and the methods they override:\n"
             class_;
-          let children = MethodJumps.get_inheritance tcopt
+          let children = MethodJumps.get_inheritance opts
             class_ ~find_children:true files_info None in
           ClientMethodJumps.print_readable children ~find_children:true;
           Printf.printf "\n";
@@ -538,116 +634,83 @@ let handle_mode mode filename tcopt files_contents files_info errors =
     end;
   | Identify_symbol (line, column) ->
     let file = cat (Relative_path.to_absolute filename) in
-    let result = ServerIdentifyFunction.go file line column tcopt in
-    begin match result with
+    begin match ServerIdentifyFunction.go_absolute file line column opts with
       | [] -> print_endline "None"
-      | _ -> List.iter result print_symbol
+      | result -> ClientGetDefinition.print_readable ~short_pos:true result
     end
   | Symbol_definition_by_id id ->
-    let result = ServerSymbolDefinition.from_symbol_id tcopt id in
+    let result = ServerSymbolDefinition.from_symbol_id opts id in
     begin match result with
       | None -> print_endline "None"
-      | Some s -> FileOutline.print [SymbolDefinition.to_absolute s]
+      | Some s ->
+        FileOutline.print ~short_pos:true [SymbolDefinition.to_absolute s]
     end
   | Find_local (line, column) ->
     let file = cat (Relative_path.to_absolute filename) in
-    let result = ServerFindLocals.go file line column in
+    let result = ServerFindLocals.go popt file line column in
     let print pos = Printf.printf "%s\n" (Pos.string_no_file pos) in
     List.iter result print
   | Outline ->
     let file = cat (Relative_path.to_absolute filename) in
-    let results = FileOutline.outline file in
-    FileOutline.print results;
+    let results = FileOutline.outline popt file in
+    FileOutline.print ~short_pos:true results
   | Find_refs (line, column) ->
     Typing_deps.update_files files_info;
     let genv = ServerEnvBuild.default_genv in
     let env = {(ServerEnvBuild.make_env genv.ServerEnv.config) with
       ServerEnv.files_info;
-      ServerEnv.tcopt;
+      ServerEnv.tcopt = opts;
     } in
     let file = cat (Relative_path.to_absolute filename) in
     let results = ServerFindRefs.go_from_file (file, line, column) genv env in
-    FindRefsService.print results;
+    ClientFindRefs.print_ide_readable results;
   | Highlight_refs (line, column) ->
     let file = cat (Relative_path.to_absolute filename) in
-    let results = ServerHighlightRefs.go (file, line, column) tcopt  in
+    let results = ServerHighlightRefs.go (file, line, column) opts  in
     ClientHighlightRefs.go results ~output_json:false;
   | Suggest
   | Errors ->
-      let errors = check_errors tcopt errors files_info in
+      let errors = check_errors opts errors files_info in
       if mode = Suggest
-      then Relative_path.Map.iter files_info suggest_and_print;
+      then Relative_path.Map.iter files_info (suggest_and_print opts);
       if errors <> []
       then (error (List.hd_exn errors); exit 2)
       else Printf.printf "No errors\n"
-  | Dump_tast ->
-      let pos_ty_map = ref Pos.Map.empty in
-      Typing_hooks.attach_infer_ty_hook (Typed_ast.save_ty pos_ty_map);
-      let errors = check_errors tcopt errors files_info in
-      Typing_hooks.remove_all_hooks ();
-      let nasts = Relative_path.Map.fold files_info
-        ~f:begin fun fn fileinfo nasts ->
-          Relative_path.Map.add nasts ~key:fn
-          ~data:(nast_for_file tcopt fn fileinfo)
-        end ~init:Relative_path.Map.empty
-      in
+  | AllErrors ->
+      let errors = check_errors opts errors files_info in
       if errors <> []
-      then (error (List.hd_exn errors); exit 2);
-      Relative_path.Map.iter nasts ~f:begin fun fn nast ->
-        if (Relative_path.S.compare fn builtins_filename) = 0 then ()
-        else begin
-          Printf.eprintf "%s:\n%s\n"
-            (Relative_path.S.to_string fn)
-            (Typed_ast_printer.print_string !pos_ty_map nast)
-        end
-      end
+      then (List.iter ~f:(error ~indent:true) errors; exit 2)
+      else Printf.printf "No errors\n"
+  | Decl_compare ->
+    test_decl_compare filename popt files_contents opts files_info
 
 (*****************************************************************************)
 (* Main entry point *)
 (*****************************************************************************)
 
-let decl_and_run_mode {filename; mode; no_builtins} =
+let decl_and_run_mode {filename; mode; no_builtins} popt tcopt =
   if mode = Dump_deps then Typing_deps.debug_trace := true;
+  Local_id.track_names := true;
+  Ident.track_names := true;
   let builtins = if no_builtins then "" else builtins in
   let filename = Relative_path.create Relative_path.Dummy filename in
   let files_contents = file_to_files filename in
-  let tcopt = TypecheckerOptions.default in
+  let files_contents_with_builtins = Relative_path.Map.add files_contents
+    ~key:builtins_filename ~data:builtins in
 
-  let errors, files_info, _ = Errors.do_ begin fun () ->
-    let parsed_files =
-      Relative_path.Map.mapi Parser_hack.program files_contents in
-    let parsed_builtins = Parser_hack.program builtins_filename builtins in
-    let parsed_files = Relative_path.Map.add parsed_files
-      ~key:builtins_filename ~data:parsed_builtins in
+  let errors, files_info, _ =
+    parse_name_and_decl popt files_contents_with_builtins tcopt in
 
-    let files_info =
-      Relative_path.Map.mapi begin fun fn parsed_file ->
-        let {Parser_hack.file_mode; comments; ast} = parsed_file in
-        Parser_heap.ParserHeap.add fn ast;
-        let funs, classes, typedefs, consts = Ast_utils.get_defs ast in
-        { FileInfo.
-          file_mode; funs; classes; typedefs; consts; comments;
-          consider_names_just_for_autoload = false }
-      end parsed_files in
-
-    Relative_path.Map.iter files_info begin fun fn fileinfo ->
-      let {FileInfo.funs; classes; typedefs; consts; _} = fileinfo in
-      NamingGlobal.make_env ~funs ~classes ~typedefs ~consts
-    end;
-
-    Relative_path.Map.iter files_info begin fun fn _ ->
-      Decl.make_env tcopt fn
-    end;
-
-    files_info
-  end in
-  handle_mode mode filename tcopt files_contents files_info
+  handle_mode mode filename tcopt popt files_contents files_info
     (Errors.get_error_list errors)
 
 let main_hack ({filename; mode; no_builtins;} as opts) =
+  (* TODO: We should have a per file config *)
+  let popt = ParserOptions.default in
+  let tcopt = TypecheckerOptions.default in
   Sys_utils.signal Sys.sigusr1
     (Sys.Signal_handle Typing.debug_print_last_pos);
-  EventLogger.init (Daemon.devnull ()) 0.0;
+  EventLogger.init EventLogger.Event_logger_fake 0.0;
   let _handle = SharedMem.init GlobalConfig.default_sharedmem_config in
   let tmp_hhi = Path.concat (Path.make Sys_utils.temp_dir_name) "hhi" in
   Hhi.set_hhi_root_for_unit_test tmp_hhi;
@@ -655,7 +718,7 @@ let main_hack ({filename; mode; no_builtins;} as opts) =
   | Ai ai_options ->
     Ai.do_ Typing_check_utils.check_defs filename ai_options
   | _ ->
-    decl_and_run_mode opts
+    decl_and_run_mode opts popt tcopt
 
 (* command line driver *)
 let _ =

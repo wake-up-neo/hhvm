@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -201,7 +201,7 @@ void Debugger::InterruptSessionEnded(const char *file) {
 void Debugger::InterruptWithUrl(int type, const char *url) {
   // Build a site to represent the URL. Note it won't have any source info
   // in it, because this event is raised with no PHP on the stack.
-  InterruptSite site(false, null_variant);
+  InterruptSite site(false, uninit_variant);
   site.url() = url ? url : "";
   Interrupt(type, url, &site);
 }
@@ -289,7 +289,7 @@ void Debugger::Interrupt(int type, const char *program,
 // as "BreakPointReached". Currently this results in spurious work in the
 // debugger.
 void Debugger::InterruptVMHook(int type /* = BreakPointReached */,
-                               const Variant& e /* = null_variant */) {
+                               const Variant& e /* = uninit_variant */) {
   TRACE(2, "Debugger::InterruptVMHook\n");
   // Computing the interrupt site here pulls in more data from the Unit to
   // describe the current execution point.

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -186,9 +186,6 @@ struct MBGlobals final : RequestEventHandler {
   OnigRegion *search_regs;
   OnigOptionType regex_default_options;
   OnigSyntaxType *regex_default_syntax;
-
-  void vscan(IMarker& mark) const override {
-  }
 
   MBGlobals() :
     language(mbfl_no_language_uni),
@@ -1087,12 +1084,12 @@ Variant HHVM_FUNCTION(mb_list_encodings_alias_names,
       return false;
     }
 
-    char *name = (char *)mbfl_no_encoding2name(no_encoding);
-    if (name != nullptr) {
+    char *encodingName = (char *)mbfl_no_encoding2name(no_encoding);
+    if (encodingName != nullptr) {
       i = 0;
       encodings = mbfl_get_supported_encodings();
       while ((encoding = encodings[i++]) != nullptr) {
-        if (strcmp(encoding->name, name) != 0) continue;
+        if (strcmp(encoding->name, encodingName) != 0) continue;
 
         if (encoding->aliases != nullptr) {
           j = 0;
@@ -1139,12 +1136,12 @@ Variant HHVM_FUNCTION(mb_list_mime_names,
       return false;
     }
 
-    char *name = (char *)mbfl_no_encoding2name(no_encoding);
-    if (name != nullptr) {
+    char *encodingName = (char *)mbfl_no_encoding2name(no_encoding);
+    if (encodingName != nullptr) {
       i = 0;
       encodings = mbfl_get_supported_encodings();
       while ((encoding = encodings[i++]) != nullptr) {
-        if (strcmp(encoding->name, name) != 0) continue;
+        if (strcmp(encoding->name, encodingName) != 0) continue;
         if (encoding->mime_name != nullptr) {
           return String(encoding->mime_name, CopyString);
         }
@@ -1243,7 +1240,7 @@ Variant HHVM_FUNCTION(mb_convert_case,
 Variant HHVM_FUNCTION(mb_convert_encoding,
                       const String& str,
                       const String& to_encoding,
-                      const Variant& from_encoding /* = null_variant */) {
+                      const Variant& from_encoding /* = uninit_variant */) {
   String encoding = from_encoding.toString();
   if (from_encoding.isArray()) {
     StringBuffer _from_encodings;
@@ -1324,6 +1321,10 @@ Variant HHVM_FUNCTION(mb_convert_kana,
 
   ret = mbfl_ja_jp_hantozen(&string, &result, opt);
   if (ret != nullptr) {
+    if (ret->len > StringData::MaxSize) {
+      raise_warning("String too long, max is %d", StringData::MaxSize);
+      return false;
+    }
     return String(reinterpret_cast<char*>(ret->val), ret->len, AttachString);
   }
   return false;
@@ -1428,7 +1429,7 @@ Variant HHVM_FUNCTION(mb_convert_variables,
                                         MBSTRG(strict_detection));
     if (identd != nullptr) {
       for (int n = -1; n < args.size(); n++) {
-        if (php_mbfl_encoding_detect(n < 0 ? (Variant&)vars : args[n],
+        if (php_mbfl_encoding_detect(n < 0 ? vars.wrapped() : args[n],
                                      identd, &string)) {
           break;
         }
@@ -1550,6 +1551,10 @@ static Variant php_mb_numericentity_exec(const String& str,
   ret = mbfl_html_numeric_entity(&string, &result, iconvmap, mapsize, type);
   free(iconvmap);
   if (ret != nullptr) {
+    if (ret->len > StringData::MaxSize) {
+      raise_warning("String too long, max is %d", StringData::MaxSize);
+      return false;
+    }
     return String(reinterpret_cast<char*>(ret->val), ret->len, AttachString);
   }
   return false;
@@ -1565,8 +1570,8 @@ Variant HHVM_FUNCTION(mb_decode_numericentity,
 
 Variant HHVM_FUNCTION(mb_detect_encoding,
                       const String& str,
-                      const Variant& encoding_list /* = null_variant */,
-                      const Variant& strict /* = null_variant */) {
+                      const Variant& encoding_list /* = uninit_variant */,
+                      const Variant& strict /* = uninit_variant */) {
   mbfl_string string;
   mbfl_encoding *ret;
   mbfl_encoding **elist, **list;
@@ -1607,7 +1612,7 @@ Variant HHVM_FUNCTION(mb_detect_encoding,
 }
 
 Variant HHVM_FUNCTION(mb_detect_order,
-                      const Variant& encoding_list /* = null_variant */) {
+                      const Variant& encoding_list /* = uninit_variant */) {
   int n, size;
   mbfl_encoding **list, **entry;
 
@@ -1688,6 +1693,10 @@ Variant HHVM_FUNCTION(mb_encode_mimeheader,
   ret = mbfl_mime_header_encode(&string, &result, charsetenc, transenc,
                                 linefeed.data(), indent);
   if (ret != nullptr) {
+    if (ret->len > StringData::MaxSize) {
+      raise_warning("String too long, max is %d", StringData::MaxSize);
+      return false;
+    }
     return String(reinterpret_cast<char*>(ret->val), ret->len, AttachString);
   }
   return false;
@@ -1696,7 +1705,7 @@ Variant HHVM_FUNCTION(mb_encode_mimeheader,
 Variant HHVM_FUNCTION(mb_encode_numericentity,
                       const String& str,
                       const Variant& convmap,
-                      const Variant& opt_encoding /* = null_variant */,
+                      const Variant& opt_encoding /* = uninit_variant */,
                       bool is_hex /* = false */) {
   const String encoding = convertArg(opt_encoding);
   return php_mb_numericentity_exec(str, convmap, encoding, is_hex, 0);
@@ -2658,6 +2667,8 @@ Variant HHVM_FUNCTION(mb_strrpos,
   mbs_needle.val = (unsigned char *)needle.data();
   mbs_needle.len = needle.size();
 
+  // This hack is so that if the caller puts the encoding in the offset field we
+  // attempt to detect it and use that as the encoding.  Ick.
   const char *enc_name = encoding.data();
   long noffset = 0;
   String soffset = offset.toString();
@@ -2684,7 +2695,7 @@ Variant HHVM_FUNCTION(mb_strrpos,
     noffset = offset.toInt32();
   }
 
-  if (!enc_name && !*enc_name) {
+  if (enc_name != nullptr && *enc_name) {
     mbs_haystack.no_encoding = mbs_needle.no_encoding =
       mbfl_name2no_encoding(enc_name);
     if (mbs_haystack.no_encoding == mbfl_no_encoding_invalid) {
@@ -2877,9 +2888,104 @@ Variant HHVM_FUNCTION(mb_strstr,
   return false;
 }
 
+const StaticString s_utf_8("utf-8");
+
+/**
+ * Fast check for the most common form of the UTF-8 encoding identifier.
+ */
+ALWAYS_INLINE
+static bool isUtf8(const Variant& encoding) {
+  return encoding.getStringDataOrNull() == s_utf_8.get();
+}
+
+/**
+ * Given a byte sequence, return
+ *    0 if it contains bytes >= 128 (thus non-ASCII), else
+ *   -1 if it contains any upper-case character ('A'-'Z'), else
+ *    1 (and thus is a lower-case ASCII string).
+ */
+ALWAYS_INLINE
+static int isUtf8AsciiLower(folly::StringPiece s) {
+  const auto bytelen = s.size();
+  bool caseOK = true;
+  for (uint32_t i = 0; i < bytelen; ++i) {
+    uint8_t byte = s[i];
+    if (byte >= 128) {
+      return 0;
+    } else if (byte <= 'Z' && byte >= 'A') {
+      caseOK = false;
+    }
+  }
+  return caseOK ? 1 : -1;
+}
+
+/**
+ * Return a string containing the lower-case of a given ASCII string.
+ */
+ALWAYS_INLINE
+static StringData* asciiToLower(const StringData* s) {
+  const auto size = s->size();
+  auto ret = StringData::Make(s, CopyString);
+  auto output = ret->mutableData();
+  for (int i = 0; i < size; ++i) {
+    auto& c = output[i];
+    if (c <= 'Z' && c >= 'A') {
+      c |= 0x20;
+    }
+  }
+  ret->invalidateHash(); // We probably modified it.
+  return ret;
+}
+
+/* Like isUtf8AsciiLower, but with upper/lower swapped. */
+ALWAYS_INLINE
+static int isUtf8AsciiUpper(folly::StringPiece s) {
+  const auto bytelen = s.size();
+  bool caseOK = true;
+  for (uint32_t i = 0; i < bytelen; ++i) {
+    uint8_t byte = s[i];
+    if (byte >= 128) {
+      return 0;
+    } else if (byte >= 'a' && byte <= 'z') {
+      caseOK = false;
+    }
+  }
+  return caseOK ? 1 : -1;
+}
+
+/* Like asciiToLower, but with upper/lower swapped. */
+ALWAYS_INLINE
+static StringData* asciiToUpper(const StringData* s) {
+  const auto size = s->size();
+  auto ret = StringData::Make(s, CopyString);
+  auto output = ret->mutableData();
+  for (int i = 0; i < size; ++i) {
+    auto& c = output[i];
+    if (c >= 'a' && c <= 'z') {
+      c -= (char)0x20;
+    }
+  }
+  ret->invalidateHash(); // We probably modified it.
+  return ret;
+}
+
 Variant HHVM_FUNCTION(mb_strtolower,
                       const String& str,
                       const Variant& opt_encoding) {
+  /* Fast-case for empty static string without dereferencing any pointers. */
+  if (str.get() == staticEmptyString()) return empty_string_variant();
+  if (LIKELY(isUtf8(opt_encoding))) {
+    /* Fast-case for ASCII. */
+    if (auto sd = str.get()) {
+      auto sl = sd->slice();
+      auto r = isUtf8AsciiLower(sl);
+      if (r > 0) {
+        return str;
+      } else if (r < 0) {
+        return String::attach(asciiToLower(sd));
+      }
+    }
+  }
   const String encoding = convertArg(opt_encoding);
 
   const char *from_encoding;
@@ -2902,6 +3008,20 @@ Variant HHVM_FUNCTION(mb_strtolower,
 Variant HHVM_FUNCTION(mb_strtoupper,
                       const String& str,
                       const Variant& opt_encoding) {
+  /* Fast-case for empty static string without dereferencing any pointers. */
+  if (str.get() == staticEmptyString()) return empty_string_variant();
+  if (LIKELY(isUtf8(opt_encoding))) {
+    /* Fast-case for ASCII. */
+    if (auto sd = str.get()) {
+      auto sl = sd->slice();
+      auto r = isUtf8AsciiUpper(sl);
+      if (r > 0) {
+        return str;
+      } else if (r < 0) {
+        return String::attach(asciiToUpper(sd));
+      }
+    }
+  }
   const String encoding = convertArg(opt_encoding);
 
   const char *from_encoding;
@@ -2949,7 +3069,7 @@ Variant HHVM_FUNCTION(mb_strwidth,
 }
 
 Variant HHVM_FUNCTION(mb_substitute_character,
-                      const Variant& substrchar /* = null_variant */) {
+                      const Variant& substrchar /* = uninit_variant */) {
   if (substrchar.isNull()) {
     switch (MBSTRG(current_filter_illegal_mode)) {
     case MBFL_OUTPUTFILTER_ILLEGAL_MODE_NONE:

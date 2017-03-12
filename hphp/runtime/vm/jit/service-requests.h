@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -87,11 +87,12 @@ struct CGMeta;
   REQ(RETRANSLATE)        \
                           \
   /*
-   * retranslate_opt(SrcKey target, TransID transID)
+   * retranslate_opt(SrcKey sk)
    *
-   * A request to retranslate a function entry `target', leveraging profiling
-   * data to produce a larger, more optimized translation.  Only used when PGO
-   * is enabled.
+   * A request to retranslate the function from `sk', leveraging profiling data
+   * to produce a set of larger, more optimized translations.  Only used when
+   * PGO is enabled. Execution will resume at `sk' whether or not retranslation
+   * is successful.
    */                     \
   REQ(RETRANSLATE_OPT)    \
                           \
@@ -180,12 +181,13 @@ using ArgVec = jit::vector<Arg>;
  * address) is that ephemeral requests are padded to stub_size().
  *
  * Since making a service request leaves the TC, we need to sync the current
- * `spOff' to vmsp.  In the cases where vmsp also needs to be synced between
- * translations (namely, in resumed contexts), we do this sync inline at the
- * site of the jump to the stub, so that it still occurs once the jump gets
- * smashed.  Otherwise (namely, in non-resumed contexts), the client must pass
- * a non-none `spOff', and we do the sync in the stub to save work once the
- * service request is completed and the jump is smashed.
+ * bytecode eval stack pointer, given via `spOff', to vmsp.  In the cases where
+ * vmsp also needs to be synced between translations (namely, in resumed
+ * contexts), we do this sync inline at the site of the jump to the stub, so
+ * that it still occurs once the jump gets smashed.  Otherwise (namely, in
+ * non-resumed contexts), the client must pass a non-none `spOff', and we do
+ * the sync in the stub to save work once the service request is completed and
+ * the jump is smashed.
  */
 template<typename... Args>
 TCA emit_persistent(CodeBlock& cb,
@@ -216,7 +218,7 @@ TCA emit_bindaddr_stub(CodeBlock& cb, DataBlock& data, CGMeta& fixups,
 TCA emit_retranslate_stub(CodeBlock& cb, DataBlock& data, FPInvOffset spOff,
                           SrcKey target, TransFlags trflags);
 TCA emit_retranslate_opt_stub(CodeBlock& cb, DataBlock& data, FPInvOffset spOff,
-                              SrcKey target, TransID transID);
+                              SrcKey sk);
 
 /*
  * Space used by an ephemeral stub.

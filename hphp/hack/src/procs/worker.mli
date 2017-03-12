@@ -18,8 +18,24 @@
  *)
 (*****************************************************************************)
 
+exception Worker_exited_abnormally of int
+(* Worker killed by Out Of Memory. *)
+exception Worker_oomed
+(** Raise this exception when sending work to a worker that is already busy.
+ * We should never be doing that, and this is an assertion error. *)
+exception Worker_busy
+
+type send_job_failure =
+  | Worker_already_exited of Unix.process_status
+  | Other_send_job_failure of exn
+
+exception Worker_failed_to_send_job of send_job_failure
+
 (* The type of a worker visible to the outside world *)
 type t
+
+
+type call_wrapper = { wrap: 'x 'b. ('x -> 'b) -> 'x -> 'b }
 
 (*****************************************************************************)
 (* The handle is what we get back when we start a job. It's a "future"
@@ -35,6 +51,8 @@ val register_entry_point:
 
 (* Creates a pool of workers. *)
 val make:
+  (** See docs in Worker.t for call_wrapper. *)
+  ?call_wrapper: call_wrapper ->
   saved_state : 'a ->
   entry       : 'a entry ->
   nbr_procs   : int ->

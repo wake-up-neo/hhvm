@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,6 +21,7 @@
 #include "hphp/runtime/vm/jit/extra-data.h"
 #include "hphp/runtime/vm/jit/ir-opcode.h"
 #include "hphp/runtime/vm/jit/ssa-tmp.h"
+#include "hphp/runtime/vm/jit/string-tag.h"
 #include "hphp/runtime/vm/jit/type.h"
 
 #include <boost/intrusive/list.hpp>
@@ -125,7 +126,6 @@ struct IRInstruction {
   bool hasDst() const;
   bool naryDst() const;
   bool consumesReferences() const;
-  bool killsSources() const;
   bool mayRaiseError() const;
   bool isTerminal() const;
   bool hasEdges() const;
@@ -363,6 +363,11 @@ struct IRInstruction {
   bool isBlockEnd() const;
   bool isRawLoad() const;
 
+  /*
+   * Clear any outgoing edges this instruction has, if any.
+   */
+  void clearEdges();
+
 private:
   /*
    * Block/edge implementations.
@@ -370,7 +375,6 @@ private:
   Block* succ(int i) const;
   Edge* succEdge(int i);
   void setSucc(int i, Block* b);
-  void clearEdges();
 
 
   /////////////////////////////////////////////////////////////////////////////
@@ -385,6 +389,7 @@ private:
   bool m_hasTypeParam : 1;
   BCMarker m_marker;
   const Id m_id{kTransient};
+  // 4-byte hole
   SSATmp** m_srcs{nullptr};
   union {
     SSATmp* m_dest;  // if HasDest
@@ -420,6 +425,14 @@ using InstructionList = boost::intrusive::list<IRInstruction,
 Type outputType(const IRInstruction*, int dstId = 0);
 
 ///////////////////////////////////////////////////////////////////////////////
+
+/*
+ * Return a type appropriate for $this given a function.
+ */
+Type thisTypeFromFunc(const Func* func);
+
+///////////////////////////////////////////////////////////////////////////////
+
 }}
 
 #include "hphp/runtime/vm/jit/ir-instruction-inl.h"

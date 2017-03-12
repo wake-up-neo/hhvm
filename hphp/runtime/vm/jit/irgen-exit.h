@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -68,7 +68,7 @@ Block* makePseudoMainExit(IRGS&);
  * Create a block that exits the current region by making a retranslate opt
  * service request.  Must not be used inside of an inlined function.
  */
-Block* makeExitOpt(IRGS&, TransID);
+Block* makeExitOpt(IRGS&);
 
 /*
  * Create a block that side exits the current region, after first calling the

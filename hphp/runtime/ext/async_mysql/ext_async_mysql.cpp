@@ -35,10 +35,6 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-#define DEFINE_CONSTANT(name)                                                  \
-  const int64_t k_##name = name;                                               \
-  const StaticString s_##name(#name);                                          \
-
 #define IMPLEMENT_GET_CLASS(cls)                                               \
   Class* cls::getClass() {                                                     \
     if (s_class == nullptr) {                                                  \
@@ -48,53 +44,21 @@ namespace HPHP {
   return s_class;                                                              \
   }                                                                            \
 
-// expose the mysql flags
-DEFINE_CONSTANT(NOT_NULL_FLAG);
-DEFINE_CONSTANT(PRI_KEY_FLAG);
-DEFINE_CONSTANT(UNIQUE_KEY_FLAG);
-DEFINE_CONSTANT(MULTIPLE_KEY_FLAG);
-DEFINE_CONSTANT(UNSIGNED_FLAG);
-DEFINE_CONSTANT(ZEROFILL_FLAG);
-DEFINE_CONSTANT(BINARY_FLAG);
-DEFINE_CONSTANT(AUTO_INCREMENT_FLAG);
-DEFINE_CONSTANT(ENUM_FLAG);
-DEFINE_CONSTANT(SET_FLAG);
-DEFINE_CONSTANT(BLOB_FLAG);
-DEFINE_CONSTANT(TIMESTAMP_FLAG);
-DEFINE_CONSTANT(NUM_FLAG);
-DEFINE_CONSTANT(NO_DEFAULT_VALUE_FLAG);
-
-// expose the mysql field types
-DEFINE_CONSTANT(MYSQL_TYPE_TINY);
-DEFINE_CONSTANT(MYSQL_TYPE_SHORT);
-DEFINE_CONSTANT(MYSQL_TYPE_LONG);
-DEFINE_CONSTANT(MYSQL_TYPE_INT24);
-DEFINE_CONSTANT(MYSQL_TYPE_LONGLONG);
-DEFINE_CONSTANT(MYSQL_TYPE_DECIMAL);
-DEFINE_CONSTANT(MYSQL_TYPE_NEWDECIMAL);
-DEFINE_CONSTANT(MYSQL_TYPE_FLOAT);
-DEFINE_CONSTANT(MYSQL_TYPE_DOUBLE);
-DEFINE_CONSTANT(MYSQL_TYPE_BIT);
-DEFINE_CONSTANT(MYSQL_TYPE_TIMESTAMP);
-DEFINE_CONSTANT(MYSQL_TYPE_DATE);
-DEFINE_CONSTANT(MYSQL_TYPE_TIME);
-DEFINE_CONSTANT(MYSQL_TYPE_DATETIME);
-DEFINE_CONSTANT(MYSQL_TYPE_YEAR);
-DEFINE_CONSTANT(MYSQL_TYPE_STRING);
-DEFINE_CONSTANT(MYSQL_TYPE_VAR_STRING);
-DEFINE_CONSTANT(MYSQL_TYPE_BLOB);
-DEFINE_CONSTANT(MYSQL_TYPE_SET);
-DEFINE_CONSTANT(MYSQL_TYPE_ENUM);
-DEFINE_CONSTANT(MYSQL_TYPE_GEOMETRY);
-DEFINE_CONSTANT(MYSQL_TYPE_NULL);
-
 typedef am::ClientPool<am::AsyncMysqlClient, am::AsyncMysqlClientFactory>
     AsyncMysqlClientPool;
 
+
 namespace {
+int HdfAsyncMysqlClientPoolSize = -1;
+
 folly::Singleton<AsyncMysqlClientPool> clientPool([]() {
+  if (HdfAsyncMysqlClientPoolSize == -1) {
+    LOG(DFATAL) << "AsyncMysql Config should have been initialized.";
+    HdfAsyncMysqlClientPoolSize = 2;
+  }
   return new AsyncMysqlClientPool(
-      folly::make_unique<am::AsyncMysqlClientFactory>(), 2);
+      folly::make_unique<am::AsyncMysqlClientFactory>(),
+      HdfAsyncMysqlClientPoolSize);
 });
 }
 
@@ -261,6 +225,24 @@ static void HHVM_METHOD(
   data->m_conn_opts.setSSLOptionsProvider(sslProvider->getSSLProvider());
 }
 
+static int64_t getQueryTimeout(int64_t timeout_micros) {
+  if (timeout_micros < 0) {
+    return mysqlExtension::ReadTimeout * 1000;
+  } else {
+    return timeout_micros;
+  }
+}
+
+static std::vector<am::Query> transformQueries(const Array& queries) {
+  std::vector<am::Query> queries_vec;
+  queries_vec.reserve(queries.size());
+  for (ArrayIter iter(queries); iter; ++iter) {
+    queries_vec.emplace_back(am::Query::unsafe(
+        static_cast<std::string>(iter.second().toString().data())));
+  }
+  return queries_vec;
+}
+
 Class* AsyncMysqlConnectionOptions::s_class = nullptr;
 const StaticString AsyncMysqlConnectionOptions::s_className(
     "AsyncMysqlConnectionOptions");
@@ -351,6 +333,68 @@ Object HHVM_STATIC_METHOD(
   op->setConnectionOptions(connOpts);
 
   return newAsyncMysqlConnectEvent(std::move(op), getClient());
+}
+
+Object HHVM_STATIC_METHOD(
+    AsyncMysqlClient,
+    connectAndQuery,
+    const Array& queries,
+    const String& host,
+    int port,
+    const String& dbname,
+    const String& user,
+    const String& password,
+    const Object& asyncMysqlConnOpts) {
+  am::ConnectionKey key(
+      static_cast<std::string>(host),
+      port,
+      static_cast<std::string>(dbname),
+      static_cast<std::string>(user),
+      static_cast<std::string>(password));
+  auto clientPtr = getClient();
+  auto connectOp = clientPtr->beginConnection(key);
+  auto* obj = Native::data<AsyncMysqlConnectionOptions>(asyncMysqlConnOpts);
+  const auto& connOpts = obj->getConnectionOptions();
+  connectOp->setConnectionOptions(connOpts);
+  auto event = new AsyncMysqlMultiQueryEvent();
+  try {
+    connectOp->setCallback([clientPtr, event, queries]
+        (am::ConnectOperation& op) {
+
+        auto query_op = am::Connection::beginMultiQuery(
+          op.releaseConnection(), transformQueries(queries));
+        event->setQueryOp(query_op);
+
+        try {
+          am::MultiQueryAppenderCallback appender_callback = [event, clientPtr](
+            am::MultiQueryOperation& op,
+            std::vector<am::QueryResult> query_results,
+            am::QueryCallbackReason reason) {
+            DCHECK(reason != am::QueryCallbackReason::RowsFetched);
+            DCHECK(reason != am::QueryCallbackReason::QueryBoundary);
+            if (!op.done()) {
+              LOG(ERROR) << "Invalid state! Callback called as finished "
+                         << "but operation didn't finish";
+            }
+            op.setQueryResults(std::move(query_results));
+            event->setClientStats(clientPtr->collectPerfStats());
+            event->opFinished();
+          };
+          query_op->setCallback(am::resultAppender(appender_callback));
+          query_op->run();
+        } catch (...) {
+          LOG(ERROR) << "Unexpected exception while executing Query";
+          event->abandon();
+        }
+
+    });
+    connectOp->run();
+    return Object{event->getWaitHandle()};
+  } catch (...) {
+    LOG(ERROR) << "Unexpected exception while creating Connection";
+    event->abandon();
+    return Object{};
+  }
 }
 
 Object HHVM_STATIC_METHOD(
@@ -582,12 +626,7 @@ Object AsyncMysqlConnection::query(
   verifyValidConnection();
   auto* clientPtr = static_cast<am::AsyncMysqlClient*>(m_conn->client());
   auto op = am::Connection::beginQuery(std::move(m_conn), query);
-  if (timeout_micros < 0) {
-    timeout_micros = mysqlExtension::ReadTimeout * 1000;
-  }
-  if (timeout_micros > 0) {
-    op->setTimeout(am::Duration(timeout_micros));
-  }
+  op->setTimeout(am::Duration(getQueryTimeout(timeout_micros)));
 
   auto event = new AsyncMysqlQueryEvent(this_, op);
   try {
@@ -707,23 +746,11 @@ static Object HHVM_METHOD(
     const Array& queries,
     int64_t timeout_micros /* = -1 */) {
   auto* data = Native::data<AsyncMysqlConnection>(this_);
-
   data->verifyValidConnection();
-  std::vector<am::Query> queries_vec;
-  queries_vec.reserve(queries.size());
-  for (ArrayIter iter(queries); iter; ++iter) {
-    queries_vec.emplace_back(am::Query::unsafe(
-        static_cast<std::string>(iter.second().toString().data())));
-  }
   auto* clientPtr = static_cast<am::AsyncMysqlClient*>(data->m_conn->client());
   auto op = am::Connection::beginMultiQuery(std::move(data->m_conn),
-                                            std::move(queries_vec));
-  if (timeout_micros < 0) {
-    timeout_micros = mysqlExtension::ReadTimeout * 1000;
-  }
-  if (timeout_micros > 0) {
-    op->setTimeout(am::Duration(timeout_micros));
-  }
+                                            transformQueries(queries));
+  op->setTimeout(am::Duration(getQueryTimeout(timeout_micros)));
 
   auto event = new AsyncMysqlMultiQueryEvent(this_, op);
   try {
@@ -1262,9 +1289,11 @@ void AsyncMysqlQueryEvent::unserialize(Cell& result) {
 void AsyncMysqlMultiQueryEvent::unserialize(Cell& result) {
   // Same as unserialize from AsyncMysqlQueryEvent but the result is a
   // vector of query results
-  assert(getPrivData()->instanceof(AsyncMysqlConnection::getClass()));
-  auto* conn = Native::data<AsyncMysqlConnection>(getPrivData());
-  conn->setConnection(m_multi_op->releaseConnection());
+  if (getPrivData() != nullptr) {
+    assert(getPrivData()->instanceof(AsyncMysqlConnection::getClass()));
+    auto* conn = Native::data<AsyncMysqlConnection>(getPrivData());
+    conn->setConnection(m_multi_op->releaseConnection());
+  }
 
   // Retrieving the results for all executed queries
   auto results = req::make<c_Vector>();
@@ -1294,7 +1323,7 @@ const StaticString AsyncMysqlRowBlock::s_className("AsyncMysqlRowBlock");
 IMPLEMENT_GET_CLASS(AsyncMysqlRowBlock)
 
 Object AsyncMysqlRowBlock::newInstance(am::RowBlock* row_block,
-    std::shared_ptr<FieldIndex> indexer) {
+    req::shared_ptr<FieldIndex> indexer) {
   Object ret{AsyncMysqlRowBlock::getClass()};
   auto* data = Native::data<AsyncMysqlRowBlock>(ret);
   data->m_row_block.reset(new am::RowBlock(std::move(*row_block)));
@@ -1603,56 +1632,56 @@ static void HHVM_METHOD(AsyncMysqlRowIterator, rewind) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-#define REGISTER_CONSTANT(name)                                                \
-  Native::registerConstant<KindOfInt64>(s_##name.get(), k_##name)              \
-
 static const int64_t DISABLE_COPY_AND_SWEEP = Native::NDIFlags::NO_COPY |
   Native::NDIFlags::NO_SWEEP;
 
 static struct AsyncMysqlExtension final : Extension {
   AsyncMysqlExtension() : Extension("async_mysql") {}
   void moduleInit() override {
-    REGISTER_CONSTANT(NOT_NULL_FLAG);
-    REGISTER_CONSTANT(PRI_KEY_FLAG);
-    REGISTER_CONSTANT(UNIQUE_KEY_FLAG);
-    REGISTER_CONSTANT(MULTIPLE_KEY_FLAG);
-    REGISTER_CONSTANT(UNSIGNED_FLAG);
-    REGISTER_CONSTANT(ZEROFILL_FLAG);
-    REGISTER_CONSTANT(BINARY_FLAG);
-    REGISTER_CONSTANT(AUTO_INCREMENT_FLAG);
-    REGISTER_CONSTANT(ENUM_FLAG);
-    REGISTER_CONSTANT(SET_FLAG);
-    REGISTER_CONSTANT(BLOB_FLAG);
-    REGISTER_CONSTANT(TIMESTAMP_FLAG);
-    REGISTER_CONSTANT(NUM_FLAG);
-    REGISTER_CONSTANT(NO_DEFAULT_VALUE_FLAG);
+    // expose the mysql flags
+    HHVM_RC_INT_SAME(NOT_NULL_FLAG);
+    HHVM_RC_INT_SAME(PRI_KEY_FLAG);
+    HHVM_RC_INT_SAME(UNIQUE_KEY_FLAG);
+    HHVM_RC_INT_SAME(MULTIPLE_KEY_FLAG);
+    HHVM_RC_INT_SAME(UNSIGNED_FLAG);
+    HHVM_RC_INT_SAME(ZEROFILL_FLAG);
+    HHVM_RC_INT_SAME(BINARY_FLAG);
+    HHVM_RC_INT_SAME(AUTO_INCREMENT_FLAG);
+    HHVM_RC_INT_SAME(ENUM_FLAG);
+    HHVM_RC_INT_SAME(SET_FLAG);
+    HHVM_RC_INT_SAME(BLOB_FLAG);
+    HHVM_RC_INT_SAME(TIMESTAMP_FLAG);
+    HHVM_RC_INT_SAME(NUM_FLAG);
+    HHVM_RC_INT_SAME(NO_DEFAULT_VALUE_FLAG);
 
-    REGISTER_CONSTANT(MYSQL_TYPE_TINY);
-    REGISTER_CONSTANT(MYSQL_TYPE_SHORT);
-    REGISTER_CONSTANT(MYSQL_TYPE_LONG);
-    REGISTER_CONSTANT(MYSQL_TYPE_INT24);
-    REGISTER_CONSTANT(MYSQL_TYPE_LONGLONG);
-    REGISTER_CONSTANT(MYSQL_TYPE_DECIMAL);
-    REGISTER_CONSTANT(MYSQL_TYPE_NEWDECIMAL);
-    REGISTER_CONSTANT(MYSQL_TYPE_FLOAT);
-    REGISTER_CONSTANT(MYSQL_TYPE_DOUBLE);
-    REGISTER_CONSTANT(MYSQL_TYPE_BIT);
-    REGISTER_CONSTANT(MYSQL_TYPE_TIMESTAMP);
-    REGISTER_CONSTANT(MYSQL_TYPE_DATE);
-    REGISTER_CONSTANT(MYSQL_TYPE_TIME);
-    REGISTER_CONSTANT(MYSQL_TYPE_DATETIME);
-    REGISTER_CONSTANT(MYSQL_TYPE_YEAR);
-    REGISTER_CONSTANT(MYSQL_TYPE_STRING);
-    REGISTER_CONSTANT(MYSQL_TYPE_VAR_STRING);
-    REGISTER_CONSTANT(MYSQL_TYPE_BLOB);
-    REGISTER_CONSTANT(MYSQL_TYPE_SET);
-    REGISTER_CONSTANT(MYSQL_TYPE_ENUM);
-    REGISTER_CONSTANT(MYSQL_TYPE_GEOMETRY);
-    REGISTER_CONSTANT(MYSQL_TYPE_NULL);
+    // expose the mysql field types
+    HHVM_RC_INT_SAME(MYSQL_TYPE_TINY);
+    HHVM_RC_INT_SAME(MYSQL_TYPE_SHORT);
+    HHVM_RC_INT_SAME(MYSQL_TYPE_LONG);
+    HHVM_RC_INT_SAME(MYSQL_TYPE_INT24);
+    HHVM_RC_INT_SAME(MYSQL_TYPE_LONGLONG);
+    HHVM_RC_INT_SAME(MYSQL_TYPE_DECIMAL);
+    HHVM_RC_INT_SAME(MYSQL_TYPE_NEWDECIMAL);
+    HHVM_RC_INT_SAME(MYSQL_TYPE_FLOAT);
+    HHVM_RC_INT_SAME(MYSQL_TYPE_DOUBLE);
+    HHVM_RC_INT_SAME(MYSQL_TYPE_BIT);
+    HHVM_RC_INT_SAME(MYSQL_TYPE_TIMESTAMP);
+    HHVM_RC_INT_SAME(MYSQL_TYPE_DATE);
+    HHVM_RC_INT_SAME(MYSQL_TYPE_TIME);
+    HHVM_RC_INT_SAME(MYSQL_TYPE_DATETIME);
+    HHVM_RC_INT_SAME(MYSQL_TYPE_YEAR);
+    HHVM_RC_INT_SAME(MYSQL_TYPE_STRING);
+    HHVM_RC_INT_SAME(MYSQL_TYPE_VAR_STRING);
+    HHVM_RC_INT_SAME(MYSQL_TYPE_BLOB);
+    HHVM_RC_INT_SAME(MYSQL_TYPE_SET);
+    HHVM_RC_INT_SAME(MYSQL_TYPE_ENUM);
+    HHVM_RC_INT_SAME(MYSQL_TYPE_GEOMETRY);
+    HHVM_RC_INT_SAME(MYSQL_TYPE_NULL);
 
     HHVM_STATIC_ME(AsyncMysqlClient, setPoolsConnectionLimit);
     HHVM_STATIC_ME(AsyncMysqlClient, connect);
     HHVM_STATIC_ME(AsyncMysqlClient, connectWithOpts);
+    HHVM_STATIC_ME(AsyncMysqlClient, connectAndQuery);
     HHVM_STATIC_ME(AsyncMysqlClient, adoptConnection);
 
     HHVM_ME(AsyncMysqlConnectionPool, __construct);
@@ -1791,6 +1820,14 @@ static struct AsyncMysqlExtension final : Extension {
     loadSystemlib("mysqlrow");
     loadSystemlib("async_mysql_exceptions");
     loadSystemlib();
+  }
+  void moduleLoad(const IniSetting::Map& ini, Hdf config) override {
+    Config::Bind(
+        HdfAsyncMysqlClientPoolSize,
+        ini,
+        config,
+        "AsyncMysql.ClientPoolSize",
+        2);
   }
 } s_async_mysql_extension;
 

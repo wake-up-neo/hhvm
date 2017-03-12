@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -104,7 +104,7 @@ const StaticString DateTimeData::s_className("DateTime");
 
 void HHVM_METHOD(DateTime, __construct,
                  const String& time /*= "now"*/,
-                 const Variant& timezone /*= null_variant*/) {
+                 const Variant& timezone /*= uninit_variant*/) {
   DateTimeData* data = Native::data<DateTimeData>(this_);
   auto tz = TimeZone::Current();
   if (!timezone.isNull()) {
@@ -125,7 +125,7 @@ void HHVM_METHOD(DateTime, __construct,
 Variant HHVM_STATIC_METHOD(DateTime, createFromFormat,
                            const String& format,
                            const String& time,
-                           const Variant& timezone /*= null_variant */) {
+                           const Variant& timezone /*= uninit_variant */) {
   auto tz = TimeZone::Current();
   if (!timezone.isNull()) {
     const Object& obj_timezone = timezone.toObject();
@@ -454,7 +454,7 @@ Variant HHVM_STATIC_METHOD(DateTimeZone, listIdentifiers,
     return false;
   }
 
-  const timelib_tzdb *tzdb = timezone_get_builtin_tzdb();
+  const timelib_tzdb *tzdb = timezone_get_tzdb();
   int item_count = tzdb->index_size;
   const timelib_tzdb_index_entry *table = tzdb->index;
 
@@ -835,7 +835,7 @@ Variant HHVM_FUNCTION(date_parse_from_format,
 
 Variant HHVM_FUNCTION(date_create,
                       const Variant& time /* = null_string */,
-                      const Variant& timezone /* = null_variant */) {
+                      const Variant& timezone /* = uninit_variant */) {
   const String& str_time = time.isNull() ? null_string : time.toString();
   auto tz = TimeZone::Current();
   if (!timezone.isNull()) {
@@ -1036,10 +1036,12 @@ static struct DateTimeExtension final : Extension {
     HHVM_FE(timezone_name_from_abbr);
     HHVM_FE(timezone_version_get);
 
-    HHVM_RC_INT(SUNFUNCS_RET_DOUBLE, DateTime::SunInfoFormat::ReturnDouble);
-    HHVM_RC_INT(SUNFUNCS_RET_STRING, DateTime::SunInfoFormat::ReturnString);
+    HHVM_RC_INT(SUNFUNCS_RET_DOUBLE,
+                static_cast<int64_t>(DateTime::SunInfoFormat::ReturnDouble));
+    HHVM_RC_INT(SUNFUNCS_RET_STRING,
+                static_cast<int64_t>(DateTime::SunInfoFormat::ReturnString));
     HHVM_RC_INT(SUNFUNCS_RET_TIMESTAMP,
-                DateTime::SunInfoFormat::ReturnTimeStamp);
+                static_cast<int64_t>(DateTime::SunInfoFormat::ReturnTimeStamp));
 
     loadSystemlib("datetime");
   }

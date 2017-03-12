@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -33,7 +33,12 @@ enum {
   PDO_MYSQL_ATTR_COMPRESS,
   PDO_MYSQL_ATTR_DIRECT_QUERY,
   PDO_MYSQL_ATTR_FOUND_ROWS,
-  PDO_MYSQL_ATTR_IGNORE_SPACE
+  PDO_MYSQL_ATTR_IGNORE_SPACE,
+  PDO_MYSQL_ATTR_SSL_CA,
+  PDO_MYSQL_ATTR_SSL_CAPATH,
+  PDO_MYSQL_ATTR_SSL_CERT,
+  PDO_MYSQL_ATTR_SSL_CIPHER,
+  PDO_MYSQL_ATTR_SSL_KEY
 };
 
 ///////////////////////////////////////////////////////////////////////////////

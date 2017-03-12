@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -39,11 +39,6 @@
 #include "hphp/runtime/base/req-containers.h"
 #include "hphp/runtime/base/req-malloc.h"
 #include "hphp/runtime/base/req-ptr.h"
-
-// used for mmapping contiguous heap space
-// If used, anonymous pages are not cleared when mapped with mmap. It is not
-// enabled by default and should be checked before use
-#define       MAP_UNINITIALIZED 0x4000000 /* XXX Fragile. */
 
 namespace HPHP {
 
@@ -301,7 +296,7 @@ constexpr unsigned kLgSizeClassesPerDoubling = 2;
  */
 constexpr uint32_t kNumSmallSizes = 63;
 static_assert(kNumSmallSizes <= (1 << 6),
-              "only 6 bits available in HeaderWord");
+              "only 6 bits available in HeapObject");
 
 constexpr uint32_t kMaxSmallSize = kSmallIndex2Size[kNumSmallSizes-1];
 static_assert(kMaxSmallSize > kSmallSizeAlign * 2,
@@ -321,6 +316,7 @@ static_assert(kNumSmallSizes <= sizeof(kSmallSize2Index),
  */
 constexpr char kSmallFreeFill   = 0x6a;
 constexpr char kRDSTrashFill    = 0x6b; // used by RDS for "normal" section
+constexpr char kTrashClsRef     = 0x6c; // used for class-ref slots
 constexpr char kTVTrashFill     = 0x7a; // used by interpreter
 constexpr char kTVTrashFill2    = 0x7b; // used by req::ptr dtors
 constexpr char kTVTrashJITStk   = 0x7c; // used by the JIT for stack slots
@@ -341,35 +337,38 @@ struct StringDataNode {
 static_assert(std::numeric_limits<type_scan::Index>::max() <=
               std::numeric_limits<uint16_t>::max(),
               "type_scan::Index must be no greater than 16-bits "
-              "to fit into HeaderWord");
+              "to fit into HeapObject");
 
 // This is the header MemoryManager uses to remember large allocations
 // so they can be auto-freed in MemoryManager::reset(), as well as large/small
 // req::malloc()'d blocks, which must track their size internally.
-struct MallocNode {
+struct MallocNode : HeapObject {
   size_t nbytes;
-  HeaderWord<> hdr;
-  uint32_t& index() { return hdr.hi32; }
-  uint16_t& typeIndex() { return hdr.aux; }
-  uint16_t typeIndex() const { return hdr.aux; }
+  uint32_t& index() { return m_aux32; }
+  uint16_t& typeIndex() { return m_aux16; }
+  uint16_t typeIndex() const { return m_aux16; }
 };
 
 // all FreeList entries are parsed by inspecting this header.
-struct FreeNode {
+struct FreeNode : HeapObject {
   FreeNode* next;
-  HeaderWord<> hdr;
-  uint32_t& size() { return hdr.hi32; }
-  uint32_t size() const { return hdr.hi32; }
+  uint32_t& size() { return m_aux32; }
+  uint32_t size() const { return m_aux32; }
   static FreeNode* InitFrom(void* addr, uint32_t size, HeaderKind);
   static FreeNode* UninitFrom(void* addr, FreeNode* next);
 };
 
 // header for HNI objects with NativeData payloads. see native-data.h
 // for details about memory layout.
-struct NativeNode {
+struct NativeNode : HeapObject {
+  NativeNode(HeaderKind k, uint32_t off) : obj_offset(off) {
+    initHeader(k, 0);
+  }
   uint32_t sweep_index; // index in MM::m_natives
   uint32_t obj_offset; // byte offset from this to ObjectData*
-  HeaderWord<> hdr;
+  uint16_t& typeIndex() { return m_aux16; }
+  uint16_t typeIndex() const { return m_aux16; }
+  uint32_t arOff() const { return m_count; } // from this to ActRec, or 0
 };
 
 // POD type for tracking arbitrary memory ranges
@@ -434,6 +433,12 @@ struct BigHeap {
    * not contained in any heap allocation.
    */
   Header* find(const void* p);
+
+  /*
+   * Sorting helpers
+   */
+  void sortSlabs();
+  void sortBigs();
 
  protected:
   void enlist(MallocNode*, HeaderKind kind, size_t size, type_scan::Index);
@@ -798,21 +803,7 @@ struct MemoryManager {
    */
   StringDataNode& getStringList();
 
-  /*
-   * Methods for maintaining maps of root objects keyed by RootIds.
-   *
-   * The id/object associations are only valid for a single request.  This
-   * interface is useful for extensions that cannot physically hold on to a
-   * req::ptr, etc. or other handle class.
-   */
-  template <typename T> RootId addRoot(req::ptr<T>&& ptr);
-  template <typename T> RootId addRoot(const req::ptr<T>& ptr);
-  template <typename T> req::ptr<T> lookupRoot(RootId tok) const;
-  template <typename T> bool removeRoot(const req::ptr<T>& ptr);
-  template <typename T> bool removeRoot(const T* ptr);
-  template <typename T> req::ptr<T> removeRoot(RootId token);
-  template <typename F> void scanRootMaps(F& m) const;
-  template <typename F> void scanSweepLists(F& m) const;
+  void scanRoots(type_scan::Scanner&) const;
 
   /*
    * Run the experimental collector.
@@ -820,6 +811,9 @@ struct MemoryManager {
   void collect(const char* phase);
   void resetGC();
   void updateNextGc();
+
+  bool isGCEnabled();
+  void setGCEnabled(bool isGCEnabled);
 
   /*
    * beginQuarantine() swaps out the normal freelists. endQuarantine()
@@ -850,9 +844,6 @@ private:
     void sweep() override {}
     void* owner() override { return nullptr; }
   };
-
-  template <typename T>
-  using RootMap = req::hash_map<RootId, req::ptr<T>>;
 
   /*
    * Request-local heap profiling context.
@@ -895,56 +886,9 @@ private:
   void initHole(void* ptr, uint32_t size);
   void initHole();
 
-  void dropRootMaps();
-  void deleteRootMaps();
-
   void requestEagerGC();
   void resetEagerGC();
   void requestGC();
-
-  template <typename T>
-  typename std::enable_if<
-    std::is_base_of<ResourceData,T>::value,
-    RootMap<ResourceData>&
-  >::type getRootMap() {
-    if (UNLIKELY(!m_resourceRoots)) {
-      m_resourceRoots = req::make_raw<RootMap<ResourceData>>();
-    }
-    return *m_resourceRoots;
-  }
-
-  template <typename T>
-  typename std::enable_if<
-    std::is_base_of<ObjectData,T>::value,
-    RootMap<ObjectData>&
-  >::type getRootMap() {
-    if (UNLIKELY(!m_objectRoots)) {
-      m_objectRoots = req::make_raw<RootMap<ObjectData>>();
-    }
-    return *m_objectRoots;
-  }
-
-  template <typename T>
-  typename std::enable_if<
-    std::is_base_of<ResourceData,T>::value,
-    const RootMap<ResourceData>&
-  >::type getRootMap() const {
-    if (UNLIKELY(!m_resourceRoots)) {
-      m_resourceRoots = req::make_raw<RootMap<ResourceData>>();
-    }
-    return *m_resourceRoots;
-  }
-
-  template <typename T>
-  typename std::enable_if<
-    std::is_base_of<ObjectData,T>::value,
-    const RootMap<ObjectData>&
-  >::type getRootMap() const {
-    if (UNLIKELY(!m_objectRoots)) {
-      m_objectRoots = req::make_raw<RootMap<ObjectData>>();
-    }
-    return *m_objectRoots;
-  }
 
   /////////////////////////////////////////////////////////////////////////////
 
@@ -962,15 +906,13 @@ private:
   std::vector<NativeNode*> m_natives;
   SweepableList m_sweepables;
 
-  mutable RootMap<ResourceData>* m_resourceRoots{nullptr};
-  mutable RootMap<ObjectData>* m_objectRoots{nullptr};
   mutable std::vector<req::root_handle*> m_root_handles;
 
   bool m_exiting{false};
-  bool m_sweeping{false};
   bool m_statsIntervalActive;
   bool m_couldOOM{true};
   bool m_bypassSlabAlloc;
+  bool m_gc_enabled{RuntimeOption::EvalEnableGC};
 
   ReqProfContext m_profctx;
   static std::atomic<ReqProfContext*> s_trigger;
@@ -993,8 +935,12 @@ private:
   bool m_enableStatsSync;
 #endif
 
+  int64_t m_req_start_micros;
+
   // freelists to use when quarantine is active
   std::array<FreeList,kNumSmallSizes> m_quarantine;
+
+  TYPE_SCAN_IGNORE_ALL; // heap-scan handles MM fields itslef.
 };
 
 //////////////////////////////////////////////////////////////////////

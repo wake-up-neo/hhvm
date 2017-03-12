@@ -10,6 +10,8 @@
 
 type t
 
+val set_parser_options : t -> ParserOptions.t -> t
+val set_tc_options : t -> TypecheckerOptions.t -> t
 val filename : Relative_path.t
 val load : Relative_path.t -> ServerArgs.options -> t * ServerLocalConfig.t
 val is_compatible : t -> t -> bool
@@ -22,3 +24,5 @@ val load_mini_script    : t -> Path.t option
 val gc_control          : t -> Gc.control
 val sharedmem_config    : t -> SharedMem.config
 val typechecker_options : t -> TypecheckerOptions.t
+val parser_options      : t -> ParserOptions.t
+val formatter_override  : t -> Path.t option

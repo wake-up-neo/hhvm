@@ -60,7 +60,7 @@ let old_parse_with_source source path =
   let file = Relative_path.create Relative_path.Dummy path in
   let errorl, result, _ =
     Errors.do_ begin fun () ->
-      Parser_hack.from_file file
+      Parser_hack.from_file_with_default_popt file
     end
   in
   (Errors.is_empty errorl, stringfy_error errorl)
@@ -187,7 +187,7 @@ let main
       let reminder = "Make sure your case-sensitive spelling is correct." in
       failwith (Printf.sprintf "%s %s" error_msg reminder)
   in
-  EventLogger.init (Daemon.devnull ()) 0.0;
+  EventLogger.init EventLogger.Event_logger_fake 0.0;
   let _ = SharedMem.(init GlobalConfig.default_sharedmem_config) in
   if (String.length filename) = 0 ||
       String.length target_folder = 0 ||

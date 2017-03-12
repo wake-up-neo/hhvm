@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -180,13 +180,22 @@ bool UserFile::openImpl(const String& filename, const String& mode,
       .toArray(),
     invoked
   );
-  if (invoked && (ret.toBoolean() == true)) {
-    setIsClosed(false);
-    return true;
+  if (!invoked || !ret.toBoolean()) {
+    raise_warning("\"%s::stream_open\" call failed", m_cls->name()->data());
+    return false;
   }
 
-  raise_warning("\"%s::stream_open\" call failed", m_cls->name()->data());
-  return false;
+  if (m_StreamTell && (memchr(mode.data(), 'a', mode.size()) != nullptr)) {
+    // Call stream_tell() to determine if the initial position isn't 0.  If the
+    // call fails just assume we're starting at a position of 0.
+    ret = invoke(m_StreamTell, s_stream_tell, Array::Create(), invoked);
+    if (invoked && ret.isInteger()) {
+      setPosition(ret.toInt64());
+    }
+  }
+
+  setIsClosed(false);
+  return true;
 }
 
 bool UserFile::close() {
@@ -401,6 +410,8 @@ static int statFill(Variant stat_array, struct stat* stat_sb)
     return -1;
   }
   auto a = stat_array.getArrayData();
+  // make sure to clear all the unset fields (like st_mtim.tv_nsec).
+  memset(stat_sb, 0, sizeof(*stat_sb));
   stat_sb->st_dev = a->get(s_dev.get()).toInt64();
   stat_sb->st_ino = a->get(s_ino.get()).toInt64();
   stat_sb->st_mode = a->get(s_mode.get()).toInt64();

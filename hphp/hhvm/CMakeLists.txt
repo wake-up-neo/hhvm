@@ -1,9 +1,11 @@
+include(HHVMExtensionConfig)
+
 set(CXX_SOURCES)
 auto_sources(files "*.cpp" "")
 list(APPEND CXX_SOURCES ${files})
 
 # Windows targets use a generated rc file for embedding libraries
-if(CYGWIN OR MSVC OR MINGW)
+if(MSVC)
   list(APPEND CXX_SOURCES ${CMAKE_CURRENT_BINARY_DIR}/embed.rc)
 endif()
 
@@ -28,6 +30,7 @@ if (GOLD_FOUND AND ENABLE_LD_GOLD)
   target_link_libraries(hhvm ${LINKER_SCRIPT})
 endif()
 hphp_link(hhvm)
+HHVM_CONFIGURE_TARGET_FOR_EXTENSION_DEPENDENCIES(hhvm)
 
 if (ENABLE_SPLIT_DWARF)
   if (NOT GOLD_FOUND)
@@ -35,14 +38,6 @@ if (ENABLE_SPLIT_DWARF)
   endif()
   message(STATUS "Enabled split DWARF files")
   target_link_libraries(hhvm debug "-Wl,--gdb-index")
-endif()
-
-# cygwin has an issue with linking to crypt and intl
-# this is the only way the redirection stuff works
-if(CYGWIN)
-  target_link_libraries(hhvm crypt)
-  target_link_libraries(hhvm intl)
-  target_link_libraries(hhvm dbghelp)
 endif()
 
 # Check whether atomic operations require -latomic or not

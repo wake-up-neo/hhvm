@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -41,8 +41,11 @@ Vout& Vout::operator<<(const Vinstr& inst) {
   code.back().voff = m_irctx.voff == Vinstr::kInvalidVoff
     ? m_unit.cur_voff++
     : m_irctx.voff;
-  // TODO(t13282062)
-  // assertx(m_unit.cur_voff != Vinstr::kInvalidVoff);
+
+  // Don't let `voff' overflow.  It's only used for debugging and logging, so a
+  // value of UINT_MAX - 1 can be considered to have an implicit "or greater"
+  // qualifier attached.
+  if (UNLIKELY(m_unit.cur_voff == Vinstr::kInvalidVoff)) --m_unit.cur_voff;
 
   FTRACE(6, "Vout << {}\n", show(m_unit, inst));
   return *this;
@@ -103,6 +106,24 @@ Vauto::~Vauto() {
           break;
       }
       return;
+    }
+  }
+
+  if (unit().padding) {
+    // Force emission due to padding
+    if (!main().closed()) main() << fallthru{};
+    if (!cold().closed()) cold() << fallthru{};
+
+    switch (arch()) {
+      case Arch::X64:
+        emitX64(unit(), m_text, m_fixups, nullptr);
+        break;
+      case Arch::ARM:
+        emitARM(unit(), m_text, m_fixups, nullptr);
+        break;
+      case Arch::PPC64:
+        emitPPC64(unit(), m_text, m_fixups, nullptr);
+        break;
     }
   }
 }

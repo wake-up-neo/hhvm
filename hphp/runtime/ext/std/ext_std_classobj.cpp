@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -198,7 +198,7 @@ Variant HHVM_FUNCTION(get_class_vars, const String& className) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-Variant HHVM_FUNCTION(get_class, const Variant& object /* = null_variant */) {
+Variant HHVM_FUNCTION(get_class, const Variant& object /* = uninit_variant */) {
   if (object.isNull()) {
     // No arg passed.
     auto cls = arGetContextClassImpl<true>(GetCallerFrame());
@@ -229,7 +229,7 @@ Variant HHVM_FUNCTION(get_called_class) {
 }
 
 Variant HHVM_FUNCTION(get_parent_class,
-                      const Variant& object /* = null_variant */) {
+                      const Variant& object /* = uninit_variant */) {
   const Class* cls;
   if (object.isNull()) {
     cls = arGetContextClass(GetCallerFrame());

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -33,6 +33,7 @@ bool isInlining(const IRGS& env) {
 bool beginInlining(IRGS& env,
                    unsigned numParams,
                    const Func* target,
+                   SrcKey startSk,
                    Offset returnBcOffset,
                    ReturnTarget returnTarget) {
   auto const& fpiStack = env.irb->fs().fpiStack();
@@ -58,56 +59,65 @@ bool beginInlining(IRGS& env,
     return false;
   }
 
-  always_assert(!isFPushCuf(info.fpushOpc) && !info.interp);
+  always_assert(isFPush(info.fpushOpc) &&
+                !isFPushCuf(info.fpushOpc) &&
+                info.inlineEligible);
 
-  SSATmp** params = (SSATmp**)alloca(sizeof(SSATmp*) * numParams);
-  for (unsigned i = 0; i < numParams; ++i) {
-    params[numParams - i - 1] = popF(env);
-  }
-
-  /*
-    NB: Now that we've pushed the callee's arguments off the stack and thus
-    modified the caller's frame state, we're committed to inlining. If we bail
-    out from now on, the caller's frame state will be as if the arguments don't
-    exist on the stack (even though they do).
-   */
-
-  auto const prevSP    = fpiStack.back().returnSP;
-  auto const prevSPOff = fpiStack.back().returnSPOff;
-  auto const calleeSP  = sp(env);
+  auto const prevSP = fpiStack.back().returnSP;
+  auto const prevBCSPOff = fpiStack.back().returnSPOff;
+  auto const calleeSP = sp(env);
 
   always_assert_flog(
     prevSP == calleeSP,
     "FPI stack pointer and callee stack pointer didn't match in beginInlining"
   );
 
-  // NB: the arguments were just popped from the VM stack above, so the VM
-  // stack-pointer is conceptually pointing to the callee's ActRec at this
-  // point.
-  IRSPRelOffset calleeAROff = bcSPOffset(env);
+  // The VM stack-pointer is conceptually pointing to the last
+  // parameter, so we need to add numParams to get to the ActRec
+  IRSPRelOffset calleeAROff = spOffBCFromIRSP(env) + numParams;
 
   auto ctx = [&] () -> SSATmp* {
-    if (info.ctx) {
-      if (info.ctx->isA(TNullptr)) {
-        // We get a TNullptr either because its not a method,
-        // or because we looked up the method dynamically.
-        // In the former, we don't need to set the ctx, and
-        // in the latter, we must not set the ctx, since
-        // it is guaranteed to be incorrect.
-        return nullptr;
-      }
-      if (info.ctx->type() <= info.ctxType) {
-        return info.ctx;
-      }
-      return gen(env, AssertType, info.ctxType, info.ctx);
-    }
-    if (isFPushFunc(info.fpushOpc)) {
+    if (!target->implCls()) {
       return nullptr;
     }
-    if (info.ctxType <= TObj) {
-      constexpr int32_t adjust = AROFF(m_thisUnsafe) / sizeof(Cell);
-      IRSPRelOffset ctxOff = calleeAROff + adjust;
-      return gen(env, LdStk, info.ctxType, IRSPRelOffsetData{ctxOff}, sp(env));
+    auto ty = info.ctxType;
+    if (!target->isClosureBody()) {
+      if (target->isStaticInPrologue() ||
+          (!hasThis(env) &&
+           isFPushClsMethod(info.fpushOpc))) {
+        assertx(!ty.maybe(TObj));
+        if (ty.hasConstVal(TCctx)) {
+          ty = Type::ExactCls(ty.cctxVal().cls());
+        } else if (!ty.hasConstVal(TCls)) {
+          if (!ty.maybe(TCls)) ty = TCls;
+          ty &= Type::SubCls(target->cls());
+        }
+      } else {
+        if (target->attrs() & AttrRequiresThis ||
+            isFPushObjMethod(info.fpushOpc) ||
+            ty <= TObj) {
+          ty &= Type::SubObj(target->cls());
+        }
+      }
+    }
+    if (info.ctx && !info.ctx->isA(TNullptr)) {
+      if (info.ctx->type() <= ty) {
+        return info.ctx;
+      }
+      if (info.ctx->type().maybe(ty)) {
+        return gen(env, AssertType, ty, info.ctx);
+      }
+      if (info.ctx->type() <= TCctx && ty <= TCls) {
+        return gen(env, AssertType, ty, gen(env, LdClsCctx, info.ctx));
+      }
+    }
+    if (ty <= TObj) {
+      return gen(env, LdARCtx, ty, IRSPRelOffsetData{calleeAROff}, sp(env));
+    }
+    if (ty <= TCls) {
+      auto const cctx =
+        gen(env, LdARCtx, TCctx, IRSPRelOffsetData{calleeAROff}, sp(env));
+      return gen(env, AssertType, ty, gen(env, LdClsCctx, cctx));
     }
     return nullptr;
   }();
@@ -116,10 +126,20 @@ bool beginInlining(IRGS& env,
   // will be a TCtx (= TObj | TCctx) read from the stack
   assertx(!ctx || (ctx->type() <= (TCtx | TCls) && target->implCls()));
 
+  jit::vector<SSATmp*> params{numParams};
+  for (unsigned i = 0; i < numParams; ++i) {
+    params[numParams - i - 1] = popF(env);
+  }
+
+  // NB: Now that we've popped the callee's arguments off the stack
+  // and thus modified the caller's frame state, we're committed to
+  // inlining. If we bail out from now on, the caller's frame state
+  // will be as if the arguments don't exist on the stack (even though
+  // they do).
+
   if (RuntimeOption::EvalHHIRGenerateAsserts) {
-    auto arFunc = gen(env, LdARFuncPtr,
-                      IRSPRelOffsetData{calleeAROff}, sp(env));
-    gen(env, DbgAssertFunc, arFunc, cns(env, target));
+    gen(env, DbgAssertARFunc, IRSPRelOffsetData{calleeAROff},
+        sp(env), cns(env, target));
   }
 
   gen(env, BeginInlining, IRSPRelOffsetData{calleeAROff}, sp(env));
@@ -128,18 +148,15 @@ bool beginInlining(IRGS& env,
   data.target        = target;
   data.retBCOff      = returnBcOffset;
   data.ctx           = target->isClosureBody() ? nullptr : ctx;
-  data.retSPOff      = prevSPOff;
+  data.retSPOff      = prevBCSPOff;
   data.spOffset      = calleeAROff;
   data.numNonDefault = numParams;
 
-  // Push state and update the marker before emitting any instructions so
-  // they're all given markers in the callee.
-  auto const key = SrcKey {
-    target,
-    target->getEntryForNumArgs(numParams),
-    false
-  };
-  env.bcStateStack.emplace_back(key);
+  assertx(startSk.func() == target &&
+          startSk.offset() == target->getEntryForNumArgs(numParams) &&
+          !startSk.resumed());
+
+  env.bcStateStack.emplace_back(startSk);
   env.inlineReturnTarget.emplace_back(returnTarget);
   env.inlineLevel++;
   updateMarker(env);
@@ -151,21 +168,79 @@ bool beginInlining(IRGS& env,
   }
   emitPrologueLocals(env, numParams, target, ctx);
 
+  // "Kill" all the class-ref slots initially. This normally won't do anything
+  // (the class-ref slots should be unoccupied at this point), but in debugging
+  // builds it will write poison values to them.
+  for (uint32_t slot = 0; slot < target->numClsRefSlots(); ++slot) {
+    killClsRef(env, slot);
+  }
+
+  if (data.ctx && data.ctx->isA(TObj)) {
+    assertx(startSk.hasThis());
+  } else if (data.ctx && !data.ctx->type().maybe(TObj)) {
+    assertx(!startSk.hasThis());
+  } else if (target->cls()) {
+    auto const psk =
+      SrcKey{startSk.func(), startSk.offset(), SrcKey::PrologueTag{}};
+    env.bcStateStack.back() = psk;
+    updateMarker(env);
+
+    auto sideExit = [&] (bool hasThis) {
+      hint(env, Block::Hint::Unlikely);
+      auto const sk =
+        SrcKey { startSk.func(), startSk.offset(), false, hasThis };
+      gen(
+        env,
+        ReqBindJmp,
+        ReqBindJmpData {
+          sk,
+          FPInvOffset { startSk.func()->numSlotsInFrame() },
+          spOffBCFromIRSP(env),
+          TransFlags{}
+        },
+        sp(env),
+        fp(env)
+      );
+    };
+
+    ifThenElse(
+      env,
+      [&] (Block* taken) {
+        auto const maybeThis = gen(env, LdCtx, fp(env));
+        gen(env, CheckCtxThis, taken, maybeThis);
+      },
+      [&] {
+        if (!startSk.hasThis()) {
+          sideExit(true);
+        }
+      },
+      [&] {
+        if (startSk.hasThis()) {
+          sideExit(false);
+        }
+      }
+    );
+
+    env.bcStateStack.back() = startSk;
+    updateMarker(env);
+  }
+
   return true;
 }
 
 bool conjureBeginInlining(IRGS& env,
                           const Func* func,
+                          SrcKey startSk,
                           Type thisType,
                           const std::vector<Type>& args,
                           ReturnTarget returnTarget) {
   auto conjure = [&](Type t) {
-    return (t.hasConstVal() ||
-            t.subtypeOfAny(TNullptr, TInitNull, TUninit)) ?
-      cns(env, t) : gen(env, Conjure, t);
+    return t.admitsSingleVal() ? cns(env, t) : gen(env, Conjure, t);
   };
 
+  always_assert(isFPush(env.context.callerFPushOp));
   auto const numParams = args.size();
+  env.irb->fs().setFPushOverride(env.context.callerFPushOp);
   fpushActRec(
     env,
     cns(env, func),
@@ -173,6 +248,7 @@ bool conjureBeginInlining(IRGS& env,
     numParams,
     nullptr /* invName */
   );
+  assertx(!env.irb->fs().hasFPushOverride());
 
   for (auto const argType : args) {
     push(env, conjure(argType));
@@ -182,6 +258,7 @@ bool conjureBeginInlining(IRGS& env,
     env,
     numParams,
     func,
+    startSk,
     0 /* returnBcOffset */,
     returnTarget
   );
@@ -191,8 +268,17 @@ void implInlineReturn(IRGS& env) {
   assertx(!curFunc(env)->isPseudoMain());
   assertx(!resumed(env));
 
+  auto const& fs = env.irb->fs();
+
+  // The offset of our caller's FP relative to our own.
+  auto const callerFPOff =
+    // Offset of the (unchanged) vmsp relative to our fp...
+    - fs.irSPOff()
+    // ...plus the offset of our parent's fp relative to vmsp.
+    + FPInvOffset{0}.to<IRSPRelOffset>(fs.callerIRSPOff()).offset;
+
   // Return to the caller function.
-  gen(env, InlineReturn, fp(env));
+  gen(env, InlineReturn, FPRelOffsetData { callerFPOff }, fp(env));
 
   // Pop the inlined frame in our IRGS.  Be careful between here and the
   // updateMarker() below, where the caller state isn't entirely set up.
@@ -207,12 +293,23 @@ void implInlineReturn(IRGS& env) {
 }
 
 void endInlining(IRGS& env) {
+  // The IR instructions should be associated with one of the return bytecodes,
+  // which should be one of the predecessors of this block.
+  auto const curBlock = env.irb->curBlock();
+  always_assert(curBlock && !curBlock->preds().empty());
+  auto const bcContext = curBlock->preds().front().inst()->bcctx();
+  env.bcStateStack.back().setOffset(bcContext.marker.sk().offset());
+  updateMarker(env);
+  env.irb->resetCurIROff(bcContext.iroff + 1);
+
   decRefLocalsInline(env);
   decRefThis(env);
 
+  auto const retTy = callReturnType(curFunc(env));
   auto const retVal = pop(env, DataTypeGeneric);
+
   implInlineReturn(env);
-  push(env, retVal);
+  push(env, gen(env, AssertType, retTy, retVal));
 }
 
 void conjureEndInlining(IRGS& env, bool builtin) {
@@ -220,7 +317,7 @@ void conjureEndInlining(IRGS& env, bool builtin) {
     endInlining(env);
   }
   gen(env, ConjureUse, pop(env));
-  gen(env, Halt);
+  gen(env, EndBlock);
 }
 
 void retFromInlined(IRGS& env) {

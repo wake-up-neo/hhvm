@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,6 +20,7 @@
 #include "hphp/runtime/vm/jit/perf-counters.h"
 #include "hphp/runtime/vm/jit/tc.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
+#include "hphp/runtime/vm/jit/write-lease.h"
 
 #include "hphp/runtime/vm/runtime.h"
 
@@ -40,11 +41,9 @@ void enterTC(TCA start, ActRec* stashedAR) {
   assertx(((uintptr_t)vmsp() & (sizeof(Cell) - 1)) == 0);
   assertx(((uintptr_t)vmfp() & (sizeof(Cell) - 1)) == 0);
 
-  assertx(!GetWriteLease().amOwner());
-
   INC_TPC(enter_tc);
   if (Trace::moduleEnabled(Trace::ringbuffer, 1)) {
-    auto skData = SrcKey{liveFunc(), vmpc(), liveResumed()}.toAtomicInt();
+    auto const skData = liveSK().toAtomicInt();
     Trace::ringbufferEntry(Trace::RBTypeEnterTC, skData, (uint64_t)start);
   }
 

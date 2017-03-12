@@ -19,8 +19,9 @@ Class* c_ImmSet::s_cls;
 inline
 bool invokeAndCastToBool(const CallCtx& ctx, int argc,
                          const TypedValue* argv) {
-  Variant ret;
-  g_context->invokeFuncFew(ret.asTypedValue(), ctx, argc, argv);
+  auto ret = Variant::attach(
+    g_context->invokeFuncFew(ctx, argc, argv)
+  );
   return ret.toBoolean();
 }
 
@@ -114,7 +115,7 @@ void BaseSet::addImpl(int64_t k) {
   if (!raw) {
     mutate();
   }
-  auto h = hashint(k);
+  auto h = hash_int64(k);
   auto p = findForInsert(k, h);
   assert(p);
   if (validPos(*p)) {
@@ -184,7 +185,7 @@ void BaseSet::add(StringData *key) {
 
 void BaseSet::addFront(int64_t k) {
   mutate();
-  auto h = hashint(k);
+  auto h = hash_int64(k);
   auto p = findForInsert(k, h);
   assert(p);
   if (validPos(*p)) {
@@ -322,18 +323,7 @@ Object c_Set::getImmutableCopy() {
 bool BaseSet::Equals(const ObjectData* obj1, const ObjectData* obj2) {
   auto st1 = static_cast<const BaseSet*>(obj1);
   auto st2 = static_cast<const BaseSet*>(obj2);
-  if (st1->m_size != st2->m_size) return false;
-
-  auto eLimit = st1->elmLimit();
-  for (auto e = st1->firstElm(); e != eLimit; e = nextElm(e, eLimit)) {
-    if (e->hasIntKey()) {
-      if (!st2->contains(e->data.m_data.num)) return false;
-    } else {
-      assert(e->hasStrKey());
-      if (!st2->contains(e->data.m_data.pstr)) return false;
-    }
-  }
-  return true;
+  return ArrayData::Equal(st1->arrayData(), st2->arrayData());
 }
 
 BaseSet::~BaseSet() {
@@ -439,17 +429,16 @@ BaseSet::php_map(const Variant& callback) {
   TypedValue argv[argc];
   for (ssize_t pos = iter_begin(); iter_valid(pos); pos = iter_next(pos)) {
     auto e = iter_elm(pos);
-    TypedValue tvCbRet;
     int32_t pVer = m_version;
     if (useKey) {
       argv[0] = e->data;
     }
     argv[argc-1] = e->data;
-    g_context->invokeFuncFew(&tvCbRet, ctx, argc, argv);
-    // Now that tvCbRet is live, make sure to decref even if we throw.
-    SCOPE_EXIT { tvRefcountedDecRef(&tvCbRet); };
+    auto cbRet = Variant::attach(
+      g_context->invokeFuncFew(ctx, argc, argv)
+    );
     if (UNLIKELY(m_version != pVer)) throw_collection_modified();
-    set->addRaw(&tvCbRet);
+    set->addRaw(cbRet.asTypedValue());
   }
   // ... and shrink back if that was incorrect
   set->shrinkIfCapacityTooHigh(oldCap);

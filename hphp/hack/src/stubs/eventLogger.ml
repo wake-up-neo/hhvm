@@ -8,7 +8,20 @@
  *
  *)
 
-let init _ _ = ()
+type init_settings = {
+  scuba_table_name : string;
+  (** File descriptors for the logger daemon's stdout and stderr. *)
+  log_out : Unix.file_descr;
+  log_err : Unix.file_descr;
+}
+
+type init_mode =
+  (** Sends everything to /dev/null. *)
+  | Event_logger_fake
+  | Event_logger_real of init_settings
+
+let init ?log_pid:_ ?init_id:_ _ _ = ()
+let set_init_type _ = ()
 let log_if_initialized _ = ()
 let master_exception _ = ()
 let worker_exception _ = ()
@@ -25,5 +38,9 @@ let log_gc_stats () = ()
 let flush _ = ()
 let watchman_error _ = ()
 let watchman_warning _ = ()
+let watchman_died_caught _ = ()
+let watchman_uncaught_failure _ = ()
+let watchman_connection_reestablished _ = ()
+let watchman_connection_reestablishment_failed _ = ()
 let watchman_timeout _ = ()
 let dfind_ready _ _ = ()

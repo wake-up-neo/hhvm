@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -68,7 +68,7 @@ public:
     return const_cast<ArrayData*>(ad);
   }
   static size_t Vsize(const ArrayData*);
-  static void NvGetKey(const ArrayData* ad, TypedValue* out, ssize_t pos);
+  static Cell NvGetKey(const ArrayData* ad, ssize_t pos);
   static const Variant& GetValueRef(const ArrayData*, ssize_t pos);
 
   static bool ExistsInt(const ArrayData* ad, int64_t k);
@@ -79,12 +79,11 @@ public:
   static const TypedValue* NvGetStr(const ArrayData*, const StringData* k);
   static constexpr auto NvTryGetStr = &NvGetStr;
 
-  static ArrayData* LvalInt(ArrayData*, int64_t k, Variant*& ret, bool copy);
+  static ArrayLval LvalInt(ArrayData*, int64_t k, bool copy);
   static constexpr auto LvalIntRef = &LvalInt;
-  static ArrayData* LvalStr(ArrayData*, StringData* k, Variant*& ret,
-                            bool copy);
+  static ArrayLval LvalStr(ArrayData*, StringData* k, bool copy);
   static constexpr auto LvalStrRef = &LvalStr;
-  static ArrayData* LvalNew(ArrayData*, Variant*& ret, bool copy);
+  static ArrayLval LvalNew(ArrayData*, bool copy);
   static constexpr auto LvalNewRef = &LvalNew;
 
   static ArrayData* SetInt(ArrayData*, int64_t k, Cell v, bool copy);
@@ -145,8 +144,8 @@ private:
   static const GlobalsArray* asGlobals(const ArrayData* ad);
 
 public:
-  template<class F> void scan(F& mark) const {
-    mark(m_tab);
+  void scan(type_scan::Scanner& scanner) const {
+    scanner.scan(m_tab);
   }
 
 private:

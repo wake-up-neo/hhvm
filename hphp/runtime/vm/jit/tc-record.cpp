@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -47,11 +47,11 @@ void recordPerfRelocMap(
     SrcKey sk, int argNum,
     const GrowableVector<IncomingBranch> &incomingBranchesIn,
     CGMeta& fixups) {
-  String info = perfRelocMapInfo(start, end,
-                                 coldStart, coldEnd,
-                                 sk, argNum,
-                                 incomingBranchesIn,
-                                 fixups);
+  auto info = perfRelocMapInfo(start, end,
+                               coldStart, coldEnd,
+                               sk, argNum,
+                               incomingBranchesIn,
+                               fixups);
   Debug::DebugInfo::Get()->recordRelocMap(start, end, info);
 }
 
@@ -66,19 +66,15 @@ void recordRelocationMetaData(SrcKey sk, SrcRec& srcRec, const TransLoc& loc,
                      fixups);
 }
 
-static Debug::TCRange rangeFrom(const CodeBlock& cb, const TCA addr,
-                                bool isAcold) {
-  assertx(cb.contains(addr));
-  return Debug::TCRange(addr, cb.frontier(), isAcold);
-}
-
 void recordGdbTranslation(SrcKey sk, const Func* srcFunc, const CodeBlock& cb,
-                          const TCA start, bool exit, bool inPrologue) {
-  if (start != cb.frontier()) {
+                          const TCA start, const TCA end, bool exit,
+                          bool inPrologue) {
+  assertx(cb.contains(start) && cb.contains(end));
+  if (start != end) {
     assertOwnsCodeLock();
     if (!RuntimeOption::EvalJitNoGdb) {
       Debug::DebugInfo::Get()->recordTracelet(
-        rangeFrom(cb, start, &cb == &code().cold()),
+        Debug::TCRange(start, end, &cb == &code().cold()),
         srcFunc,
         srcFunc->unit() ? srcFunc->unit()->at(sk.offset()) : nullptr,
         exit, inPrologue
@@ -86,7 +82,7 @@ void recordGdbTranslation(SrcKey sk, const Func* srcFunc, const CodeBlock& cb,
     }
     if (RuntimeOption::EvalPerfPidMap) {
       Debug::DebugInfo::Get()->recordPerfMap(
-        rangeFrom(cb, start, &cb == &code().cold()),
+        Debug::TCRange(start, end, &cb == &code().cold()),
         sk,
         srcFunc,
         exit,
@@ -127,8 +123,19 @@ void reportJitMaturity(const CodeCache& code) {
     // code that will give us full performance, so recover the "fully mature"
     // size with some math.
     auto const fullSize = RuntimeOption::EvalJitMatureSize * 5;
-    auto const after = codeSize >= fullSize ? 100
-                                            : (codeSize * 100 / fullSize);
+    auto after = codeSize >= fullSize
+        ? 100
+        : (static_cast<int64_t>(
+              std::pow(
+                  static_cast<double>(codeSize) / static_cast<double>(fullSize),
+                  RuntimeOption::EvalJitMaturityExponent) *
+              100));
+    if (after < 1) {
+      after = 1;
+    } else if (after > 99 && code.main().used() < CodeCache::AMaxUsage) {
+      // Make jit maturity is less than 100 before the JIT stops.
+      after = 99;
+    }
     auto const before = jitMaturityCounter->getValue();
     if (after > before) jitMaturityCounter->setValue(after);
   }
@@ -143,9 +150,9 @@ void reportJitMaturity(const CodeCache& code) {
   }
 }
 
-void logTranslation(const TransEnv& env) {
+void logTranslation(const TransEnv& env, const TransRange& range) {
   auto nanos = HPHP::Timer::GetThreadCPUTimeNanos() - env.unit->startNanos();
-  StructuredLogEntry cols;
+  auto& cols = *env.unit->logEntry();
   auto& context = env.unit->context();
   auto kind = show(context.kind);
   cols.setStr("trans_kind", !debug ? kind : kind + "_debug");
@@ -188,6 +195,11 @@ void logTranslation(const TransEnv& env) {
     cols.setInt("num_vblocks_cold", num_vblocks[(int)AreaIndex::Cold]);
     cols.setInt("num_vblocks_frozen", num_vblocks[(int)AreaIndex::Frozen]);
   }
+  // x64 stats
+  cols.setInt("main_size", range.main.size());
+  cols.setInt("cold_size", range.cold.size());
+  cols.setInt("frozen_size", range.frozen.size());
+
   // finish & log
   StructuredLog::log("hhvm_jit", cols);
 }

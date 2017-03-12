@@ -123,7 +123,7 @@ const Abi helper_abi {
 };
 
 constexpr PhysReg gp_args[] = {
-  reg::r3, reg::r4, reg::r5, reg::r6, reg::r7, reg::r8, reg::r9
+  reg::r3, reg::r4, reg::r5, reg::r6, reg::r7, reg::r8, reg::r9, reg::r10
 };
 
 constexpr PhysReg simd_args[] = {
@@ -172,12 +172,19 @@ PhysReg rarg_simd(size_t i) {
   assertx(i < num_arg_regs_simd());
   return simd_args[i];
 }
+PhysReg rarg_ind_ret(size_t i) {
+  assertx(i < num_arg_regs_ind_ret());
+  return PhysReg();
+}
 
 size_t num_arg_regs() {
   return sizeof(gp_args) / sizeof(PhysReg);
 }
 size_t num_arg_regs_simd() {
   return sizeof(simd_args) / sizeof(PhysReg);
+}
+size_t num_arg_regs_ind_ret() {
+  return 0;
 }
 
 

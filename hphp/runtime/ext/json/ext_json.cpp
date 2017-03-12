@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -54,6 +54,7 @@ const int64_t k_JSON_FB_UNLIMITED      = 1<<21;
 const int64_t k_JSON_FB_EXTRA_ESCAPES  = 1<<22;
 const int64_t k_JSON_FB_COLLECTIONS    = 1<<23;
 const int64_t k_JSON_FB_STABLE_MAPS    = 1<<24;
+const int64_t k_JSON_FB_HACK_ARRAYS    = 1<<25;
 
 const int64_t k_JSON_ERROR_NONE
   = json_error_codes::JSON_ERROR_NONE;
@@ -138,20 +139,26 @@ TypedValue HHVM_FUNCTION(json_decode, const String& json,
   if (json.empty()) {
     return make_tv<KindOfNull>();
   }
+  if (depth < 0 || depth > INT_MAX) {
+    json_set_last_error_code(json_error_codes::JSON_ERROR_DEPTH);
+    return make_tv<KindOfNull>();
+  }
 
   const int64_t supported_options =
     k_JSON_FB_LOOSE |
     k_JSON_FB_COLLECTIONS |
     k_JSON_FB_STABLE_MAPS |
-    k_JSON_BIGINT_AS_STRING;
+    k_JSON_BIGINT_AS_STRING |
+    k_JSON_FB_HACK_ARRAYS;
   int64_t parser_options = options & supported_options;
   Variant z;
-  if (JSON_parser(z, json.data(), json.size(), assoc, depth, parser_options)) {
-    return tvReturn(std::move(z));
-  }
-
+  const auto ok =
+    JSON_parser(z, json.data(), json.size(), assoc, depth, parser_options);
   if (UNLIKELY(StructuredLog::coinflip(RuntimeOption::EvalSerDesSampleRate))) {
     StructuredLog::logSerDes("json", "des", json, z);
+  }
+  if (ok) {
+    return tvReturn(std::move(z));
   }
 
   String trimmed = HHVM_FN(trim)(json, "\t\n\r ");
@@ -249,6 +256,7 @@ struct JsonExtension final : Extension {
     HHVM_RC_INT(JSON_FB_UNLIMITED, k_JSON_FB_UNLIMITED);
     HHVM_RC_INT(JSON_FB_EXTRA_ESCAPES, k_JSON_FB_EXTRA_ESCAPES);
     HHVM_RC_INT(JSON_FB_COLLECTIONS, k_JSON_FB_COLLECTIONS);
+    HHVM_RC_INT(JSON_FB_HACK_ARRAYS, k_JSON_FB_HACK_ARRAYS);
     HHVM_RC_INT(JSON_FB_STABLE_MAPS, k_JSON_FB_STABLE_MAPS);
     HHVM_RC_INT(JSON_ERROR_NONE, k_JSON_ERROR_NONE);
     HHVM_RC_INT(JSON_ERROR_DEPTH, k_JSON_ERROR_DEPTH);
@@ -270,10 +278,6 @@ struct JsonExtension final : Extension {
 
   void requestInit() override {
     json_parser_init();
-  }
-
-  void vscan(IMarker& mark) const override {
-    json_parser_scan(mark);
   }
 
 } s_json_extension;

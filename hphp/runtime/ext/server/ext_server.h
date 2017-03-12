@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -47,6 +47,7 @@ String HHVM_FUNCTION(pagelet_server_task_result,
                      int64_t timeout_ms);
 int64_t HHVM_FUNCTION(pagelet_server_tasks_started);
 void HHVM_FUNCTION(pagelet_server_flush);
+bool HHVM_FUNCTION(pagelet_server_is_done);
 bool HHVM_FUNCTION(xbox_send_message,
                    const String& msg,
                    VRefParam ret,

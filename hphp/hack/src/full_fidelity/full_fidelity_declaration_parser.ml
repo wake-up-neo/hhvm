@@ -9,7 +9,6 @@
  *)
 
 module Token = Full_fidelity_minimal_token
-module Syntax = Full_fidelity_minimal_syntax
 module SyntaxKind = Full_fidelity_syntax_kind
 module TokenKind = Full_fidelity_token_kind
 module SourceText = Full_fidelity_source_text
@@ -18,7 +17,7 @@ module Operator = Full_fidelity_operator
 module SimpleParser = Full_fidelity_simple_parser.WithLexer(Full_fidelity_lexer)
 
 open TokenKind
-open Syntax
+open Full_fidelity_minimal_syntax
 
 module WithExpressionAndStatementAndTypeParser
   (ExpressionParser : Full_fidelity_expression_parser_type.ExpressionParserType)
@@ -91,39 +90,37 @@ module WithExpressionAndStatementAndTypeParser
       require-once-directive
 
     require-multiple-directive:
-      require  (  include-filename  )  ;
       require  include-filename  ;
 
     include-filename:
       expression
 
     require-once-directive:
-      require_once  (  include-filename  )  ;
       require_once  include-filename  ;
-    TODO The php spec says that include and include_once is followed by
-      expression, we need to know what kind of expression is allowed.
-    *)
 
-    let (parser, require) = next_token parser in
-    let require = make_token require in
-    let (parser, left_paren) = optional_token parser LeftParen in
-    let (parser, filename) = parse_expression parser in
-    (* ERROR RECOVERY: TODO: We could detect if there is a right paren but
-       no left paren and give an error saying the left paren is missing. *)
-    let (parser, right_paren) =
-      if is_missing left_paren then (parser, (make_missing()))
-      else expect_right_paren parser in
+    In non-strict mode we allow an inclusion directive (without semi) to be
+    used as an expression. It is therefore easier to actually parse this as:
+
+    inclusion-directive:
+      inclusion-expression  ;
+
+    inclusion-expression:
+      require include-filename
+      require_once include-filename
+    *)
+    let (parser, expr) = parse_expression parser in
     let (parser, semi) = expect_semicolon parser in
-    let result = make_inclusion_directive
-      require left_paren filename right_paren semi in
+    let result = make_inclusion_directive expr semi in
     (parser, result)
 
-  and parse_alias_declaration parser =
+  and parse_alias_declaration parser attr =
     (* SPEC
       alias-declaration:
-        type  name  generic-type-parameter-list-opt  =  type-specifier  ;
-        newtype  name  generic-type-parameter-list-opt type-constraint-opt  =
-          type-specifier  ;
+        attribute-spec-opt type  name
+          generic-type-parameter-list-opt  =  type-specifier  ;
+        attribute-spec-opt newtype  name
+          generic-type-parameter-list-opt type-constraint-opt
+            =  type-specifier  ;
     *)
 
     (* ERROR RECOVERY: We allow the "type" version to have a constraint in the
@@ -139,7 +136,8 @@ module WithExpressionAndStatementAndTypeParser
     let (parser, equal) = expect_equal parser in
     let (parser, ty) = parse_type_specifier parser in
     let (parser, semi) = expect_semicolon parser in
-    let result = make_alias token name generic constr equal ty semi in
+    let result = make_alias_declaration
+      attr token name generic constr equal ty semi in
     (parser, result)
 
   and parse_enumerator parser =
@@ -151,7 +149,10 @@ module WithExpressionAndStatementAndTypeParser
       *)
     (* TODO: Add an error to a later pass that determines the value is
              a constant. *)
-    let (parser, name) = expect_name parser in
+
+    (* TODO: We must allow TRUE to be a legal enum member name; here we allow
+      any keyword.  Consider making this more strict. *)
+    let (parser, name) = expect_name_allow_keywords parser in
     let (parser, equal) = expect_equal parser in
     let (parser, value) = parse_expression parser in
     let (parser, semicolon) = expect_semicolon parser  in
@@ -164,27 +165,13 @@ module WithExpressionAndStatementAndTypeParser
         enumerator
         enumerator-list   enumerator
     *)
-    let rec aux acc parser =
-      let token = peek_token parser in
-      match Token.kind token with
-      | RightBrace -> (parser, make_list (List.rev acc))
-      | EndOfFile ->
-        (* ERROR RECOVERY: reach end of file, expect brace of enumerator *)
-        let parser = with_error parser SyntaxError.error1040 in
-        (parser, make_error [make_token token])
-      | _ ->
-        let (parser, enumerator) = parse_enumerator parser in
-        aux (enumerator :: acc) parser
-    in
-    let token = peek_token parser in
-    match Token.kind token with
-    | RightBrace -> parser, make_missing ()
-    | _ -> aux [] parser
+    parse_terminated_list parser parse_enumerator RightBrace
 
-  and parse_enum_declaration parser =
+  and parse_enum_declaration parser attrs =
     (*
     enum-declaration:
-      enum  name  enum-base  type-constraint-opt  {  enumerator-list-opt  }
+      attribute-specification-opt enum  name  enum-base  type-constraint-opt /
+        {  enumerator-list-opt  }
     enum-base:
       :  int
       :  string
@@ -199,11 +186,10 @@ module WithExpressionAndStatementAndTypeParser
     let (parser, colon) = expect_colon parser in
     let (parser, base) = parse_type_specifier parser in
     let (parser, enum_type) = parse_type_constraint_opt parser in
-    let (parser, left_brace, enumerators, right_brace) = parse_delimited_list
-      parser LeftBrace SyntaxError.error1037 RightBrace SyntaxError.error1006
-      parse_enumerator_list_opt in
-    let result = make_enum
-      enum name colon base enum_type left_brace enumerators right_brace in
+    let (parser, left_brace, enumerators, right_brace) = parse_braced_list
+      parser parse_enumerator_list_opt in
+    let result = make_enum_declaration
+      attrs enum name colon base enum_type left_brace enumerators right_brace in
     (parser, result)
 
   and parse_namespace_declaration parser =
@@ -231,7 +217,7 @@ module WithExpressionAndStatementAndTypeParser
     | _ ->
       (with_error parser1 SyntaxError.error1004, make_token token) in
     let (parser, body) = parse_namespace_body parser in
-    let result = make_namespace namespace_token name body in
+    let result = make_namespace_declaration namespace_token name body in
     (parser, result)
 
   and parse_namespace_body parser =
@@ -240,7 +226,8 @@ module WithExpressionAndStatementAndTypeParser
     | Semicolon -> (parser, make_token token)
     | LeftBrace ->
       let left = make_token token in
-      let (parser, body) = parse_declarations parser true in
+      let (parser, body) =
+        parse_terminated_list parser parse_declaration RightBrace in
       let (parser, right) = expect_right_brace parser in
       let result = make_namespace_body left body right in
       (parser, result)
@@ -249,7 +236,7 @@ module WithExpressionAndStatementAndTypeParser
          TODO: Better would be to attempt to recover to the list of
          declarations? Suppose the offending token is "class" for instance? *)
       let parser = with_error parser SyntaxError.error1038 in
-      let result = make_error [make_token token] in
+      let result = make_error (make_token token) in
       (parser, result)
 
   and parse_namespace_use_kind_opt parser =
@@ -309,14 +296,12 @@ module WithExpressionAndStatementAndTypeParser
     (* TODO: Give an error in a later pass if it is not a prefix. *)
     let (parser, prefix) = next_token parser in
     let prefix = make_token prefix in
-    (* TODO: Should we allow a trailing comma?
-       TODO: Does the grammar in the spec reflect that? *)
     let (parser, left, clauses, right) =
       parse_braced_comma_list_opt_allow_trailing
       parser parse_namespace_use_clause in
     let (parser, semi) = expect_semicolon parser in
-    let result = make_namespace_group_use use_token use_kind prefix left
-      clauses right semi in
+    let result = make_namespace_group_use_declaration
+      use_token use_kind prefix left clauses right semi in
     (parser, result)
 
   and parse_namespace_use_declaration parser =
@@ -327,6 +312,8 @@ module WithExpressionAndStatementAndTypeParser
         { namespace-use-clauses }  ;
       use namespace-name-as-a-prefix { namespace-use-kind-clauses  }  ;
 
+      TODO: Add the grammar for the namespace-use-clauses; ensure that it
+      indicates that trailing commas are allowed in the list.
     *)
     (* TODO: ERROR RECOVERY
     In the "simple" format, the kind may only be specified up front.
@@ -342,7 +329,8 @@ module WithExpressionAndStatementAndTypeParser
       let (parser, clauses) = parse_comma_list
         parser Semicolon SyntaxError.error1004 parse_namespace_use_clause in
       let (parser, semi) = expect_semicolon parser in
-      let result = make_namespace_use use_token use_kind clauses semi in
+      let result = make_namespace_use_declaration
+        use_token use_kind clauses semi in
       (parser, result)
 
   and parse_classish_declaration parser attribute_spec =
@@ -358,7 +346,7 @@ module WithExpressionAndStatementAndTypeParser
     let (parser, classish_implements, classish_implements_list) =
       parse_classish_implements_opt parser in
     let (parser, body) = parse_classish_body parser in
-    let syntax = make_classish
+    let syntax = make_classish_declaration
       attribute_spec modifiers token name generic_type_parameter_list
       classish_extends classish_extends_list classish_implements
       classish_implements_list
@@ -387,37 +375,97 @@ module WithExpressionAndStatementAndTypeParser
       | _ -> (with_error parser SyntaxError.error1035, (make_missing()))
 
   and parse_classish_extends_opt parser =
+    (* In this routine we parse a list which starts with "extends" and then
+    consists of comma-separated types.
+
+    The rules for extends lists are:
+
+    * In an interface, the list, if it exists, can have one or more types.
+    * In a class, the list, if it exists, must have one type.
+    * In a trait, there is no extends clause.
+
+    However, we parse the clause in all three cases the same; this makes it
+    easier to report a good error later.
+
+    TODO: Report that error.
+
+
+
+    *)
+
     let (parser1, extends_token) = next_token parser in
     if (Token.kind extends_token) <> Extends then
-      (parser, make_missing (), Syntax.make_missing ())
+      (parser, make_missing (), make_missing ())
     else
-    let (parser, extends_list) = parse_qualified_name_list parser1 in
+    let (parser, extends_list) = parse_special_type_list parser1 in
     (parser, make_token extends_token, extends_list)
 
   and parse_classish_implements_opt parser =
+    (* The rules for implements are similar to those for extends; see above.
+
+    * In a class, the list, if it exists, can have one or more types.
+    * In an interface, there is no implements clause
+    * In a trait, there is no implements clause
+
+    But again, it is easier to simply parse it now and give an error later.
+
+    TODO: Give that error.
+    *)
     let (parser1, implements_token) = next_token parser in
     if (Token.kind implements_token) <> Implements then
-      (parser, make_missing (), Syntax.make_missing ())
+      (parser, make_missing (), make_missing ())
     else
-    let (parser, implements_list) = parse_qualified_name_list parser1 in
+    let (parser, implements_list) = parse_special_type_list parser1 in
     (parser, make_token implements_token, implements_list)
 
-  and parse_qualified_name_list parser =
-    let rec aux parser acc =
-      let token = peek_token parser in
-      match (Token.kind token) with
-        | Comma ->
-            let (parser1, token) = next_token parser in
-            aux parser1 ((make_token token) :: acc)
-        | Name
-        | QualifiedName ->
-            let (parser, classish_reference) = parse_type_specifier parser in
-            aux parser (classish_reference :: acc)
-        | _ -> (parser, acc)
-    in
-    let (parser, qualified_name_list) = aux parser [] in
-    let qualified_name_list = List.rev qualified_name_list in
-    (parser, make_list qualified_name_list)
+  and parse_special_type parser =
+    let (parser1, token) = next_xhp_class_name_or_other parser in
+    match (Token.kind token) with
+    | Comma ->
+      (* ERROR RECOVERY. We expected a type but we got a comma.
+      Give the error that we expected a type, not a name, even though
+      not every type is legal here. *)
+      let parser = with_error parser1 SyntaxError.error1007 in
+      let item = make_missing() in
+      let comma = make_token token in
+      let list_item = make_list_item item comma in
+      (parser, list_item)
+    | Name
+    | XHPClassName
+    | QualifiedName ->
+      let (parser, item) = parse_type_specifier parser in
+      let (parser, comma) = optional_token parser Comma in
+      let list_item = make_list_item item comma in
+      (parser, list_item)
+    | _ ->
+      (* ERROR RECOVERY: We are expecting a type; give an error as above.
+      Don't eat the offending token.
+      *)
+      let parser = with_error parser SyntaxError.error1007 in
+      let list_item = make_list_item (make_missing()) (make_missing()) in
+      (parser, list_item)
+
+  and parse_special_type_list parser =
+    (*
+      An extends / implements list is a comma-separated list of types, but
+      very special types; we want the types to consist of a name and an
+      optional generic type argument list.
+
+      TODO: Can the type name be of the form "foo::bar"? Those do not
+      necessarily start with names. Investigate this.
+
+      Normally we'd use one of the separated list helpers, but there is no
+      specific end token we could use to detect the end of the list, and we
+      want to bail out if we get something that is not a type of the right form.
+      So we have custom logic here.
+
+      TODO: This is one of the rare cases in Hack where a comma-separated list
+      may not have a trailing comma. Is that desirable, or was that an
+      oversight when the trailing comma rules were added?  If possible we
+      should keep the rule as-is, and disallow the trailing comma; it makes
+      parsing and error recovery easier.
+    *)
+    parse_list_until_no_comma parser parse_special_type
 
   and parse_classish_body parser =
     let (parser, left_brace_token) = expect_left_brace parser in
@@ -428,109 +476,218 @@ module WithExpressionAndStatementAndTypeParser
       left_brace_token classish_element_list right_brace_token in
     (parser, syntax)
 
+  and parse_classish_element parser =
+  (*We need to identify an element of a class, trait, etc. Possibilities
+    are:
+
+     // constant-declaration:
+     const T $x = v ;
+     abstract const T $x ;
+
+     // type-constant-declaration
+     const type T = X;
+     abstract const type T;
+
+     // property-declaration:
+     public/private/protected/static T $x;
+     TODO: We may wish to parse "T $x" and give an error indicating
+     TODO: that we were expecting either const or public.
+     Note that a visibility modifier is required; static is optional;
+     any order is allowed.
+     TODO: The spec indicates that abstract is disallowed, but Hack allows
+     TODO: it; resolve this disagreement.
+
+     // method-declaration
+     <<attr>> public/private/protected/abstract/final/static async function
+     Note that a modifier is required, the attr and async are optional.
+     TODO: Hack requires a visibility modifier, unless "static" is supplied,
+     TODO: in which case the method is considered to be public.  Is this
+     TODO: desired? Resolve this disagreement with the spec.
+
+     // constructor-declaration
+     <<attr>> public/private/protected/abstract/final function __construct
+     TODO: Hack allows static constructors and requires a visibility modifier,
+     TODO: as with regular methods. Resolve this disagreement with the spec.
+
+     // destructor-declaration
+     <<attr>> public/private/protected function __destruct
+     TODO: Hack allows static, final and abstract destructors
+     TODO: as with regular methods. Resolve this disagreement with the spec.
+
+     // trait clauses
+    require  extends  qualified-name
+    require  implements  qualified-name
+
+    // XHP class attribute declaration
+    attribute ... ;
+
+    // XHP category declaration
+    category ... ;
+
+    // XHP children declaration
+    children ... ;
+
+  *)
+    let token = peek_token parser in
+    match (Token.kind token) with
+    | Children -> parse_xhp_children_declaration parser
+    | Category -> parse_xhp_category_declaration parser
+    | Use -> parse_trait_use parser
+    | Const -> parse_const_or_type_const_declaration parser (make_missing ())
+    | Abstract -> parse_methodish_or_const_or_type_const parser
+    | Static
+    | Public
+    | Protected
+    | Private
+    | Final ->
+      (* Parse methods, constructors, destructors or properties.
+      TODO: const can also start with these tokens *)
+      parse_methodish_or_property parser (make_missing())
+    | LessThanLessThan ->
+      (* Parse "methodish" declarations: methods, ctors and dtors *)
+      (* TODO: Consider whether properties ought to allow attributes. *)
+      let (parser, attr) = parse_attribute_specification_opt parser in
+      let (parser, modifiers) = parse_modifiers parser in
+      parse_methodish parser attr modifiers
+    | Require ->
+      (* We give an error if these are found where they should not be,
+         in a later pass. *)
+      parse_require_clause parser
+    | TokenKind.Attribute -> parse_xhp_class_attribute_declaration parser
+    | Function ->
+      (* ERROR RECOVERY
+      Hack requires that a function inside a class be marked
+      with a visibility modifier, but PHP does not have this requirement.
+      TODO: Add an error in a later pass for Hack files. *)
+      parse_methodish parser (make_missing()) (make_missing())
+    | Var ->
+      (* TODO: We allow "var" as a synonym for "public" in a property; this
+      is a PHP-ism that we do not support in Hack, but we parse anyways
+      so as to give an error later.  Write an error detection pass. *)
+      let (parser, var) = assert_token parser Var in
+      parse_property_declaration parser var
+    | _ ->
+        (* TODO ERROR RECOVERY could be improved here. *)
+      let (parser, token) = next_token parser in
+      let parser = with_error parser SyntaxError.error1033 in
+      let result = make_error (make_token token) in
+      (parser, result)
+
   and parse_classish_element_list_opt parser =
-    (* TODO: Refactor this method so that it uses list parsing helpers. *)
-    (* We need to identify an element of a class, trait, etc. Possibilities
-       are:
+    (* TODO: ERROR RECOVERY: consider bailing if the token cannot possibly
+             start a classish element. *)
+    parse_terminated_list parser parse_classish_element RightBrace
 
-       // constant-declaration:
-       const T $x = v ;
-       abstract const T $x ;
+  and parse_xhp_children_paren parser =
+    let (parser, left, exprs, right) =
+      parse_parenthesized_comma_list parser parse_xhp_children_expression in
+    let result = make_parenthesized_expression left exprs right in
+    (parser, result)
 
-       // type-constant-declaration
-       const type T = X;
-       abstract const type T;
+  and parse_xhp_children_term parser =
+    (* SPEC (Draft)
+    xhp-children-term:
+      name
+      xhp-class-name
+      xhp-category-name
+      ( xhp-children-expressions )
 
-       // property-declaration:
-       public/private/protected/static T $x;
-       TODO: We may wish to parse "T $x" and give an error indicating
-       TODO: that we were expecting either const or public.
-       Note that a visibility modifier is required; static is optional;
-       any order is allowed.
-       TODO: The spec indicates that abstract is disallowed, but Hack allows
-       TODO: it; resolve this disagreement.
+    xhp-children-expressions:
+      xhp-children-expression
+      xhp-children-expressions , xhp-children-expression
 
-       // method-declaration
-       <<attr>> public/private/protected/abstract/final/static async function
-       Note that a modifier is required, the attr and async are optional.
-       TODO: Hack requires a visibility modifier, unless "static" is supplied,
-       TODO: in which case the method is considered to be public.  Is this
-       TODO: desired? Resolve this disagreement with the spec.
-
-       // constructor-declaration
-       <<attr>> public/private/protected/abstract/final function __construct
-       TODO: Hack allows static constructors and requires a visibility modifier,
-       TODO: as with regular methods. Resolve this disagreement with the spec.
-
-       // destructor-declaration
-       <<attr>> public/private/protected function __destruct
-       TODO: Hack allows static, final and abstract destructors
-       TODO: as with regular methods. Resolve this disagreement with the spec.
-
-       // trait clauses
-      require  extends  qualified-name
-      require  implements  qualified-name
-
-      // XHP class attribute declaration
-      attribute ... ;
-
+    TODO: The parenthesized list of children expressions is NOT allowed
+    to be comma-terminated. Is this intentional? It is inconsistent with
+    practice throughout the rest of Hack. There is no syntactic difficulty
+    in allowing a comma before the close paren. Consider allowing it.
     *)
-    let rec aux parser acc =
-      let token = peek_token parser in
-      match (Token.kind token) with
-      | RightBrace
-      | EndOfFile -> (parser, acc)
-      | Use ->
-          let (parser, classish_use) = parse_trait_use parser in
-          aux parser (classish_use :: acc)
-      | Const ->
-          let (parser, element) =
-            parse_const_or_type_const_declaration parser (make_missing ()) in
-          aux parser (element :: acc)
-      | Abstract ->
-          let (parser, element) =
-            parse_methodish_or_const_or_type_const parser in
-          aux parser (element :: acc)
-      | Static
-      | Public
-      | Protected
-      | Private
-      | Final ->
-        (* Parse methods, constructors, destructors or properties.
-        TODO: const can also start with these tokens *)
-        let attr_spec = make_missing() in
-        let (parser, syntax) = parse_methodish_or_property parser attr_spec in
-        aux parser (syntax :: acc)
-      | LessThanLessThan ->
-        (* Parse "methodish" declarations: methods, ctors and dtors *)
-        (* TODO: Consider whether properties ought to allow attributes. *)
-        let (parser, attr) = parse_attribute_specification_opt parser in
-        let (parser, modifiers) = parse_modifiers parser in
-        let (parser, syntax) = parse_methodish parser attr modifiers in
-        aux parser (syntax :: acc)
-      | Require ->
-          (* We give an error if these are found where they should not be,
-             in a later pass. *)
-         let (parser, require) = parse_require_clause parser in
-         aux parser (require :: acc)
-      | TokenKind.Attribute -> let (parser, attr) =
-        parse_xhp_class_attribute_declaration parser in
-        aux parser (attr :: acc)
-      | _ ->
-          (* TODO *)
-        let (parser, token) = next_token parser in
-        let parser = with_error parser SyntaxError.error1033 in
-        aux parser (make_error [make_token token] :: acc)
-    in
-    let (parser, classish_elements) = aux parser [] in
-    let classish_elements = List.rev classish_elements in
-    (parser, make_list classish_elements)
+    let (parser1, token) = next_xhp_children_name_or_other parser in
+    let name = make_token token in
+    match Token.kind token with
+    | Name
+    | XHPClassName
+    | XHPCategoryName -> (parser1, name)
+    | LeftParen -> parse_xhp_children_paren parser
+    | _ ->
+      (* ERROR RECOVERY: Eat the offending token, keep going. *)
+      (with_error parser SyntaxError.error1053, name)
+
+  and parse_xhp_children_trailing parser term =
+    let (parser1, token) = next_token parser in
+    match Token.kind token with
+    | Star
+    | Plus
+    | Question ->
+      let result = make_postfix_unary_expression term (make_token token) in
+      parse_xhp_children_trailing parser1 result
+    | Bar ->
+      let (parser, right) = parse_xhp_children_expression parser1 in
+      let result = make_binary_expression term (make_token token) right in
+      (parser, result)
+    | _ -> (parser, term)
+
+  and parse_xhp_children_expression parser =
+    (* SPEC (Draft)
+    xhp-children-expression:
+      xhp-children-term
+      xhp-children-expression *
+      xhp-children-expression +
+      xhp-children-expression ?
+      xhp-children-term | xhp-children-expression
+    *)
+    let (parser, term) = parse_xhp_children_term parser in
+    parse_xhp_children_trailing parser term
+
+  and parse_xhp_children_declaration parser =
+    (* SPEC (Draft)
+    xhp-children-declaration:
+      children empty ;
+      children xhp-children-expression ;
+    *)
+    let (parser, children) = assert_token parser Children in
+    let (parser, expr) = if peek_token_kind parser = Empty then
+      assert_token parser Empty
+    else
+      parse_xhp_children_expression parser in
+    let (parser, semi) = expect_semicolon parser in
+    let result = make_xhp_children_declaration children expr semi in
+    (parser, result)
+
+  and parse_xhp_category parser =
+    let (parser, token) = next_xhp_category_name parser in
+    let category = make_token token in
+    match Token.kind token with
+    | XHPCategoryName -> (parser, category)
+    | _ -> (with_error parser SyntaxError.error1052, category)
+
+  and parse_xhp_category_declaration parser =
+    (* SPEC (Draft)
+    xhp-category-declaration:
+      category xhp-category-list ,-opt  ;
+
+    xhp-category-list:
+      xhp-category-name
+      xhp-category-list  ,  xhp-category-name
+    *)
+    let (parser, category) = assert_token parser Category in
+    let (parser, items) = parse_comma_list_allow_trailing parser Semicolon
+      SyntaxError.error1052 parse_xhp_category in
+    let (parser, semi) = expect_semicolon parser in
+    let result = make_xhp_category_declaration category items semi in
+    (parser, result)
 
   and parse_xhp_type_specifier parser =
     (* SPEC (Draft)
       xhp-type-specifier:
-        enum { xhp-attribute-enum-list-opt }
+        enum { xhp-attribute-enum-list  ,-opt  }
         type-specifier
+
+      The list of enum values must have at least one value and can be
+      comma-terminated.
+
+      xhp-enum-list:
+        xhp-attribute-enum-value
+        xhp-enum-list , xhp-attribute-enum-value
 
       xhp-attribute-enum-value:
         any integer literal
@@ -539,11 +696,10 @@ module WithExpressionAndStatementAndTypeParser
 
       TODO: What are the semantics of encapsulated expressions in double-quoted
             string literals here?
-      TODO: Write the grammar for the comma-separated list
-      TODO: Can the list end in a trailing comma?
-      TODO: Can it be empty?
       ERROR RECOVERY: We parse any expressions here;
       TODO: give an error in a later pass if the expressions are not literals.
+
+      TODO: We allow an empty list of enums; add an error for that.
     *)
     if peek_token_kind parser = Enum then
       let (parser, enum_token) = assert_token parser Enum in
@@ -570,33 +726,53 @@ module WithExpressionAndStatementAndTypeParser
     else
       (parser, (make_missing()))
 
+  and parse_xhp_class_attribute_typed parser =
+    (* xhp-type-specifier xhp-name initializer-opt xhp-required-opt *)
+    let (parser, ty) = parse_xhp_type_specifier parser in
+    let (parser, name) = expect_xhp_name parser in
+    let (parser, init) = parse_simple_initializer_opt parser in
+    let (parser, req) = parse_xhp_required_opt parser in
+    let result = make_xhp_class_attribute ty name init req in
+    (parser, result)
+
   and parse_xhp_class_attribute parser =
     (* SPEC (Draft)
     xhp-attribute-declaration:
       xhp-class-name
       xhp-type-specifier xhp-name initializer-opt xhp-required-opt
+
+    ERROR RECOVERY:
+    The xhp type specifier could be an xhp class name. To disambiguate we peek
+    ahead a token; if it's a comma or semi, we're done. If not, then we assume
+    that we are in the more complex case.
     *)
-    if peek_token_kind parser = Colon then
-      (* TODO: This doesn't give quite the right error message if it turns
-      out to be malformed; consider tweaking this. *)
-      (* TODO: What about the case where we have a "type name = value"
-         attribute and the type starts with a colon? Is that ever legal? *)
-      expect_class_name parser
+    if is_next_xhp_class_name parser then
+      let (parser1, class_name) = expect_class_name parser in
+      match peek_token_kind parser1 with
+      | Comma
+      | Semicolon ->
+        let type_specifier = make_simple_type_specifier class_name in
+        let result = make_xhp_simple_class_attribute type_specifier in
+        (parser1, result)
+      | _ -> parse_xhp_class_attribute_typed parser
     else
-      let (parser, ty) = parse_xhp_type_specifier parser in
-      let (parser, name) = expect_xhp_name parser in
-      let (parser, init) = parse_simple_initializer_opt parser in
-      let (parser, req) = parse_xhp_required_opt parser in
-      let result = make_xhp_class_attribute ty name init req in
-      (parser, result)
+      parse_xhp_class_attribute_typed parser
 
   and parse_xhp_class_attribute_declaration parser =
     (* SPEC: (Draft)
     xhp-class-attribute-declaration :
       attribute xhp-attribute-declaration-list ;
+
+    xhp-attribute-declaration-list:
+      xhp-attribute-declaration
+      xhp-attribute-declaration-list , xhp-attribute-declaration
+
+    TODO: The list of attributes may NOT be terminated with a trailing comma
+    before the semicolon. This is inconsistent with the rest of Hack.
+    Allowing a comma before the semi does not introduce any syntactic
+    difficulty; consider allowing it.
     *)
     let (parser, attr_token) = assert_token parser TokenKind.Attribute in
-    (* TODO: Can this list be terminated with a trailing comma? *)
     (* TODO: Better error message. *)
     let (parser, attrs) = parse_comma_list parser Semicolon
       SyntaxError.error1004 parse_xhp_class_attribute in
@@ -620,9 +796,14 @@ module WithExpressionAndStatementAndTypeParser
         require-implements-clause:
           require  implements  qualified-name  ;
     *)
+    (* We must also parse "require extends :foo;" *)
+    (* TODO: What about "require extends :foo<int>;" ? *)
     (* TODO: The spec is incomplete; we need to be able to parse
        require extends Foo<int>;
        Fix the spec.
+       TODO: Check whether we also need to handle
+         require extends foo::bar
+       and so on.
        *)
     (* ERROR RECOVERY: Detect if the implements/extends, name and semi are
        missing. *)
@@ -632,7 +813,11 @@ module WithExpressionAndStatementAndTypeParser
     | Implements
     | Extends -> (parser1, make_token req_kind_token)
     | _ -> (with_error parser SyntaxError.error1045, make_missing()) in
-    let (parser, name) = parse_qualified_name_type parser in
+    let (parser, name) = if is_next_xhp_class_name parser then
+      let (parser, token) = next_xhp_class_name parser in
+      (parser, make_token token)
+    else
+      parse_qualified_name_type parser in
     let (parser, semi) = expect_semicolon parser in
     let result = make_require_clause req req_kind name semi in
     (parser, result)
@@ -732,11 +917,18 @@ module WithExpressionAndStatementAndTypeParser
     (* TODO Use Eric's helper here to assert length of errors *)
     let before = List.length (errors parser) in
     let (parser1, _) = parse_type_specifier parser in
-    let (parser1, _) = expect_name parser1 in
+    let (parser1, _) = expect_name_allow_keywords parser1 in
     List.length (errors parser1) = before
 
   and parse_constant_declarator parser =
-    let (parser, const_name) = expect_name parser in
+    (* TODO: We allow const names to be keywords here; in particular we
+       require that const string TRUE = "true"; be legal.  Likely this
+       should be more strict. What are the rules for which keywords are
+       legal constant names and which are not?
+       Note that if this logic is changed, it should be changed in
+       is_type_in_const above as well.
+    *)
+    let (parser, const_name) = expect_name_allow_keywords parser in
     let (parser, initializer_) = parse_simple_initializer_opt parser in
     (parser, make_constant_declarator const_name initializer_)
 
@@ -784,82 +976,25 @@ module WithExpressionAndStatementAndTypeParser
       attribute_values , attribute_value
     attribute_value := expression
    *)
+   (* TODO: The list of attrs can have a trailing comma. Update the spec. *)
+   (* TODO: The list of values can have a trailing comma. Update the spec. *)
   and parse_attribute_specification_opt parser =
-    let (parser1, token) = next_token parser in
-    if (Token.kind token) = LessThanLessThan then
-      let (parser, attr_list) = parse_attribute_list_opt parser1 in
-      let (parser, right) = expect_right_double_angle parser in
-      (parser, make_attribute_specification (make_token token) attr_list right)
+    if peek_token_kind parser = LessThanLessThan then
+      let (parser, left, items, right) =
+        parse_double_angled_comma_list_allow_trailing parser parse_attribute in
+      (parser, make_attribute_specification left items right)
     else
       (parser, make_missing())
-
-  and parse_attribute_list_opt parser =
-    let token = peek_token parser in
-    if (Token.kind token) = GreaterThanGreaterThan then
-      let parser = with_error parser SyntaxError.error1034 in
-      (parser, make_missing())
-    else
-      (* TODO use Eric's generic comma list parse once it lands *)
-      let rec aux parser acc =
-        let parser, attr = parse_attribute parser in
-        let parser1, token = next_token parser in
-        match Token.kind token with
-        | Comma ->
-          let comma = make_token token in
-          let item = make_list_item attr comma in
-          aux parser1 (item :: acc)
-        | GreaterThanGreaterThan ->
-          let comma = make_missing () in
-          let item = make_list_item attr comma in
-          parser, make_list (List.rev (item :: acc))
-        | _ ->
-          (* ERROR RECOVERY: assume closing bracket is missing. Caller will
-           * report an error. Do not eat token.
-           * TODO better ways to recover *)
-          parser, make_list (List.rev acc)
-      in
-      aux parser []
 
   and parse_attribute parser =
     let (parser, name) = expect_name parser in
-    let (parser1, token) = next_token parser in
-    match Token.kind token with
-    | LeftParen ->
-      let left = make_token token in
-      let parser, values = parse_attribute_values_opt parser1 in
-      let parser, right = expect_right_paren parser in
-      parser, make_attribute name left values right
-    | _ ->
-      let left = make_missing () in
-      let values = make_missing () in
-      let right = make_missing () in
-      parser, make_attribute name left values right
-
-  and parse_attribute_values_opt parser =
-    let token = peek_token parser in
-    if (Token.kind token) = RightParen then
-      (parser, make_missing())
-    else
-      (* TODO replace with generic comma list parsing *)
-      let rec aux parser acc =
-        let parser, expr = parse_expression parser in
-        let parser1, token = next_token parser in
-        match Token.kind token with
-        | Comma ->
-          let comma = make_token token in
-          let item = make_list_item expr comma in
-          aux parser1 (item :: acc)
-        | RightParen ->
-          let comma = make_missing () in
-          let item = make_list_item expr comma in
-          parser, make_list (List.rev (item :: acc))
-        | _ ->
-          (* ERROR RECOVERY: assume right paren is missing. Caller will
-           * report an error. Do not eat token.
-           * TODO better ways to recover *)
-          parser, make_list (List.rev acc)
-      in
-      aux parser []
+    let (parser, left, items, right) =
+      if peek_token_kind parser = LeftParen then
+        parse_parenthesized_comma_list_opt_allow_trailing
+          parser parse_expression
+      else
+        (parser, make_missing(), make_missing(), make_missing()) in
+    (parser, make_attribute name left items right)
 
   and parse_generic_type_parameter_list_opt parser =
     let (parser1, open_angle) = next_token parser in
@@ -884,37 +1019,48 @@ module WithExpressionAndStatementAndTypeParser
 
   and parse_parameter_list_opt parser =
       (* SPEC
+
+        TODO: Update the spec to match this.
+
         parameter-list:
-          ...
+          variadic-parameter
           parameter-declaration-list
           parameter-declaration-list  ,
-          parameter-declaration-list  ,  ...
+          parameter-declaration-list  ,  variadic-parameter
 
         parameter-declaration-list:
           parameter-declaration
           parameter-declaration-list  ,  parameter-declaration
+
+        variadic-parameter:
+          ...
+          attribute-specification-opt visiblity-modifier-opt type-specifier \
+            ...  variable-name
      *)
      (* This function parses the parens as well. *)
-     (* TODO: Add an error checking pass that ensures that the "..." parameter
-              only appears at the end, and is not trailed by a comma. *)
+     (* ERROR RECOVERY: We allow variadic parameters in all positions; a later
+        pass gives an error if a variadic parameter is in an incorrect position
+        or followed by a trailing comma.  *)
+     (* TODO: Add an error checking pass that ensures that a variadic parameter
+     does not have a default value. *)
       parse_parenthesized_comma_list_opt_allow_trailing parser parse_parameter
 
   and parse_parameter parser =
-
     let (parser1, token) = next_token parser in
     match (Token.kind token) with
     | DotDotDot ->
       let next_kind = peek_token_kind parser1 in
       if next_kind = Variable then parse_parameter_declaration parser
-      else (parser1, make_token token)
+      else (parser1, make_variadic_parameter (make_token token))
     | _ -> parse_parameter_declaration parser
 
-  (* SPEC
-    parameter-declaration:
-      attribute-specificationopt  type-specifier  variable-name \
-      default-argument-specifieropt
-  *)
   and parse_parameter_declaration parser =
+    (* SPEC
+    TODO: The specification does not include modifiers. Fix the spec.
+    parameter-declaration:
+      attribute-specification-opt  type-specifier  variable-name \
+      default-argument-specifier-opt
+    *)
     (* In strict mode, we require a type specifier. This error is not caught
        at parse time but rather by a later pass. *)
     let (parser, attrs) = parse_attribute_specification_opt parser in
@@ -936,7 +1082,14 @@ module WithExpressionAndStatementAndTypeParser
     | Ampersand -> parse_decorated_variable parser
     | _ -> expect_variable parser
 
+  (* TODO: This is wrong. The variable here is not an *expression* that has
+  an optional decoration on it.  It's a declaration. We shouldn't be using the
+  same data structure for a decorated expression as a declaration; one
+  is a *use* and the other is a *definition*. *)
   and parse_decorated_variable parser =
+    (* TODO: We might consider parsing both &...$x and ...&$x and give an
+    appropriate error saying you can't mix ref and variadic.  The original
+    Hack and HHVM parsers do this for &...$x, but not ...&$x. *)
     let (parser, decorator) = next_token parser in
     let (parser, variable) = expect_variable parser in
     let decorator = make_token decorator in
@@ -964,23 +1117,91 @@ module WithExpressionAndStatementAndTypeParser
       (parser, make_simple_initializer (make_token token) default_value)
     | _ -> (parser, make_missing())
 
+  and parse_function parser =
+    parse_function_declaration parser (make_missing())
+
   and parse_function_declaration parser attribute_specification =
     let (parser, header) =
       parse_function_declaration_header parser in
     let (parser, body) = parse_compound_statement parser in
-    let syntax = make_function attribute_specification header body in
+    let syntax = make_function_declaration
+      attribute_specification header body in
     (parser, syntax)
+
+  and parse_constraint_operator parser =
+    (* TODO: Put this in the specification
+      constraint-operator:
+        =
+        as
+        super
+    *)
+    let (parser1, token) = next_token parser in
+    match Token.kind token with
+    | Equal
+    | As
+    | Super -> (parser1, (make_token token))
+    | _ -> (* ERROR RECOVERY: don't eat the offending token. *)
+      (* TODO: Give parse error *)
+      (parser, (make_missing()))
+
+  and parse_where_constraint parser =
+    (* TODO: Put this in the specification
+    constraint:
+      type-specifier  constraint-operator  type-specifier
+    *)
+    let (parser, left) = parse_type_specifier parser in
+    let (parser, op) = parse_constraint_operator parser in
+    let (parser, right) = parse_type_specifier parser in
+    let result = make_where_constraint left op right in
+    (parser, result)
+
+  and parse_where_constraint_list_item parser =
+    let (parser, where_constraint) = parse_where_constraint parser in
+    let (parser, comma) = optional_token parser Comma in
+    let result = make_list_item where_constraint comma in
+    (parser, result)
+
+  and parse_where_clause parser =
+    (* TODO: Add this to the specification
+      where-clause:
+        where   constraint-list
+
+      constraint-list:
+        constraint
+        constraint-list , constraint
+
+      Note that a trailing comma is not accepted in a constraint list
+    *)
+    let (parser, keyword) = assert_token parser Where in
+    let (parser, constraints) = parse_list_until_no_comma
+      parser parse_where_constraint_list_item in
+    let result = make_where_clause keyword constraints in
+    (parser, result)
+
+  and parse_where_clause_opt parser =
+    if peek_token_kind parser != Where then
+      (parser, (make_missing()))
+    else
+      parse_where_clause parser
 
   and parse_function_declaration_header parser =
     (* SPEC
       function-definition-header:
-        attribute-specification-opt  asyncopt  function  name  /
-        generic-type-parameter-list-opt  (  parameter-listopt  ) :  return-type
+        attribute-specification-opt  async-opt  function  name  /
+        generic-type-parameter-list-opt  (  parameter-list-opt  ) :  /
+        return-type   where-clause-opt
+
+      TODO: The spec does not specify "where" clauses. Add them.
+
     *)
     (* In strict mode, we require a type specifier. This error is not caught
        at parse time but rather by a later pass. *)
+    (* In non-strict mode we allow an & to appear before the name.
+      TODO: Produce an error if this occurs in strict mode, or if it
+      TODO: appears before a special name like __construct, and so on. *)
     let (parser, async_token) = optional_token parser Async in
     let (parser, function_token) = expect_function parser in
+    let (parser, ampersand_token) = optional_token parser Ampersand in
     let (parser, label) =
       parse_function_label parser in
     let (parser, generic_type_parameter_list) =
@@ -989,22 +1210,35 @@ module WithExpressionAndStatementAndTypeParser
       parse_parameter_list_opt parser in
     let (parser, colon_token, return_type) =
       parse_return_type_hint_opt parser in
-    let syntax = make_function_header async_token
-      function_token label generic_type_parameter_list left_paren_token
-      parameter_list right_paren_token colon_token return_type in
+    let (parser, where_clause) = parse_where_clause_opt parser in
+    let syntax = make_function_declaration_header async_token
+      function_token ampersand_token label generic_type_parameter_list
+      left_paren_token parameter_list right_paren_token colon_token
+      return_type where_clause in
     (parser, syntax)
 
-  (* a function label is either a function name, a __construct label, or a
-   * __destruct label *)
+  (* A function label is either a function name, a __construct label, or a
+  __destruct label. *)
   and parse_function_label parser =
-    let parser, token = next_token parser in
+    let (parser1, token) = next_token parser in
     match Token.kind token with
-    | Name | Construct | Destruct -> (parser, make_token token)
+    | Name
+    | Construct
+    | Destruct -> (parser1, make_token token)
     | _ ->
-      (* ERRPR RECOVERY *)
-      let parser = with_error parser SyntaxError.error1044 in
-      let error = make_error [make_token token] in
-      (parser, error)
+      (* TODO: We might have a non-reserved keyword as the name here; "empty",
+      for example, is a keyword but a legal function name. What we do here is
+      accept any keyword; what we *should* do is figure out which keywords are
+      reserved and which are not, and reject the reserved keywords. *)
+      let (parser, token) = next_token_as_name parser in
+      if Token.kind token = Name then
+        (parser, make_token token)
+      else
+        (* ERROR RECOVERY: Eat the offending token. *)
+        let parser = with_error parser SyntaxError.error1044 in
+        let error = make_error (make_token token) in
+        (parser, error)
+
   (* SPEC
       method-declaration:
         attribute-spec-opt method-modifiers function-definition
@@ -1033,48 +1267,50 @@ module WithExpressionAndStatementAndTypeParser
     | LeftBrace ->
       let (parser, body) = parse_compound_statement parser in
       let syntax =
-        make_methodish attribute_spec modifiers header body (make_missing ())in
+        make_methodish_declaration
+          attribute_spec modifiers header body (make_missing ())in
       (parser, syntax)
     | Semicolon ->
       let semicolon = make_token token in
       let syntax =
-        make_methodish attribute_spec modifiers header (make_missing())
+        make_methodish_declaration
+          attribute_spec modifiers header (make_missing())
         semicolon in
       (parser1, syntax)
     | _ ->
-      (* ERROR RECOVERY: skip to the next token *)
+      (* ERROR RECOVERY: We expected either a block or a semicolon; we got
+      neither. Use the offending token as the body of the method.
+      TODO: Is this the right error recovery? *)
+      let error = make_error (make_token token) in
+      let syntax = make_methodish_declaration
+        attribute_spec modifiers header error (make_missing()) in
       let parser = with_error parser1 SyntaxError.error1041 in
-      (parser, make_error [make_token token])
+      (parser, syntax)
+
+  and parse_modifier parser =
+    let (parser1, token) = next_token parser in
+    match Token.kind token with
+    | Abstract
+    | Static
+    | Public
+    | Protected
+    | Private
+    | Final -> (parser1, Some (make_token token))
+    | _ -> (parser, None)
 
   and parse_modifiers parser =
-    let rec aux acc parser =
-      (* In reality some modifiers cannot occur together, check this in a later
-       * pass *)
-      let (parser1, token) = next_token parser in
-      match Token.kind token with
-      | EndOfFile ->
-        (* ERROR RECOVERY it is likely that the function header is missing *)
-        let parser = with_error parser SyntaxError.error1043 in
-        (parser, make_list (List.rev acc))
-      | Abstract
-      | Static
-      | Public
-      | Protected
-      | Private
-      | Final ->
-        let modifier = make_token token in
-        aux (modifier :: acc) parser1
-      | _ ->
-        (* Not a modifier, end parsing modifiers *)
-        (parser, make_list (List.rev acc))
-    in
-    aux [] parser
+    parse_list_until_none parser parse_modifier
 
-  and parse_classish_or_function_declaration parser =
+  and parse_enum_or_classish_or_function_declaration parser =
+    (* An enum, type alias, function, interface, trait or class may all
+      begin with an attribute. *)
     let parser, attribute_specification =
       parse_attribute_specification_opt parser in
     let parser1, token = next_token parser in
     match Token.kind token with
+    | Enum -> parse_enum_declaration parser attribute_specification
+    | Type | Newtype ->
+      parse_alias_declaration parser attribute_specification
     | Async | Function ->
       parse_function_declaration parser attribute_specification
     | Abstract
@@ -1083,19 +1319,22 @@ module WithExpressionAndStatementAndTypeParser
     | Trait
     | Class -> parse_classish_declaration parser attribute_specification
     | _ ->
-      (* TODO *)
-      (parser1, make_error [make_token token])
+      (* ERROR RECOVERY TODO: Produce an error here. *)
+      (* TODO: This is wrong; we have lost the attribute specification
+      from the tree. *)
+      (parser1, make_error (make_token token))
 
   and parse_declaration parser =
     let (parser1, token) = next_token parser in
     match (Token.kind token) with
+    | TokenKind.EndOfFile -> (parser1, make_end_of_file (make_token token))
     | Include
     | Include_once
     | Require
     | Require_once -> parse_inclusion_directive parser
     | Type
-    | Newtype -> parse_alias_declaration parser
-    | Enum -> parse_enum_declaration parser
+    | Newtype -> parse_alias_declaration parser (make_missing())
+    | Enum -> parse_enum_declaration parser (make_missing())
     | Namespace -> parse_namespace_declaration parser
     | Use -> parse_namespace_use_declaration parser
     | Trait
@@ -1106,59 +1345,77 @@ module WithExpressionAndStatementAndTypeParser
     | Async
     | Function -> parse_function_declaration parser (make_missing())
     | LessThanLessThan ->
-      parse_classish_or_function_declaration parser
+      parse_enum_or_classish_or_function_declaration parser
       (* TODO figure out what global const differs from class const *)
     | Const -> parse_const_declaration parser1 (make_missing ())
               (make_token token)
+    | QuestionGreaterThan ->
+      (* We do not support this tag in Hack.
+       TODO: Give an error in a later pass if this is found in a Hack file.
+       TODO: Give an error in a later pass if this is not at the end. *)
+       (parser1, make_script_footer (make_token token))
     | _ ->
       parse_statement parser
-
-  and parse_declarations parser expect_brace =
-    let rec aux parser declarations =
-      let token = peek_token parser in
-      match (Token.kind token) with
-      | EndOfFile -> (parser, declarations)
-      | RightBrace when expect_brace ->
-        (parser, declarations)
-      (* TODO: ?> tokens *)
-      | _ ->
-        let (parser, declaration) = parse_declaration parser in
-        aux parser (declaration :: declarations) in
-    let (parser, declarations) = aux parser [] in
-    let syntax = make_list (List.rev declarations) in
-    (parser, syntax)
+      (* TODO: What if it's not a legal statement? Do we still make progress
+      here? *)
 
   let parse_script_header parser =
-    (* TODO: Detect if there is trivia before or after any token. *)
-    let (parser1, less_than) = next_token parser in
-    let (parser2, question) = next_token parser1 in
-    let (parser3, language) = next_token parser2 in
+    (* The script header is
+      < ? name
+      where the < may have leading trivia, such as a # comment before it,
+      but there must be no trailing trivia of the <.
+
+      The name is optional in PHP, but not in Hack, and the name, if there
+      is one, must appear immediately after the ?, with no intervening trivia.
+
+    *)
+    let original_parser = parser in
+    let (parser, less_than) = next_token parser in
+    (* TODO: Give an error if there is trailing trivia on the < *)
+    let (parser, question) = next_token parser in
+    let (parser, language) = if Token.trailing question = [] then
+    (* TODO: Handle the case where the langauge is not a Name. *)
+      let (parser, language) = next_token parser in
+      (parser, make_token language)
+    else
+      (parser, (make_missing())) in
     let valid = (Token.kind less_than) == LessThan &&
-                (Token.kind question) == Question &&
-                (Token.kind language) == Name in
+                (Token.kind question) == Question in
     if valid then
       let less_than = make_token less_than in
       let question = make_token question in
-      let language = make_token language in
       let script_header = make_script_header less_than question language in
-      (parser3, script_header)
+      (parser, script_header)
     else
-      (* TODO: Report an error *)
       (* ERROR RECOVERY *)
       (* Make no progress; try parsing the file without a header *)
-      let parser = with_error parser SyntaxError.error1001 in
-      let less_than = make_token (Token.make LessThan 0 [] []) in
-      let question = make_token (Token.make Question 0 [] []) in
-      let language = make_token (Token.make Name 0 [] []) in
+      let parser = with_error original_parser SyntaxError.error1001 in
+      let less_than = make_missing() in
+      let question = make_missing() in
+      let language = make_missing() in
       let script_header = make_script_header less_than question language in
       (parser, script_header )
 
   let parse_script parser =
     let (parser, script_header) = parse_script_header parser in
-    let (parser, declarations) = parse_declarations parser false in
-    (* TODO: ERROR_RECOVERY:
-      If we are not at the end of the file, something is wrong. *)
-    (parser, make_script script_header declarations)
-
+    let rec aux parser acc =
+      let (parser, declaration) = parse_declaration parser in
+      (* TODO: Assert that we either made progress, or we're at the end of
+      the file. *)
+      if kind declaration = SyntaxKind.EndOfFile then
+        (* The only time an end-of-file node is useful is when there is
+           leading trivia in the end-of-file token. *)
+        match leading_token declaration with
+        | Some token ->
+          if Token.leading token = [] then (parser, acc)
+          else (parser, declaration :: acc)
+        | _ -> (parser, acc)
+      else aux parser (declaration :: acc) in
+    let (parser, declarations) = aux parser [] in
+    let declarations = make_list (List.rev declarations) in
+    let result = make_script script_header declarations in
+    (* If we are not at the end of the file, something is wrong. *)
+    assert ((peek_token_kind parser) = TokenKind.EndOfFile);
+    (parser, result)
 
 end

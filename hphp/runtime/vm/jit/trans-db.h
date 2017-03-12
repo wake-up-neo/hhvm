@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -60,20 +60,6 @@ void addTranslation(const TransRec& transRec);
  * Get the number of translations added (0 if the TransDB is not enabled).
  */
 size_t getNumTranslations();
-
-/*
- * Get the translation counter for `transId'.
- *
- * Return -1 if the TransDB is not enabled.
- */
-uint64_t getTransCounter(TransID transId);
-
-/*
- * Get a pointer to the translation counter for the current translation.
- *
- * Return nullptr if the TransDB is not enabled.
- */
-uint64_t* getTransCounterAddr();
 
 }}}
 

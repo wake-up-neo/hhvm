@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1998-2010 Zend Technologies Ltd. (http://www.zend.com) |
    +----------------------------------------------------------------------+
    | This source file is subject to version 2.00 of the Zend license,     |
@@ -202,7 +202,6 @@ String string_strip_tags(const char *s, int len, const char *allow,
 /**
  * Encoding/decoding strings according to certain formats.
  */
-String string_addslashes(const char *str, int length);
 String string_quoted_printable_encode(const char *input, int len);
 String string_quoted_printable_decode(const char *input, int len, bool is_q);
 String string_uuencode(const char *src, int src_len);
@@ -211,6 +210,9 @@ String string_base64_encode(const char *input, int len);
 String string_base64_decode(const char *input, int len, bool strict);
 String string_escape_shell_arg(const char *str);
 String string_escape_shell_cmd(const char *str);
+
+std::string base64_encode(const char *input, int len);
+std::string base64_decode(const char *input, int len, bool strict);
 
 /**
  * Convert between strings and numbers.

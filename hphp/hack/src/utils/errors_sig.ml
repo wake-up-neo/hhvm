@@ -14,6 +14,7 @@ module type S = sig
   type applied_fixme = Pos.t * int
   type error_flags
 
+  val set_ignored_fixmes : Relative_path.t list option -> unit
   val is_hh_fixme : (Pos.t -> int -> bool) ref
   val to_list : 'a error_ -> ('a * string) list
   val get_code : 'a error_ -> int
@@ -33,6 +34,7 @@ module type S = sig
   val missing_field : Pos.t -> Pos.t -> string -> unit
   val generic_class_var : Pos.t -> unit
   val explain_constraint : Pos.t -> Pos.t -> string -> error -> unit
+  val explain_where_constraint : Pos.t -> Pos.t -> error -> unit
   val explain_type_constant : (Pos.t * string) list -> error -> unit
   val unexpected_arrow : Pos.t -> string -> unit
   val missing_arrow : Pos.t -> string -> unit
@@ -134,7 +136,8 @@ module type S = sig
   val parent_abstract_call : string -> Pos.t -> Pos.t -> unit
   val self_abstract_call : string -> Pos.t -> Pos.t -> unit
   val classname_abstract_call : string -> string -> Pos.t -> Pos.t -> unit
-  val isset_empty_in_strict : Pos.t -> string -> unit
+  val empty_in_strict : Pos.t -> unit
+  val isset_in_strict : Pos.t -> unit
   val unset_nonidx_in_strict : Pos.t -> (Pos.t * string) list -> unit
   val unpacking_disallowed_builtin_function : Pos.t -> string -> unit
   val array_get_arity : Pos.t -> string -> Pos.t -> unit
@@ -204,6 +207,7 @@ module type S = sig
   val static_dynamic : Pos.t -> Pos.t -> string -> unit
   val null_member : string -> Pos.t -> (Pos.t * string) list -> unit
   val non_object_member : string -> Pos.t -> string -> Pos.t -> unit
+  val ambiguous_member : string -> Pos.t -> string -> Pos.t -> unit
   val null_container : Pos.t -> (Pos.t * string) list -> unit
   val option_mixed : Pos.t -> unit
   val declared_covariant : Pos.t -> Pos.t -> (Pos.t * string) list -> unit
@@ -250,6 +254,7 @@ module type S = sig
   val visibility_extends : string -> Pos.t -> Pos.t -> string -> unit
   val member_not_implemented : string -> Pos.t -> Pos.t -> Pos.t -> unit
   val bad_decl_override : Pos.t -> string -> Pos.t -> string -> error -> unit
+  val bad_method_override : Pos.t -> string -> error -> unit
   val bad_enum_decl : Pos.t -> error -> unit
   val missing_constructor : Pos.t -> unit
   val enum_constant_type_bad : Pos.t -> Pos.t -> string -> Pos.t list -> unit
@@ -315,9 +320,13 @@ module type S = sig
   val unification_cycle : Pos.t -> string -> unit
   val eq_incompatible_types : Pos.t -> (Pos.t * string) list
     -> (Pos.t * string) list -> unit
+  val instanceof_always_false : Pos.t -> unit
+  val instanceof_always_true : Pos.t -> unit
+  val instanceof_generic_classname : Pos.t -> string -> unit
+
 
   val to_json : Pos.absolute error_ -> Hh_json.json
-  val to_string : Pos.absolute error_ -> string
+  val to_string : ?indent:bool -> Pos.absolute error_ -> string
   val try_ : (unit -> 'a) -> (error -> 'a) -> 'a
   val try_with_error : (unit -> 'a) -> (unit -> 'a) -> 'a
   val try_add_err : Pos.t -> string -> (unit -> 'a) -> (unit -> 'a) -> 'a
@@ -326,8 +335,8 @@ module type S = sig
   type t
 
   val do_ : (unit -> 'a) -> t * 'a * error_flags
-  val run_in_decl_mode : (unit -> 'a) -> 'a
-  val get_lazy_decl_flag : error_flags -> bool
+  val run_in_decl_mode : Relative_path.t -> (unit -> 'a) -> 'a
+  val get_lazy_decl_flag : error_flags -> Relative_path.t option
   val ignore_ : (unit -> 'a) -> 'a
   val try_when :
     (unit -> 'a) -> when_:(unit -> bool) -> do_:(error -> unit) -> 'a
@@ -343,4 +352,5 @@ module type S = sig
   val from_error_list : error list -> t
   val iter_error_list : (error -> unit) -> t -> unit
   val get_applied_fixmes : t -> applied_fixme list
+  val optional_shape_fields_not_supported : Pos.t -> unit
 end

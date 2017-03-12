@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -14,8 +14,6 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
-#include "hphp/runtime/ext/thrift/ext_thrift.h"
 
 #include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/collections.h"
@@ -64,6 +62,7 @@ const StaticString
   s_etype("etype"),
   s_format("format"),
   s_collection("collection"),
+  s_harray("harray"),
   s_TSPEC("_TSPEC"),
   s_TProtocolException("TProtocolException"),
   s_TApplicationException("TApplicationException");
@@ -94,8 +93,8 @@ void skip_element(long thrift_typeID, PHPInputTransport& transport);
 // Create a PHP object given a typename and call the ctor,
 //optionally passing up to 2 arguments
 Object createObject(const String& obj_typename, int nargs = 0,
-                    const Variant& arg1 = null_variant,
-                    const Variant& arg2 = null_variant) {
+                    const Variant& arg1 = uninit_variant,
+                    const Variant& arg2 = uninit_variant) {
   if (!HHVM_FN(class_exists)(obj_typename)) {
     raise_warning("runtime/ext_thrift: Class %s does not exist",
                   obj_typename.data());
@@ -213,7 +212,35 @@ Variant binary_deserialize(int8_t thrift_typeID, PHPInputTransport& transport,
       Array keyspec = fieldspec.rvalAt(s_key, AccessFlags::ErrorKey).toArray();
       Array valspec = fieldspec.rvalAt(s_val, AccessFlags::ErrorKey).toArray();
       String format = fieldspec.rvalAt(s_format, AccessFlags::None).toString();
-      if (format.equal(s_collection)) {
+      if (format.equal(s_harray)) {
+        DictInit arr(size);
+        for (uint32_t i = 0; i < size; i++) {
+          switch (types[0]) {
+            case TType::T_I08:
+            case TType::T_I16:
+            case TType::T_I32:
+            case TType::T_I64: {
+              int64_t key =
+                  binary_deserialize(types[0], transport, keyspec).toInt64();
+              Variant value = binary_deserialize(types[1], transport, valspec);
+              arr.set(key, value);
+              break;
+            }
+            case TType::T_STRING: {
+              String key =
+                  binary_deserialize(types[0], transport, keyspec).toString();
+              Variant value = binary_deserialize(types[1], transport, valspec);
+              arr.set(key, value);
+              break;
+            }
+            default:
+              thrift_error(
+                  "Unable to deserialize non int/string array keys",
+                  ERR_INVALID_DATA);
+          }
+        }
+        return arr.toVariant();
+      } else if (format.equal(s_collection)) {
         auto obj(req::make<c_Map>(size));
         for (uint32_t s = 0; s < size; ++s) {
           Variant key = binary_deserialize(types[0], transport, keyspec);
@@ -238,7 +265,13 @@ Variant binary_deserialize(int8_t thrift_typeID, PHPInputTransport& transport,
       Array elemspec = elemvar.toArray();
       String format = fieldspec.rvalAt(s_format, AccessFlags::None).toString();
 
-      if (format.equal(s_collection)) {
+      if (format.equal(s_harray)) {
+        VecArrayInit arr(size);
+        for (uint32_t i = 0; i < size; i++) {
+          arr.append(binary_deserialize(type, transport, elemspec));
+        }
+        return arr.toVariant();
+      } else if (format.equal(s_collection)) {
         auto const pvec(req::make<c_Vector>(size));
         for (uint32_t s = 0; s < size; ++s) {
           pvec->add(binary_deserialize(type, transport, elemspec));
@@ -261,7 +294,13 @@ Variant binary_deserialize(int8_t thrift_typeID, PHPInputTransport& transport,
       Variant elemvar = fieldspec.rvalAt(s_elem, AccessFlags::ErrorKey);
       Array elemspec = elemvar.toArray();
       String format = fieldspec.rvalAt(s_format, AccessFlags::None).toString();
-      if (format.equal(s_collection)) {
+      if (format.equal(s_harray)) {
+        KeysetInit arr(size);
+        for (uint32_t i = 0; i < size; i++) {
+          arr.add(binary_deserialize(type, transport, elemspec));
+        }
+        return arr.toVariant();
+      } else if (format.equal(s_collection)) {
         auto set_ret(req::make<c_Set>(size));
         for (uint32_t s = 0; s < size; ++s) {
           Variant key = binary_deserialize(type, transport, elemspec);

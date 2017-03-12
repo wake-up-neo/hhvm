@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -21,7 +21,6 @@
 #ifndef _MSC_VER
 #include <dlfcn.h>
 #endif
-#include <limits>
 #include <memory>
 #include <set>
 #include <vector>
@@ -32,7 +31,7 @@
 
 #include "hphp/util/alloc.h"
 #include "hphp/util/async-job.h"
-#include "hphp/util/boot_timer.h"
+#include "hphp/util/boot-stats.h"
 #include "hphp/util/hdf.h"
 #include "hphp/util/logger.h"
 
@@ -49,6 +48,7 @@
 #include "hphp/runtime/base/ini-setting.h"
 #include "hphp/runtime/base/config.h"
 #include "hphp/runtime/base/apc-file-storage.h"
+#include "hphp/runtime/server/cli-server.h"
 
 using HPHP::ScopedMem;
 
@@ -62,7 +62,35 @@ std::aligned_storage<
   alignof(ConcurrentTableSharedStore)
 >::type s_apc_storage;
 
+using UserAPCCache = folly::AtomicHashMap<uid_t, ConcurrentTableSharedStore*>;
+
+std::aligned_storage<
+  sizeof(UserAPCCache),
+  alignof(UserAPCCache)
+>::type s_user_apc_storage;
+
+UserAPCCache& apc_store_local() {
+  void* vpUserStore = &s_user_apc_storage;
+  return *static_cast<UserAPCCache*>(vpUserStore);
+}
+
+ConcurrentTableSharedStore& apc_store_local(uid_t uid) {
+  auto& cache = apc_store_local();
+  auto iter = cache.find(uid);
+  if (iter != cache.end()) return *(iter->second);
+  auto table = new ConcurrentTableSharedStore;
+  auto res = cache.insert(uid, table);
+  if (!res.second) delete table;
+  return *res.first->second;
+}
+
 ConcurrentTableSharedStore& apc_store() {
+  if (UNLIKELY(!RuntimeOption::RepoAuthoritative &&
+               RuntimeOption::EvalUnixServerQuarantineApc)) {
+    if (auto uc = get_cli_ucred()) {
+      return apc_store_local(uc->uid);
+    }
+  }
   void* vpStore = &s_apc_storage;
   return *static_cast<ConcurrentTableSharedStore*>(vpStore);
 }
@@ -76,6 +104,11 @@ void initialize_apc() {
   // Note: we never destruct APC, currently.
   void* vpStore = &s_apc_storage;
   new (vpStore) ConcurrentTableSharedStore;
+
+  if (UNLIKELY(!RuntimeOption::RepoAuthoritative &&
+               RuntimeOption::EvalUnixServerQuarantineApc)) {
+    new (&s_user_apc_storage) UserAPCCache(10);
+  }
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -408,12 +441,11 @@ Variant HHVM_FUNCTION(apc_delete,
       );
       return false;
     }
-    TypedValue tvResult;
-    tvWriteUninit(&tvResult);
     const Func* method =
       SystemLib::s_APCIteratorClass->lookupMethod(s_delete.get());
-    g_context->invokeFuncFew(&tvResult, method, key.getObjectData());
-    return tvAsVariant(&tvResult);
+    return Variant::attach(
+      g_context->invokeFuncFew(method, key.getObjectData())
+    );
   }
 
   return apc_store().eraseKey(key.toString());
@@ -1053,7 +1085,7 @@ String apc_reserialize(const String& str) {
   VariableUnserializer uns(str.data(), str.size(),
                            VariableUnserializer::Type::APCSerialize);
   StringBuffer buf;
-  reserialize(&uns, buf);
+  uns.reserialize(buf);
 
   return buf.detach();
 }

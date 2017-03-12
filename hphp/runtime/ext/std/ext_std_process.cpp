@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -26,8 +26,7 @@
 #include <signal.h>
 
 #include <folly/String.h>
-#include <folly/portability/Environment.h>
-#include <folly/portability/SysResource.h>
+#include <folly/portability/Stdlib.h>
 #include <folly/portability/SysTime.h>
 #include <folly/portability/Unistd.h>
 
@@ -51,8 +50,8 @@
 #include "hphp/runtime/ext/std/ext_std_file.h"
 #include "hphp/runtime/ext/std/ext_std_function.h"
 #include "hphp/runtime/ext/string/ext_string.h"
+#include "hphp/runtime/server/cli-server.h"
 #include "hphp/runtime/vm/repo.h"
-#include "hphp/runtime/base/request-event-handler.h"
 
 #if !defined(_NSIG) && defined(NSIG)
 # define _NSIG NSIG
@@ -189,7 +188,14 @@ namespace {
 
 struct ShellExecContext final {
   ShellExecContext() {
-    m_sig_handler = signal(SIGCHLD, SIG_DFL);
+    // Use the default handler while exec'ing in a shell,
+    // saving the previous signal action.
+    struct sigaction sa = {};
+    sa.sa_handler = SIG_DFL;
+    if (sigaction(SIGCHLD, &sa, &m_old_sa) != 0) {
+      Logger::Error("Couldn't install SIGCHLD handler");
+      abort();
+    }
   }
 
   ~ShellExecContext() {
@@ -200,8 +206,11 @@ struct ShellExecContext final {
       LightProcess::pclose(m_proc);
 #endif
     }
-    if (m_sig_handler) {
-      signal(SIGCHLD, m_sig_handler);
+    if (m_old_sa.sa_handler != SIG_DFL) {
+      if (sigaction(SIGCHLD, &m_old_sa, nullptr) != 0) {
+        Logger::Error("Couldn't restore SIGCHLD handler");
+        abort();
+      }
     }
   }
 
@@ -240,7 +249,7 @@ struct ShellExecContext final {
   }
 
 private:
-  void (*m_sig_handler)(int);
+  struct sigaction m_old_sa = {};
   FILE *m_proc{nullptr};
 };
 
@@ -700,9 +709,9 @@ Variant HHVM_FUNCTION(proc_open,
                       const String& cmd,
                       const Array& descriptorspec,
                       VRefParam pipesParam,
-                      const Variant& cwd /* = null_variant */,
-                      const Variant& env /* = null_variant */,
-                      const Variant& other_options /* = null_variant */) {
+                      const Variant& cwd /* = uninit_variant */,
+                      const Variant& env /* = uninit_variant */,
+                      const Variant& other_options /* = uninit_variant */) {
   if (RuntimeOption::WhitelistExec && !check_cmd(cmd.data())) {
     return false;
   }
@@ -724,22 +733,26 @@ Variant HHVM_FUNCTION(proc_open,
   Array enva;
 
   if (env.isNull()) {
-    // Build out an environment that conceptually matches what we'd
-    // see if we were to iterate the environment and call getenv()
-    // for each name.
+    if (is_cli_mode()) {
+      enva = cli_env();
+    } else {
+      // Build out an environment that conceptually matches what we'd
+      // see if we were to iterate the environment and call getenv()
+      // for each name.
 
-    // Env vars defined in the hdf file go in first
-    for (const auto& envvar : RuntimeOption::EnvVariables) {
-      enva.set(String(envvar.first), String(envvar.second));
-    }
+      // Env vars defined in the hdf file go in first
+      for (const auto& envvar : RuntimeOption::EnvVariables) {
+        enva.set(String(envvar.first), String(envvar.second));
+      }
 
-    // global environment overrides the hdf
-    for (char **env = environ; env && *env; env++) {
-      char *p = strchr(*env, '=');
-      if (p) {
-        String name(*env, p - *env, CopyString);
-        String val(p + 1, CopyString);
-        enva.set(name, val);
+      // global environment overrides the hdf
+      for (char **env = environ; env && *env; env++) {
+        char *p = strchr(*env, '=');
+        if (p) {
+          String name(*env, p - *env, CopyString);
+          String val(p + 1, CopyString);
+          enva.set(name, val);
+        }
       }
     }
 
@@ -823,7 +836,7 @@ Variant HHVM_FUNCTION(proc_open,
   }
 
   dwCreateFlags = NORMAL_PRIORITY_CLASS;
-  if (RuntimeOption::ClientExecutionMode()) {
+  if (!RuntimeOption::ServerExecutionMode()) {
     dwCreateFlags |= CREATE_NO_WINDOW;
   }
 

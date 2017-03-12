@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -125,17 +125,6 @@ void Package::addPHPDirectory(const char *path, bool force) {
   for (auto const& file : files) {
     assert(file.substr(0, rootSize) == m_root);
     m_filesToParse.insert(file.substr(rootSize));
-  }
-}
-
-void Package::getFiles(std::vector<std::string> &files) const {
-  assert(m_filesToParse.empty());
-
-  files.clear();
-  files.reserve(m_files.size());
-  for (unsigned int i = 0; i < m_files.size(); i++) {
-    const char *fileName = m_files.at(i);
-    files.push_back(fileName);
   }
 }
 

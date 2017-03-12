@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -242,7 +242,8 @@ bool PDOMySqlConnection::create(const Array& options) {
   if (!options.empty()) {
     long connect_timeout = pdo_attr_lval(options, PDO_ATTR_TIMEOUT, 30);
     long local_infile = pdo_attr_lval(options, PDO_MYSQL_ATTR_LOCAL_INFILE, 0);
-    String init_cmd, default_file, default_group;
+    String init_cmd, default_file, default_group, ssl_ca, ssl_capath, ssl_cert,
+           ssl_key, ssl_cipher;
     long compress = 0;
     m_buffered = pdo_attr_lval(options, PDO_MYSQL_ATTR_USE_BUFFERED_QUERY, 1);
 
@@ -311,6 +312,31 @@ bool PDOMySqlConnection::create(const Array& options) {
     compress = pdo_attr_lval(options, PDO_MYSQL_ATTR_COMPRESS, 0);
     if (compress) {
       if (mysql_options(m_server, MYSQL_OPT_COMPRESS, 0)) {
+        handleError(__FILE__, __LINE__);
+        goto cleanup;
+      }
+    }
+
+    ssl_ca = pdo_attr_strval(options, PDO_MYSQL_ATTR_SSL_CA,
+                             nullptr);
+    ssl_capath = pdo_attr_strval(options, PDO_MYSQL_ATTR_SSL_CAPATH,
+                                 nullptr);
+    ssl_key = pdo_attr_strval(options, PDO_MYSQL_ATTR_SSL_KEY,
+                              nullptr);
+    ssl_cert = pdo_attr_strval(options, PDO_MYSQL_ATTR_SSL_CERT,
+                               nullptr);
+    ssl_cipher = pdo_attr_strval(options, PDO_MYSQL_ATTR_SSL_CIPHER,
+                                 nullptr);
+
+    if ((!ssl_ca.empty() || !ssl_capath.empty() || !ssl_key.empty()
+        || !ssl_cert.empty() || !ssl_cipher.empty()) &&
+        !host.same(s_localhost)) {
+      if (mysql_ssl_set(m_server,
+          ssl_key.empty() ? nullptr : ssl_key.c_str(),
+          ssl_cert.empty() ? nullptr : ssl_cert.c_str(),
+          ssl_ca.empty() ? nullptr : ssl_ca.c_str(),
+          ssl_capath.empty() ? nullptr : ssl_capath.c_str(),
+          ssl_cipher.empty() ? nullptr : ssl_cipher.c_str())) {
         handleError(__FILE__, __LINE__);
         goto cleanup;
       }
@@ -648,7 +674,6 @@ bool PDOMySqlStatement::executePrepared() {
       int calc_max_length = m_conn->buffered() && m_max_length == 1;
       m_fields = mysql_fetch_fields(m_result);
       if (m_bound_result) {
-        int i;
         for (i = 0; i < column_count; i++) {
           free(m_bound_result[i].buffer);
         }

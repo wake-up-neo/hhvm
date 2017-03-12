@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -39,10 +39,8 @@ Vcost instrSize(const Vunit& u, AreaIndex area, Vinstr inst) {
   case Vinstr::copy2:
     return {2, false};
   case Vinstr::bindjmp:
-  case Vinstr::bindjcc:
   case Vinstr::bindaddr:
   case Vinstr::fallback:
-  case Vinstr::fallbackcc:
   case Vinstr::retransopt:
     return {1, area == AreaIndex::Main};
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -25,7 +25,7 @@
 #include "hphp/runtime/base/string-buffer.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/ext/server/ext_server.h"
-#include "hphp/util/boot_timer.h"
+#include "hphp/util/boot-stats.h"
 #include "hphp/util/compatibility.h"
 #include "hphp/util/job-queue.h"
 #include "hphp/util/lock.h"
@@ -144,7 +144,9 @@ void PageletTransport::onSendEndImpl() {
   Lock lock(this);
   m_done = true;
   if (m_event) {
+    constexpr uintptr_t kTrashedEvent = 0xfeeefeeef001f001;
     m_event->finish();
+    m_event = reinterpret_cast<PageletServerTaskEvent*>(kTrashedEvent);
   }
   notify();
 }
@@ -164,6 +166,9 @@ bool PageletTransport::isDone() {
 }
 
 void PageletTransport::addToPipeline(const std::string &s) {
+  // the output buffer is already closed; nothing to do
+  if (m_done) return;
+
   Lock lock(this);
   m_pipeline.push_back(s);
   if (m_event) {
@@ -387,7 +392,7 @@ Resource PageletServer::TaskStart(
   PageletServerTaskEvent *event /* = nullptr*/
 ) {
   static auto pageletOverflowCounter =
-    ServiceData::createTimeseries("pagelet_overflow",
+    ServiceData::createTimeSeries("pagelet_overflow",
                                   { ServiceData::StatsType::COUNT });
   {
     Lock l(s_dispatchMutex);

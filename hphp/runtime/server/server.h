@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -311,7 +311,8 @@ struct ServerOptions {
       m_serverFD(-1),
       m_sslFD(-1),
       m_takeoverFilename(),
-      m_useFileSocket(false) {
+      m_useFileSocket(false),
+      m_queueToWorkerRatio(1) {
     assert(m_maxThreads >= 0);
     if (m_initThreads < 0 || m_initThreads > m_maxThreads) {
       m_initThreads = m_maxThreads;
@@ -326,6 +327,7 @@ struct ServerOptions {
   int m_sslFD;
   std::string m_takeoverFilename;
   bool m_useFileSocket;
+  int m_queueToWorkerRatio;
 };
 
 /**

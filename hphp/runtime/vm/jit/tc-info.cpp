@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -38,11 +38,11 @@ namespace HPHP { namespace jit { namespace tc {
 
 namespace {
 
-bool dumpTCCode(const char* filename) {
-#define OPEN_FILE(F, SUFFIX)                                    \
-  std::string F ## name = std::string(filename).append(SUFFIX); \
-  FILE* F = fopen(F ## name .c_str(),"wb");                     \
-  if (F == nullptr) return false;                               \
+bool dumpTCCode(folly::StringPiece filename) {
+#define OPEN_FILE(F, SUFFIX)                                            \
+  auto const F ## name = folly::to<std::string>(filename, SUFFIX);      \
+  FILE* F = fopen(F ## name .c_str(),"wb");                             \
+  if (F == nullptr) return false;                                       \
   SCOPE_EXIT{ fclose(F); };
 
   OPEN_FILE(ahotFile,       "_ahot");
@@ -50,7 +50,6 @@ bool dumpTCCode(const char* filename) {
   OPEN_FILE(aprofFile,      "_aprof");
   OPEN_FILE(acoldFile,      "_acold");
   OPEN_FILE(afrozenFile,    "_afrozen");
-  OPEN_FILE(helperAddrFile, "_helpers_addrs.txt");
 
 #undef OPEN_FILE
 
@@ -72,7 +71,8 @@ bool dumpTCCode(const char* filename) {
 }
 
 bool dumpTCData() {
-  gzFile tcDataFile = gzopen("/tmp/tc_data.txt.gz", "w");
+  auto const dataPath = RuntimeOption::EvalDumpTCPath + "/tc_data.txt.gz";
+  gzFile tcDataFile = gzopen(dataPath.c_str(), "w");
   if (!tcDataFile) return false;
 
   if (!gzprintf(tcDataFile,
@@ -104,21 +104,14 @@ bool dumpTCData() {
   // Print all translations, including their execution counters. If global
   // counters are disabled (default), fall back to using ProfData, covering
   // only profiling translations.
-  if (!RuntimeOption::EvalJitTransCounters && transdb::enabled()) {
+  if (transdb::enabled()) {
     // Admin requests do not automatically init ProfData, so do it explicitly.
     // No need for matching exit call; data is immortal with trans DB enabled.
     requestInitProfData();
   }
   for (TransID t = 0; t < transdb::getNumTranslations(); t++) {
-    int64_t count = 0;
-    if (RuntimeOption::EvalJitTransCounters) {
-      count = transdb::getTransCounter(t);
-    } else if (auto prof = profData()) {
-      assertx(transdb::getTransCounter(t) == 0);
-      count = prof->transCounter(t);
-    }
     auto const ret = gzputs(
-      tcDataFile, transdb::getTransRec(t)->print(count).c_str()
+      tcDataFile, transdb::getTransRec(t)->print().c_str()
     );
     if (ret == -1) {
       return false;
@@ -141,7 +134,8 @@ bool dump(bool ignoreLease /* = false */) {
     codeLock = lockCode();
     metaLock = lockMetadata();
   }
-  return dumpTCData() && dumpTCCode("/tmp/tc_dump");
+  return dumpTCData() &&
+    dumpTCCode(RuntimeOption::EvalDumpTCPath + "/tc_dump");
 }
 
 std::vector<UsageInfo> getUsageInfo() {

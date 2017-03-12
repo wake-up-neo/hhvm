@@ -11,6 +11,9 @@
 open Full_fidelity_token_kind
 
 type t =
+| DollarOperator
+(* TODO: Is there a better name? Operators should be named as what they do,
+not how they look on the page. *)
 | IndexingOperator
 | FunctionCallOperator
 | AwaitOperator
@@ -18,6 +21,9 @@ type t =
 | ConditionalQuestionOperator
 | ConditionalColonOperator
 | CoalesceOperator
+| PHPOrOperator
+| PHPExclusiveOrOperator
+| PHPAndOperator
 | LogicalOrOperator
 | ExclusiveOrOperator
 | LogicalAndOperator
@@ -26,7 +32,9 @@ type t =
 | EqualOperator
 | StrictEqualOperator
 | NotEqualOperator
+| PhpNotEqualOperator
 | StrictNotEqualOperator
+| SpaceshipOperator
 | LessThanOperator
 | LessThanOrEqualOperator
 | GreaterThanOperator
@@ -70,6 +78,10 @@ type t =
 | ScopeResolutionOperator
 | UnaryPlusOperator
 | UnaryMinusOperator
+| IncludeOperator
+| IncludeOnceOperator
+| RequireOperator
+| RequireOnceOperator
 
 type assoc =
 | LeftAssociative
@@ -77,7 +89,7 @@ type assoc =
 | NotAssociative
 
 let precedence operator =
-  (* TODO: Import, eval *)
+  (* TODO: eval *)
   (* TODO: Comma *)
   (* TODO: print *)
   (* TODO: elseif *)
@@ -85,8 +97,11 @@ let precedence operator =
   (* TODO: endif *)
   (* TODO: variable operator $ *)
   match operator with
-
-  | AwaitOperator -> 1
+  | IncludeOperator | IncludeOnceOperator | RequireOperator
+  | RequireOnceOperator | AwaitOperator -> 1
+  | PHPOrOperator -> 2
+  | PHPExclusiveOrOperator -> 3
+  | PHPAndOperator -> 4
   | AssignmentOperator | AdditionAssignmentOperator
   | SubtractionAssignmentOperator | MultiplicationAssignmentOperator
   | DivisionAssignmentOperator | ExponentiationAssignmentOperator
@@ -94,42 +109,42 @@ let precedence operator =
   | AndAssignmentOperator
   | OrAssignmentOperator | ExclusiveOrAssignmentOperator
   | LeftShiftAssignmentOperator | RightShiftAssignmentOperator
-    -> 2
-  | PipeOperator -> 3
-  | ConditionalQuestionOperator | ConditionalColonOperator -> 4
-  | CoalesceOperator -> 5
-  | LogicalOrOperator -> 6
-  | LogicalAndOperator -> 7
-  | OrOperator -> 8
-  | ExclusiveOrOperator -> 9
-  | AndOperator -> 10
+    -> 5
+  | PipeOperator -> 6
+  | ConditionalQuestionOperator | ConditionalColonOperator -> 7
+  | CoalesceOperator -> 8
+  | LogicalOrOperator -> 9
+  | LogicalAndOperator -> 10
+  | OrOperator -> 11
+  | ExclusiveOrOperator -> 12
+  | AndOperator -> 13
   | EqualOperator | StrictEqualOperator
-  | NotEqualOperator | StrictNotEqualOperator -> 11
-  | LessThanOperator | LessThanOrEqualOperator
-  | GreaterThanOperator | GreaterThanOrEqualOperator -> 12
-  | LeftShiftOperator | RightShiftOperator -> 13
-  | AdditionOperator | SubtractionOperator | ConcatenationOperator -> 14
-  | MultiplicationOperator | DivisionOperator | RemainderOperator -> 15
-  | InstanceofOperator -> 16
+  | PhpNotEqualOperator | NotEqualOperator | StrictNotEqualOperator -> 14
+  | SpaceshipOperator | LessThanOperator | LessThanOrEqualOperator
+  | GreaterThanOperator | GreaterThanOrEqualOperator -> 15
+  | LeftShiftOperator | RightShiftOperator -> 16
+  | AdditionOperator | SubtractionOperator | ConcatenationOperator -> 17
+  | MultiplicationOperator | DivisionOperator | RemainderOperator -> 18
   | CastOperator
   | ReferenceOperator | ErrorControlOperator
   | PrefixIncrementOperator | PrefixDecrementOperator
   | LogicalNotOperator| NotOperator
-  | UnaryPlusOperator | UnaryMinusOperator -> 17
-  | ExponentOperator -> 18
-  | PostfixIncrementOperator | PostfixDecrementOperator -> 19
-  | FunctionCallOperator -> 20
-  | NewOperator | CloneOperator -> 21
-  | IndexingOperator -> 22
-  | MemberSelectionOperator | NullSafeMemberSelectionOperator -> 23
-  | ScopeResolutionOperator -> 24
+  | DollarOperator | UnaryPlusOperator | UnaryMinusOperator -> 19
+  | InstanceofOperator -> 20
+  | ExponentOperator -> 21
+  | PostfixIncrementOperator | PostfixDecrementOperator -> 22
+  | FunctionCallOperator -> 23
+  | NewOperator | CloneOperator -> 24
+  | IndexingOperator -> 25
+  | MemberSelectionOperator | NullSafeMemberSelectionOperator -> 26
+  | ScopeResolutionOperator -> 27
 
 let associativity operator =
   match operator with
-  | EqualOperator | StrictEqualOperator | NotEqualOperator
+  | EqualOperator | StrictEqualOperator | NotEqualOperator | PhpNotEqualOperator
   | StrictNotEqualOperator | LessThanOperator | LessThanOrEqualOperator
   | GreaterThanOperator | GreaterThanOrEqualOperator | InstanceofOperator
-  | NewOperator | CloneOperator | AwaitOperator
+  | NewOperator | CloneOperator | AwaitOperator | SpaceshipOperator
     -> NotAssociative
 
   | PipeOperator | ConditionalQuestionOperator | ConditionalColonOperator
@@ -139,15 +154,17 @@ let associativity operator =
   | MultiplicationOperator | DivisionOperator | RemainderOperator
   | MemberSelectionOperator | NullSafeMemberSelectionOperator
   | ScopeResolutionOperator | FunctionCallOperator | IndexingOperator
-  (* Import, eval *)
+  | IncludeOperator | IncludeOnceOperator | RequireOperator
+  | RequireOnceOperator | PHPAndOperator | PHPOrOperator
+  | PHPExclusiveOrOperator
+  (* eval *)
   (* Comma *)
   (* elseif *)
   (* else *)
   (* endif *)
-  (* variable operator $ *)
     -> LeftAssociative
   | CoalesceOperator| LogicalNotOperator | NotOperator | CastOperator
-  | UnaryPlusOperator | UnaryMinusOperator  (* TODO: Correct? *)
+  | DollarOperator | UnaryPlusOperator | UnaryMinusOperator  (* TODO: Correct? *)
   | ErrorControlOperator | ReferenceOperator (* TODO: Correct? *)
   | PostfixIncrementOperator | PostfixDecrementOperator
   | PrefixIncrementOperator | PrefixDecrementOperator | ExponentOperator
@@ -168,17 +185,25 @@ let prefix_unary_from_token token =
   | Tilde -> NotOperator
   | PlusPlus -> PrefixIncrementOperator
   | MinusMinus -> PrefixDecrementOperator
+  | Dollar -> DollarOperator
   | Plus -> UnaryPlusOperator
   | Minus -> UnaryMinusOperator
   | Ampersand -> ReferenceOperator
   | At -> ErrorControlOperator
   | New -> NewOperator
   | Clone -> CloneOperator
+  | Include -> IncludeOperator
+  | Include_once -> IncludeOnceOperator
+  | Require -> RequireOperator
+  | Require_once -> RequireOnceOperator
   | _ -> failwith "not a unary operator"
 
 (* Is this a token that can appear after an expression? *)
 let is_trailing_operator_token token =
   match token with
+  | And
+  | Or
+  | Xor
   | PlusPlus
   | MinusMinus
   | LeftParen
@@ -196,8 +221,10 @@ let is_trailing_operator_token token =
   | Bar
   | EqualEqual
   | EqualEqualEqual
+  | LessThanGreaterThan
   | ExclamationEqual
   | ExclamationEqualEqual
+  | LessThanEqualGreaterThan
   | LessThan
   | LessThanEqual
   | GreaterThan
@@ -230,6 +257,9 @@ let is_trailing_operator_token token =
 
 let trailing_from_token token =
   match token with
+  | And -> PHPAndOperator
+  | Or -> PHPOrOperator
+  | Xor -> PHPExclusiveOrOperator
   | BarGreaterThan -> PipeOperator
   | Question -> ConditionalQuestionOperator
   | Colon -> ConditionalColonOperator
@@ -242,8 +272,10 @@ let trailing_from_token token =
   | EqualEqual -> EqualOperator
   | EqualEqualEqual -> StrictEqualOperator
   | ExclamationEqual -> NotEqualOperator
+  | LessThanGreaterThan -> PhpNotEqualOperator
   | ExclamationEqualEqual -> StrictNotEqualOperator
   | LessThan -> LessThanOperator
+  | LessThanEqualGreaterThan -> SpaceshipOperator
   | LessThanEqual -> LessThanOrEqualOperator
   | GreaterThan -> GreaterThanOperator
   | GreaterThanEqual -> GreaterThanOrEqualOperator
@@ -283,6 +315,9 @@ let trailing_from_token token =
 
 let is_binary_operator_token token =
   match token with
+  | And
+  | Or
+  | Xor
   | Plus
   | Minus
   | Ampersand
@@ -295,7 +330,9 @@ let is_binary_operator_token token =
   | EqualEqual
   | EqualEqualEqual
   | ExclamationEqual
+  | LessThanGreaterThan
   | ExclamationEqualEqual
+  | LessThanEqualGreaterThan
   | LessThan
   | LessThanEqual
   | GreaterThan
@@ -340,8 +377,25 @@ let is_assignment operator =
   | RightShiftAssignmentOperator -> true
   | _ -> false
 
+let is_comparison operator =
+  match operator with
+  | EqualOperator
+  | StrictEqualOperator
+  | NotEqualOperator
+  | PhpNotEqualOperator
+  | StrictNotEqualOperator
+  | LessThanOperator
+  | LessThanOrEqualOperator
+  | GreaterThanOperator
+  | GreaterThanOrEqualOperator
+  | SpaceshipOperator -> true
+  | _ -> false
+
 let to_string kind =
   match kind with
+  | PHPAndOperator -> "php_and"
+  | PHPOrOperator -> "php_or"
+  | PHPExclusiveOrOperator -> "php_exclusive_or"
   | IndexingOperator -> "indexing"
   | FunctionCallOperator -> "function_call"
   | AwaitOperator -> "await"
@@ -357,8 +411,10 @@ let to_string kind =
   | EqualOperator -> "equal"
   | StrictEqualOperator -> "strict_equal"
   | NotEqualOperator -> "not_equal"
+  | PhpNotEqualOperator -> "php_not_equal"
   | StrictNotEqualOperator -> "strict_not_equal"
   | LessThanOperator -> "less_than"
+  | SpaceshipOperator -> "spaceship"
   | LessThanOrEqualOperator -> "less_than_or_equal"
   | GreaterThanOperator -> "greater_than"
   | GreaterThanOrEqualOperator -> "greater_than_or_equal"
@@ -399,5 +455,10 @@ let to_string kind =
   | MemberSelectionOperator -> "member_selection"
   | NullSafeMemberSelectionOperator -> "null_safe_member_selection"
   | ScopeResolutionOperator -> "scope_resolution"
+  | DollarOperator -> "dollar"
   | UnaryPlusOperator -> "unary_plus"
   | UnaryMinusOperator -> "unary_minus"
+  | IncludeOperator -> "include"
+  | IncludeOnceOperator -> "include_once"
+  | RequireOperator -> "require"
+  | RequireOnceOperator -> "require_once"

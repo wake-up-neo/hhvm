@@ -12,10 +12,17 @@ module type S = sig
   type t
   type client
 
+  exception Client_went_away
+
   val provider_from_file_descriptor : Unix.file_descr -> t
   val provider_for_test : unit -> t
 
-  val sleep_and_check : t -> client option -> bool * bool
+  val sleep_and_check : t ->
+    (** Optional persistent client. *)
+    client option ->
+    (** Returns an optional new client, and a boolean for whether there is
+     * a request on the persistent client. *)
+    client option * bool
   val accept_client : t -> client
   val read_connection_type : client -> ServerCommandTypes.connection_type
   val send_response_to_client : client -> 'a -> unit

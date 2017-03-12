@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,6 +18,7 @@
 
 #include "hphp/runtime/vm/jit/irgen-exit.h"
 #include "hphp/runtime/vm/jit/irgen-internal.h"
+#include "hphp/runtime/vm/jit/irgen-interpone.h"
 
 namespace HPHP { namespace jit { namespace irgen {
 
@@ -48,7 +49,6 @@ SSATmp* staticTVCns(IRGS& env, const TypedValue* tv) {
     case KindOfObject:
     case KindOfResource:
     case KindOfRef:
-    case KindOfClass:
       break;
   }
   always_assert(false);
@@ -126,15 +126,16 @@ void emitCnsU(IRGS& env,
   implCns(env, name, fallback, false);
 }
 
-void emitClsCnsD(IRGS& env,
-                 const StringData* cnsNameStr,
-                 const StringData* clsNameStr) {
+void implClsCns(IRGS& env,
+                const Class* cls,
+                const StringData* cnsNameStr,
+                const StringData* clsNameStr) {
   auto const clsCnsName = ClsCnsName { clsNameStr, cnsNameStr };
 
   // If the class is already defined in this request, the class is persistent
   // or a parent of the current context, and this constant is a scalar
   // constant, we can just compile it to a literal.
-  if (auto const cls = Unit::lookupClass(clsNameStr)) {
+  if (cls) {
     Slot ignore;
     auto const tv = cls->cnsNameToTV(cnsNameStr, ignore);
     if (tv && tv->m_type != KindOfUninit &&
@@ -167,6 +168,36 @@ void emitClsCnsD(IRGS& env,
       push(env, val);
       gen(env, Jmp, makeExit(env, nextBcOff(env)));
       return nullptr;
+    }
+  );
+}
+
+void emitClsCnsD(IRGS& env,
+                 const StringData* cnsNameStr,
+                 const StringData* clsNameStr) {
+  implClsCns(env, Unit::lookupClass(clsNameStr), cnsNameStr, clsNameStr);
+}
+
+void emitClsCns(IRGS& env, const StringData* cnsNameStr, uint32_t slot) {
+  auto const clsTmp = peekClsRef(env, slot);
+  auto const clsTy = clsTmp->type();
+  if (!clsTy.clsSpec()) {
+    interpOne(env, *env.currentNormalizedInstruction);
+    return;
+  }
+  auto const cls = clsTy.clsSpec().cls();
+
+  ifThenElse(
+    env,
+    [&] (Block* taken) {
+      gen(env, CheckType, taken, Type::ExactCls(cls), clsTmp);
+    },
+    [&] {
+      killClsRef(env, slot);
+      implClsCns(env, cls, cnsNameStr, cls->name());
+    },
+    [&] {
+      gen(env, Jmp, makeExitSlow(env));
     }
   );
 }

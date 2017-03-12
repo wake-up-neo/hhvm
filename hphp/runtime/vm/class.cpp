@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -53,8 +53,6 @@ const StaticString s_86ctor("86ctor");
 const StaticString s_86pinit("86pinit");
 const StaticString s_86sinit("86sinit");
 
-void (*Class::MethodCreateHook)(Class* cls, MethodMapBuilder& builder);
-
 Mutex g_classesMutex;
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -85,49 +83,51 @@ const Class* getOwningClassForFunc(const Func* f) {
 ///////////////////////////////////////////////////////////////////////////////
 // Class::PropInitVec.
 
-Class::PropInitVec::PropInitVec()
-  : m_data(nullptr)
-  , m_size(0)
-  , m_req_allocated(false)
-{}
-
 Class::PropInitVec::~PropInitVec() {
-  if (!m_req_allocated) free(m_data);
+  if (m_capacity > 0) {
+    free_huge(m_data);
+  }
 }
 
 Class::PropInitVec*
 Class::PropInitVec::allocWithReqAllocator(const PropInitVec& src) {
   PropInitVec* p = req::make_raw<PropInitVec>();
-  p->m_size = src.size();
-  p->m_data = req::make_raw_array<TypedValueAux>(src.size());
-  memcpy(p->m_data, src.m_data, src.size() * sizeof(*p->m_data));
-  p->m_req_allocated = true;
+  uint32_t sz = src.m_size;
+  p->m_size = sz;
+  p->m_capacity = ~sz;
+  p->m_data = req::make_raw_array<TypedValueAux>(sz);
+  memcpy(p->m_data, src.m_data, sz * sizeof(*p->m_data));
   return p;
 }
 
 const Class::PropInitVec&
 Class::PropInitVec::operator=(const PropInitVec& piv) {
-  assert(!m_req_allocated);
+  assert(!reqAllocated());
   if (this != &piv) {
-    unsigned sz = m_size = piv.size();
-    if (sz) sz = folly::nextPowTwo(sz);
-    free(m_data);
-    m_data = (TypedValueAux*)malloc(sz * sizeof(*m_data));
+    if (UNLIKELY(m_capacity)) {
+      free_huge(m_data);
+      m_data = nullptr;
+    }
+    unsigned sz = m_size = m_capacity = piv.size();
+    if (sz == 0) return *this;
+    m_data = (TypedValueAux*)malloc_huge(sz * sizeof(*m_data));
     assert(m_data);
-    memcpy(m_data, piv.m_data, piv.size() * sizeof(*m_data));
+    memcpy(m_data, piv.m_data, sz * sizeof(*m_data));
   }
   return *this;
 }
 
 void Class::PropInitVec::push_back(const TypedValue& v) {
-  assert(!m_req_allocated);
-  /*
-   * the allocated size is always the next power of two (or zero)
-   * so we just need to reallocate when we hit a power of two
-   */
-  if (!m_size || folly::isPowTwo(m_size)) {
-    unsigned size = m_size ? m_size * 2 : 1;
-    m_data = (TypedValueAux*)realloc(m_data, size * sizeof(*m_data));
+  assert(!reqAllocated());
+  if (m_size == m_capacity) {
+    unsigned newCap = folly::nextPowTwo(m_size + 1);
+    m_capacity = static_cast<int32_t>(newCap);
+    auto newData = malloc_huge(newCap * sizeof(TypedValue));
+    if (m_data) {
+      memcpy(newData, m_data, m_size * sizeof(*m_data));
+      free_huge(m_data);
+    }
+    m_data = reinterpret_cast<TypedValueAux*>(newData);
     assert(m_data);
   }
   cellDup(v, m_data[m_size++]);
@@ -198,7 +198,11 @@ template<size_t sz>
 struct assert_sizeof_class {
   // If this static_assert fails, the compiler error will have the real value
   // of sizeof_Class in it since it's in this struct's type.
+#ifdef DEBUG
+  static_assert(sz == (use_lowptr ? 260 : 304), "Change this only on purpose");
+#else
   static_assert(sz == (use_lowptr ? 252 : 296), "Change this only on purpose");
+#endif
 };
 template struct assert_sizeof_class<sizeof_Class>;
 
@@ -253,7 +257,7 @@ Class* Class::rescope(Class* ctx, Attr attrs /* = AttrNone */) {
   // Look up the generated template class for this particular subclass of
   // Closure.  This class maintains the table of scoped clones of itself, and
   // if we create a new scoped clone, we need to map it there.
-  auto template_cls = is_dynamic ? Unit::lookupClass(name()) : this;
+  auto template_cls = is_dynamic ? preClass()->namedEntity()->clsList() : this;
   auto const invoke = template_cls->m_invoke;
 
   assert(IMPLIES(is_dynamic, m_scoped));
@@ -297,12 +301,15 @@ Class* Class::rescope(Class* ctx, Attr attrs /* = AttrNone */) {
     if (auto cls = try_cache()) return cls;
   }
 
+  auto cloneClass = [&] {
+    auto const cls = newClass(m_preClass.get(), m_parent.get());
+    return cls;
+  };
+
   // We use the French for closure because using the English crashes gcc in the
   // implicit lambda capture below.  (This is fixed in gcc 4.8.5.)
   auto fermeture = ClassPtr {
-    template_cls->m_scoped
-      ? newClass(m_preClass.get(), m_parent.get())
-      : template_cls
+    template_cls->m_scoped ? cloneClass() : template_cls
   };
 
   WriteLock l(s_scope_cache_mutex);
@@ -317,7 +324,7 @@ Class* Class::rescope(Class* ctx, Attr attrs /* = AttrNone */) {
     // set when we first check `m_scoped' before acquiring the lock.
     s_scope_cache_mutex.release();
     SCOPE_EXIT { s_scope_cache_mutex.acquireWrite(); };
-    fermeture = ClassPtr { newClass(m_preClass.get(), m_parent.get()) };
+    fermeture = ClassPtr { cloneClass() };
   }
 
   // Check the caches again.
@@ -337,10 +344,21 @@ Class* Class::rescope(Class* ctx, Attr attrs /* = AttrNone */) {
       ScopedCloneBackref { ClassPtr(template_cls), attrs });
   }
 
+  auto updateClones = [&] {
+    if (template_cls != fermeture.get()) {
+      scopedClones[key] = fermeture;
+      fermeture.get()->setClassHandle(template_cls->m_cachedClass);
+    }
+  };
+
   InstanceBits::ifInitElse(
-    [&] { fermeture->setInstanceBits();
-          if (this != fermeture.get()) scopedClones[key] = fermeture; },
-    [&] { if (this != fermeture.get()) scopedClones[key] = fermeture; }
+    [&] {
+      fermeture->setInstanceBits();
+      updateClones();
+    },
+    [&] {
+      updateClones();
+    }
   );
 
   return fermeture.get();
@@ -392,7 +410,7 @@ Class::~Class() {
     for (unsigned i = 0, n = numStaticProperties(); i < n; ++i) {
       m_sPropCache[i].~Link();
     }
-    free(m_sPropCache);
+    free_huge(m_sPropCache);
   }
 
   for (auto i = size_t{}, n = numMethods(); i < n; i++) {
@@ -413,6 +431,11 @@ Class::~Class() {
   EnumCache::deleteValues(this);
 
   low_free_data(m_vtableVec.get());
+
+#ifdef DEBUG
+  validate();
+  m_magic = ~m_magic;
+#endif
 }
 
 void Class::releaseRefs() {
@@ -490,9 +513,11 @@ void Class::releaseRefs() {
           assertx(template_cls->m_extra);
           auto& scopedClones = template_cls->m_extra.raw()->m_scopedClones;
 
-          auto const key = CloneScope { this, attrs };
-          assertx(scopedClones.count(key));
-          scopedClones.erase(key);
+          auto const it = scopedClones.find(CloneScope { this, attrs });
+          assertx(it != scopedClones.end());
+          it->second->m_cachedClass =
+            rds::Link<LowPtr<Class>>(rds::kInvalidHandle);
+          scopedClones.erase(it);
         }
       }
     }
@@ -579,6 +604,14 @@ const Class* Class::commonAncestor(const Class* cls) const {
   return nullptr;
 }
 
+const Class* Class::getClassDependency(const StringData* name) const {
+  for (auto idx = m_classVecLen; idx--; ) {
+    auto cls = m_classVec[idx];
+    if (cls->name()->isame(name)) return cls;
+  }
+
+  return m_interfaces.lookupDefault(name, nullptr);
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 // Magic methods.
@@ -589,7 +622,7 @@ const Func* Class::getDeclaredCtor() const {
 }
 
 const Func* Class::getCachedInvoke() const {
-  assert(IMPLIES(m_invoke, !m_invoke->isStaticInProlog()));
+  assert(IMPLIES(m_invoke, !m_invoke->isStaticInPrologue()));
   return m_invoke;
 }
 
@@ -649,9 +682,9 @@ void Class::initProps() const {
     // Iteratively invoke 86pinit() methods upward
     // through the inheritance chain.
     for (auto it = m_pinitVec.rbegin(); it != m_pinitVec.rend(); ++it) {
-      TypedValue retval;
-      g_context->invokeFunc(&retval, *it, init_null_variant, nullptr,
-                              const_cast<Class*>(this));
+      DEBUG_ONLY auto retval = g_context->invokeFunc(
+        *it, init_null_variant, nullptr, const_cast<Class*>(this)
+      );
       assert(retval.m_type == KindOfNull);
     }
   } catch (...) {
@@ -718,9 +751,9 @@ void Class::initSProps() const {
   // They will override the KindOfUninit values set by scalar initialization.
   if (hasNonscalarInit) {
     for (unsigned i = 0, n = m_sinitVec.size(); i < n; i++) {
-      TypedValue retval;
-      g_context->invokeFunc(&retval, m_sinitVec[i], init_null_variant,
-                            nullptr, const_cast<Class*>(this));
+      DEBUG_ONLY auto retval = g_context->invokeFunc(
+        m_sinitVec[i], init_null_variant, nullptr, const_cast<Class*>(this)
+      );
       assert(retval.m_type == KindOfNull);
     }
   }
@@ -759,13 +792,13 @@ void Class::initSPropHandles() const {
         if (usePersistentHandles && (sProp.attrs & AttrPersistent)) {
           propHandle.bind(rds::Mode::Persistent);
           *propHandle = sProp.val;
+          rds::recordRds(propHandle.handle(), sizeof(TypedValue),
+                         rds::SPropCache{this, slot});
         } else {
-          propHandle.bind(rds::Mode::Local);
+          propHandle = rds::bind<TypedValue>(
+              rds::SPropCache{this, slot}, rds::Mode::Local
+          );
         }
-
-        auto msg = name()->toCppString() + "::" + sProp.name->toCppString();
-        rds::recordRds(propHandle.handle(),
-                       sizeof(TypedValue), "SPropCache", msg);
       } else {
         auto realSlot = sProp.cls->lookupSProp(sProp.name);
         propHandle = sProp.cls->m_sPropCache[realSlot];
@@ -830,7 +863,7 @@ Class::PropLookup<Slot> Class::getDeclPropIndex(
   if (propInd != kInvalidSlot) {
     auto const attrs = m_declProperties[propInd].attrs;
     if ((attrs & (AttrProtected|AttrPrivate)) &&
-        !g_context->debuggerSettings.bypassCheck) {
+        (g_context.isNull() || !g_context->debuggerSettings.bypassCheck)) {
       // Fetch the class in the inheritance tree which first declared the
       // property
       auto const baseClass = m_declProperties[propInd].cls;
@@ -1058,9 +1091,7 @@ Cell Class::clsCnsGet(const StringData* clsCnsName, bool includeTypeCns) const {
     make_tv<KindOfPersistentString>(const_cast<StringData*>(cns.name.get()))
   };
 
-  Cell ret;
-  g_context->invokeFuncFew(
-    &ret,
+  auto ret = g_context->invokeFuncFew(
     meth86cinit,
     ActRec::encodeClass(this),
     nullptr,
@@ -1107,9 +1138,7 @@ DataType Class::clsCnsType(const StringData* cnsName) const {
 size_t Class::declPropOffset(Slot index) const {
   static_assert(std::is_unsigned<Slot>::value,
                 "Slot is supposed to be unsigned");
-  return sizeof(ObjectData) +
-         m_extra->m_builtinODTailSize +
-         index * sizeof(TypedValue);
+  return sizeof(ObjectData) + index * sizeof(TypedValue);
 }
 
 
@@ -1165,7 +1194,6 @@ void Class::setInstanceBitsImpl() {
   m_instanceBits = bits;
 }
 
-
 ///////////////////////////////////////////////////////////////////////////////
 // Private methods.
 //
@@ -1211,13 +1239,10 @@ void Class::setParent() {
     allocExtraData();
     m_extra.raw()->m_instanceCtor = m_preClass->instanceCtor();
     m_extra.raw()->m_instanceDtor = m_preClass->instanceDtor();
-    m_extra.raw()->m_builtinODTailSize = m_preClass->builtinObjSize() -
-                                         m_preClass->builtinODOffset();
   } else if (m_parent.get() && m_parent->m_extra->m_instanceCtor) {
     allocExtraData();
     m_extra.raw()->m_instanceCtor = m_parent->m_extra->m_instanceCtor;
     m_extra.raw()->m_instanceDtor = m_parent->m_extra->m_instanceDtor;
-    m_extra.raw()->m_builtinODTailSize = m_parent->m_extra->m_builtinODTailSize;
     // XXX: should this be copying over the clsInfo also?  Might be broken...
   }
 }
@@ -1248,7 +1273,7 @@ const StaticString
   s_clone("__clone");
 
 static Func* markNonStatic(Func* meth) {
-  // Do not use isStaticInProlog here, since that uses the
+  // Do not use isStaticInPrologue here, since that uses the
   // AttrRequiresThis flag.
   if (meth && (!meth->isStatic() || meth->isClosureBody())) {
     meth->setAttrs(meth->attrs() | AttrRequiresThis);
@@ -1277,7 +1302,7 @@ void Class::setSpecial() {
    * the appropriate static context.)
    */
   m_invoke = markNonStatic(this, s_invoke);
-  if (m_invoke && m_invoke->isStaticInProlog()) {
+  if (m_invoke && m_invoke->isStaticInPrologue()) {
     m_invoke = nullptr;
   }
 
@@ -1476,7 +1501,12 @@ void checkDeclarationCompat(const PreClass* preClass,
 Class::Class(PreClass* preClass, Class* parent,
              std::vector<ClassPtr>&& usedTraits,
              unsigned classVecLen, unsigned funcVecLen)
+#ifdef DEBUG
+  : m_magic{kMagic}
+  , m_parent(parent)
+#else
   : m_parent(parent)
+#endif
   , m_preClass(PreClassPtr(preClass))
   , m_classVecLen(always_safe_cast<decltype(m_classVecLen)>(classVecLen))
   , m_funcVecLen(always_safe_cast<decltype(m_funcVecLen)>(funcVecLen))
@@ -1516,7 +1546,7 @@ void Class::methodOverrideCheck(const Func* parentMethod, const Func* method) {
     }
   }
 
-  if (method->attrs() & AttrAbstract) {
+  if ((method->attrs() & AttrAbstract) && !method->isFromTrait()) {
     raise_error("Cannot re-declare %sabstract method %s::%s() abstract in "
                 "class %s",
                 (parentMethod->attrs() & AttrAbstract) ? "" : "non-",
@@ -1553,11 +1583,13 @@ void Class::setMethods() {
   std::vector<Slot> parentMethodsWithStaticLocals;
   MethodMapBuilder builder;
 
+  ITRACE(5, "----------\nsetMethods() for {}:\n", this->name()->data());
   if (m_parent.get() != nullptr) {
     // Copy down the parent's method entries. These may be overridden below.
     for (Slot i = 0; i < m_parent->m_methods.size(); ++i) {
       Func* f = m_parent->getMethod(i);
       assert(f);
+      ITRACE(5, "  - adding parent method {}\n", f->name()->data());
       if ((f->attrs() & AttrClone) ||
           (!(f->attrs() & AttrPrivate) && f->hasStaticLocals())) {
         // When copying down an entry for a non-private method that has
@@ -1577,6 +1609,7 @@ void Class::setMethods() {
   // parent.
   for (size_t methI = 0; methI < m_preClass->numMethods(); ++methI) {
     Func* method = m_preClass->methods()[methI];
+    ITRACE(5, "  - processing pre-class method {}\n", method->name()->data());
     if (Func::isSpecial(method->name())) {
       if (method->name() == s_86ctor.get() ||
           method->name() == s_86sinit.get() ||
@@ -1594,6 +1627,9 @@ void Class::setMethods() {
       Func* parentMethod = builder[it2->second];
       // We should never have null func pointers to deal with
       assert(parentMethod);
+      // An abstract method that came from a trait doesn't override another
+      // method.
+      if (method->isFromTrait() && (method->attrs() & AttrAbstract)) continue;
       methodOverrideCheck(parentMethod, method);
       // Overlay.
       Func* f = method->clone(this);
@@ -1623,11 +1659,11 @@ void Class::setMethods() {
     }
   }
 
-  auto traitsBeginIdx = builder.size();
+  auto const traitsBeginIdx = builder.size();
   if (m_extra->m_usedTraits.size()) {
     importTraitMethods(builder);
   }
-  auto traitsEndIdx = builder.size();
+  auto const traitsEndIdx = builder.size();
 
   // Make copies of Funcs inherited from the parent class that have
   // static locals
@@ -1658,12 +1694,6 @@ void Class::setMethods() {
         }
       }
     }
-  }
-
-  if (Class::MethodCreateHook) {
-    Class::MethodCreateHook(this, builder);
-    // running MethodCreateHook may add methods to builder
-    traitsEndIdx = builder.size();
   }
 
   if (m_extra) {
@@ -1979,10 +2009,10 @@ void Class::setProperties() {
       // those of the parent, and append this class's private properties.
       // Append order doesn't matter here (unlike in setMethods()).
       // Prohibit static-->non-static redeclaration.
-      SPropMap::Builder::iterator it2 = curSPropMap.find(preProp->name());
-      if (it2 != curSPropMap.end()) {
+      SPropMap::Builder::iterator it5 = curSPropMap.find(preProp->name());
+      if (it5 != curSPropMap.end()) {
         raise_error("Cannot redeclare static %s::$%s as non-static %s::$%s",
-                    curSPropMap[it2->second].cls->name()->data(),
+                    curSPropMap[it5->second].cls->name()->data(),
                     preProp->name()->data(), m_preClass->name()->data(),
                     preProp->name()->data());
       }
@@ -2170,7 +2200,7 @@ void Class::setProperties() {
   m_staticProperties.create(curSPropMap);
 
   m_sPropCache = (rds::Link<TypedValue>*)
-    malloc(numStaticProperties() * sizeof(*m_sPropCache));
+    malloc_huge(numStaticProperties() * sizeof(*m_sPropCache));
   for (unsigned i = 0, n = numStaticProperties(); i < n; ++i) {
     new (&m_sPropCache[i]) rds::Link<TypedValue>(rds::kInvalidHandle);
   }
@@ -2205,9 +2235,6 @@ bool Class::compatibleTraitPropInit(TypedValue& tv1, TypedValue& tv2) {
     case KindOfResource:
     case KindOfRef:
       return false;
-
-    case KindOfClass:
-      break;
   }
   not_reached();
 }
@@ -2568,7 +2595,7 @@ void Class::setInterfaceVtables() {
     auto const slot = iface->preClass()->ifaceVtableSlot();
     if (slot == kInvalidSlot) continue;
     ITRACE(3, "{} @ slot {}\n", iface->name()->data(), slot);
-    Trace::Indent indent;
+    Trace::Indent indent2;
     always_assert(slot < nVtables);
 
     auto const nMethods = iface->numMethods();
@@ -2599,7 +2626,10 @@ void Class::setRequirements() {
       reqBuilder.add(req->name(), req);
       return;
     }
-    assert(reqBuilder[it->second]->is_same(req));
+    if (!reqBuilder[it->second]->is_same(req)) {
+      raise_error("Conflicting requirements for '%s'",
+                  req->name()->data());
+    }
   };
 
   if (m_parent.get() != nullptr) {
@@ -2619,85 +2649,48 @@ void Class::setRequirements() {
     }
   }
 
-  if (attrs() & AttrTrait) {
-    // Check that requirements are semantically valid.
-    for (auto const& req : m_preClass->requirements()) {
-      auto const reqName = req.name();
-      auto const reqCls = Unit::loadClass(reqName);
-      if (!reqCls) {
-        raise_error("%s '%s' required by trait '%s' cannot be loaded",
-                    req.is_extends() ? "Class" : "Interface",
-                    reqName->data(),
-                    m_preClass->name()->data());
-      }
-
-      if (req.is_extends()) {
-        if (reqCls->attrs() & (AttrTrait | AttrInterface | AttrFinal)) {
-          raise_error(Strings::TRAIT_BAD_REQ_EXTENDS,
-                      m_preClass->name()->data(),
-                      reqName->data(),
-                      reqName->data());
-        }
-      } else {
-        assert(req.is_implements());
-        if (!(reqCls->attrs() & AttrInterface)) {
-          raise_error(Strings::TRAIT_BAD_REQ_IMPLEMENTS,
-                      m_preClass->name()->data(),
-                      reqName->data(),
-                      reqName->data());
-        }
-      }
-
-      addReq(&req);
-    }
-  } else if (attrs() & AttrInterface) {
+  if (attrs() & AttrInterface) {
     // Check that requirements are semantically valid
+    // We don't require the class to exist yet, to avoid creating
+    // pointless circular dependencies, but if it does, we check
+    // that it's the right kind.
     for (auto const& req : m_preClass->requirements()) {
-      auto const reqName = req.name();
-      auto const reqCls = Unit::loadClass(reqName);
-      if (!reqCls) {
-        raise_error("'%s' required by interface '%s' cannot be loaded",
-                    reqName->data(),
-                    m_preClass->name()->data());
-      }
-
       assert(req.is_extends());
-      if (reqCls->attrs() & (AttrTrait | AttrInterface | AttrFinal)) {
-        raise_error("Interface '%s' requires extension of '%s', but %s "
-                    "is not an extendable class",
-                    m_preClass->name()->data(),
-                    reqName->data(),
-                    reqName->data());
-      }
-      addReq(&req);
-    }
-  } else if (RuntimeOption::RepoAuthoritative) {
-    // The flattening of traits may result in requirements migrating from
-    // the trait's declaration into that of the "using" class.
-    for (auto const& req : m_preClass->requirements()) {
       auto const reqName = req.name();
-      auto const reqCls = Unit::loadClass(reqName);
-      if (!reqCls) {
-        raise_error("%s '%s' required by trait '%s' cannot be loaded",
-                    req.is_extends() ? "Class" : "Interface",
-                    reqName->data(),
-                    m_preClass->name()->data());
-      }
-
-      if (req.is_extends()) {
+      auto const reqCls = Unit::lookupClass(reqName);
+      if (reqCls) {
         if (reqCls->attrs() & (AttrTrait | AttrInterface | AttrFinal)) {
-          raise_error(Strings::TRAIT_BAD_REQ_EXTENDS,
+          raise_error("Interface '%s' requires extension of '%s', but %s "
+                      "is not an extendable class",
                       m_preClass->name()->data(),
                       reqName->data(),
                       reqName->data());
         }
-      } else {
-        assert(req.is_implements());
-        if (!(reqCls->attrs() & AttrInterface)) {
-          raise_error(Strings::TRAIT_BAD_REQ_IMPLEMENTS,
-                      m_preClass->name()->data(),
-                      reqName->data(),
-                      reqName->data());
+      }
+      addReq(&req);
+    }
+  } else if (attrs() & AttrTrait || RuntimeOption::RepoAuthoritative) {
+    // Check that requirements are semantically valid.
+    // Note that in repo-auth mode, trait flatening could have migrated
+    // requirements onto a class's preClass.
+    for (auto const& req : m_preClass->requirements()) {
+      auto const reqName = req.name();
+      if (auto const reqCls = Unit::lookupClass(reqName)) {
+        if (req.is_extends()) {
+          if (reqCls->attrs() & (AttrTrait | AttrInterface | AttrFinal)) {
+            raise_error(Strings::TRAIT_BAD_REQ_EXTENDS,
+                        m_preClass->name()->data(),
+                        reqName->data(),
+                        reqName->data());
+          }
+        } else {
+          assert(req.is_implements());
+          if (!(reqCls->attrs() & AttrInterface)) {
+            raise_error(Strings::TRAIT_BAD_REQ_IMPLEMENTS,
+                        m_preClass->name()->data(),
+                        reqName->data(),
+                        reqName->data());
+          }
         }
       }
       addReq(&req);
@@ -2835,21 +2828,10 @@ void Class::checkRequirementConstraints() const {
       if (UNLIKELY(
             (reqExtCls == nullptr) ||
             (reqExtCls->attrs() & (AttrTrait | AttrInterface)))) {
-        // If this class is being created from scratch from the PreClass
-        // for the first time in this request, then errors would already
-        // have been raised when the trait/interface from which the
-        // requirement came was loaded. If however we're subject to the
-        // whims of Class::avail() and reusing a Class, the failure of the
-        // lookup indicates that the requirement was not satisfied in the
-        // previous request; if the requirement had been satisfied, the
-        // appropriate reqExtCls would again loaded via the class parent
-        // and interfaces checked in Class::avail()
         raiseUnsatisfiedRequirement(req);
       }
 
-      if (UNLIKELY(
-            (m_classVecLen < reqExtCls->m_classVecLen) ||
-            (m_classVec[reqExtCls->m_classVecLen-1] != reqExtCls))) {
+      if (UNLIKELY(!classofNonIFace(reqExtCls))) {
         raiseUnsatisfiedRequirement(req);
       }
     }
@@ -2996,6 +2978,8 @@ void Class::importTraitMethod(const TMIData::MethodData& mdata,
 
   auto mm_iter = builder.find(mdata.name);
 
+  ITRACE(5, "  - processing trait method {}\n", method->name()->data());
+
   // For abstract methods, simply return if method already declared.
   if ((modifiers & AttrAbstract) && mm_iter != builder.end()) {
     return;
@@ -3024,7 +3008,7 @@ void Class::importTraitMethod(const TMIData::MethodData& mdata,
   }
   Func* f = method->clone(this, mdata.name);
   f->setNewFuncId();
-  f->setAttrs(modifiers);
+  f->setAttrs(modifiers | AttrTrait);
   if (!parentMethod) {
     // New method
     builder.add(mdata.name, f);

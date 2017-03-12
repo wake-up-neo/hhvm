@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -33,10 +33,11 @@
 
 #include <fstream>
 #include <memory>
+#include <vector>
 
 #ifdef __APPLE__
 #include <mach-o/getsect.h>
-#elif defined(__CYGWIN__) || defined(__MINGW__) || defined(_MSC_VER)
+#elif defined(_MSC_VER)
 #include <windows.h>
 #include <winuser.h>
 #else
@@ -47,11 +48,27 @@ namespace HPHP {
 
 ///////////////////////////////////////////////////////////////////////////////
 
+namespace {
+
+/*
+ * /tmp files created by dlopen_embedded_data().
+ */
+std::vector<std::string> s_tmp_files;
+
+/*
+ * Lock around accesses to s_tmp_files.
+ */
+std::mutex s_tmp_files_lock;
+
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
 bool get_embedded_data(const char* section, embedded_data* desc,
                        const std::string& filename /*= "" */) {
   auto const fname = filename.empty() ? current_executable_path() : filename;
 
-#if defined(__CYGWIN__) || defined(__MINGW__) || defined(_MSC_VER)
+#ifdef _MSC_VER
   HMODULE moduleHandle = GetModuleHandleA(fname.data());
   HGLOBAL loadedResource;
   HRSRC   resourceInfo;
@@ -97,7 +114,7 @@ bool get_embedded_data(const char* section, embedded_data* desc,
   return false;
 }
 
-#if (defined(__CYGWIN__) || defined(__MINGW__) || defined(_MSC_VER))
+#ifdef _MSC_VER
 
 std::string read_embedded_data(const embedded_data& desc) {
   return std::string((const char*)LockResource(desc.m_handle), desc.m_len);
@@ -138,7 +155,19 @@ void* dlopen_embedded_data(const embedded_data& desc, char* tmp_filename) {
                   folly::errnoStr(errno).c_str());
     return nullptr;
   }
-  SCOPE_EXIT { ::unlink(tmp_filename); };
+
+  { // We don't unlink these files here because doing so can cause gdb to
+    // segfault or fail in other mysterious ways.  Some bug reports suggest
+    // that to work around this, we need to use some sort of JIT extension
+    // live, which we don't want to do:
+    //    - https://sourceware.org/ml/gdb-prs/2014-q1/msg00178.html
+    //    - https://gcc.gnu.org/bugzilla/show_bug.cgi?id=64206
+    //
+    // So instead, we just hope that HHVM shuts down gracefully and that when
+    // it doesn't, some external job will clear /tmp out for us.
+    std::lock_guard<std::mutex> l(s_tmp_files_lock);
+    s_tmp_files.push_back(tmp_filename);
+  }
   SCOPE_EXIT { ::close(dest_file); };
 
   char buffer[64*1024];
@@ -170,6 +199,14 @@ void* dlopen_embedded_data(const embedded_data& desc, char* tmp_filename) {
 }
 
 #endif
+
+void embedded_data_cleanup() {
+  std::lock_guard<std::mutex> l(s_tmp_files_lock);
+
+  for (auto const& filename : s_tmp_files) {
+    ::unlink(filename.c_str());
+  }
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 

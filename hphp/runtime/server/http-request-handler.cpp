@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -121,7 +121,7 @@ AccessLog HttpRequestHandler::s_accessLog(
 
 HttpRequestHandler::HttpRequestHandler(int timeout)
     : RequestHandler(timeout), m_pathTranslation(true)
-    , m_requestTimedOutOnQueue(ServiceData::createTimeseries(
+    , m_requestTimedOutOnQueue(ServiceData::createTimeSeries(
                                  "requests_timed_out_on_queue",
                                  {ServiceData::StatsType::COUNT})) { }
 
@@ -216,7 +216,7 @@ void HttpRequestHandler::teardownRequest(Transport* transport) noexcept {
   m_sourceRootInfo.clear();
 
   if (is_hphp_session_initialized()) {
-    hphp_session_exit();
+    hphp_session_exit(transport);
   } else {
     // Even though there are no sessions, memory is allocated to perform
     // INI setting bindings when the thread is initialized.
@@ -417,7 +417,7 @@ void HttpRequestHandler::abortRequest(Transport* transport) {
 bool HttpRequestHandler::executePHPRequest(Transport *transport,
                                            RequestURI &reqURI,
                                            SourceRootInfo &sourceRootInfo) {
-  ExecutionContext *context = hphp_context_init();
+  auto context = g_context.getNoCheck();
   OBFlags obFlags = OBFlags::Default;
   if (transport->getHTTPVersion() != "1.1") {
     obFlags |= OBFlags::OutputDisabled;

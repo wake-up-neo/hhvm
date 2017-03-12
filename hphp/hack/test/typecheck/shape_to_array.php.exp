@@ -1,6 +1,11 @@
-array<Tarraykey, mixed>
-array<[1]intersect(), [2]intersect()>
-array<[3]intersect(Tstring), [4]intersect(Tstring, Tint)>
-array<[5]intersect(Tint), [6]intersect(Tstring, Tint)>
-array<[7]intersect(Tstring), [8]intersect(Tint)>
+File "shape_to_array.php", line 11, characters 3-30:
+  array<arraykey, mixed>
+File "shape_to_array.php", line 12, characters 3-35:
+  array<^[unresolved], ^[unresolved]>
+File "shape_to_array.php", line 13, characters 3-57:
+  array<^(string), ^(string | int)>
+File "shape_to_array.php", line 14, characters 3-65:
+  array<^(int), ^(string | int)>
+File "shape_to_array.php", line 17, characters 3-30:
+  array<^(string), ^(int)>
 No errors

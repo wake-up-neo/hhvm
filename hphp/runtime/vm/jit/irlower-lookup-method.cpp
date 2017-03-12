@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,8 +22,10 @@
 #include "hphp/runtime/base/rds.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/typed-value.h"
+
 #include "hphp/runtime/vm/act-rec.h"
 #include "hphp/runtime/vm/func.h"
+#include "hphp/runtime/vm/method-lookup.h"
 
 #include "hphp/runtime/vm/jit/types.h"
 #include "hphp/runtime/vm/jit/abi.h"
@@ -35,11 +37,10 @@
 #include "hphp/runtime/vm/jit/extra-data.h"
 #include "hphp/runtime/vm/jit/ir-instruction.h"
 #include "hphp/runtime/vm/jit/ir-opcode.h"
+#include "hphp/runtime/vm/jit/meth-profile.h"
 #include "hphp/runtime/vm/jit/ssa-tmp.h"
 #include "hphp/runtime/vm/jit/target-cache.h"
-#include "hphp/runtime/vm/jit/target-profile.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
-#include "hphp/runtime/vm/jit/translator-runtime.h"
 #include "hphp/runtime/vm/jit/type.h"
 #include "hphp/runtime/vm/jit/vasm-gen.h"
 #include "hphp/runtime/vm/jit/vasm-instr.h"
@@ -62,6 +63,7 @@ void cgLdObjMethod(IRLS& env, const IRInstruction* inst) {
   auto const fp = srcLoc(env, inst, 1).reg();
   auto const extra = inst->extra<LdObjMethodData>();
   auto& v = vmain(env);
+  auto& vc = vcold(env);
 
   // Allocate the request-local one-way method cache for this lookup.
   auto const handle = rds::alloc<Entry, sizeof(Entry)>().handle();
@@ -70,12 +72,8 @@ void cgLdObjMethod(IRLS& env, const IRInstruction* inst) {
                    inst->marker().func()->fullName()->toCppString());
   }
 
-  auto const mc_handler = extra->fatal ? handlePrimeCacheInit<true>
-                                       : handlePrimeCacheInit<false>;
-
-  auto const fast_path = v.makeBlock();
-  auto const slow_path = v.makeBlock();
-  auto const done = v.makeBlock();
+  auto const mc_handler = extra->fatal ? tc::ustubs().handlePrimeCacheInitFatal
+                                       : tc::ustubs().handlePrimeCacheInit;
 
   /*
    * The `mcprep' instruction here creates a smashable move, which serves as
@@ -106,51 +104,55 @@ void cgLdObjMethod(IRLS& env, const IRInstruction* inst) {
   // Check the inline cache.
   auto const sf = v.makeReg();
   v << cmpq{classptr, cls, sf};
-  v << jcc{CC_NE, sf, {fast_path, slow_path}};
 
-  // Inline cache hit; store the value in the AR.
-  v = fast_path;
-  auto funcptr = v.makeReg();
-  v << shrqi{32, func_class, funcptr, v.makeReg()};
-  v << store{funcptr, fp[cellsToBytes(extra->offset.offset) + AROFF(m_func)]};
-  v << jmp{done};
+  unlikelyIfThenElse(
+    v, vc, CC_NE, sf,
+    [&] (Vout& v) { // then block (unlikely)
+      auto const args = argGroup(env, inst)
+        .imm(safe_cast<int32_t>(handle))
+        .addr(fp, cellsToBytes(extra->offset.offset))
+        .immPtr(extra->method)
+        .ssa(0 /* cls */)
+        .immPtr(inst->marker().func()->cls())
+        .reg(func_class);
 
-  // Initialize the inline cache, or do a lookup in the out-of-line cache if
-  // we've finished initialization and have smashed this call.
-  v = slow_path;
-
-  auto const args = argGroup(env, inst)
-    .imm(safe_cast<int32_t>(handle))
-    .addr(fp, cellsToBytes(extra->offset.offset))
-    .immPtr(extra->method)
-    .ssa(0 /* cls */)
-    .immPtr(inst->marker().func()->cls())
-    .reg(func_class);
-
-  cgCallHelper(v, env, CallSpec::smashable(mc_handler),
-               kVoidDest, SyncOptions::Sync, args);
-  v << jmp{done};
-  v = done;
+      cgCallHelper(v, env, CallSpec::smashable(mc_handler),
+                   kVoidDest, SyncOptions::Sync, args);
+    },
+    [&] (Vout& v) { // else block (likely)
+      auto const funcptr = v.makeReg();
+      v << shrqi{32, func_class, funcptr, v.makeReg()};
+      v << store{funcptr,
+                 fp[cellsToBytes(extra->offset.offset) + AROFF(m_func)]};
+    });
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
 IMPL_OPCODE_CALL(LdClsCtor)
 
+template<bool forward>
 void lookupClsMethodHelper(Class* cls, StringData* meth,
                            ActRec* ar, ActRec* fp) {
   try {
     const Func* f;
     auto const ctx = fp->m_func->cls();
     auto const obj = ctx && fp->hasThis() ? fp->getThis() : nullptr;
-    auto const res = g_context->lookupClsMethod(f, cls, meth, obj, ctx, true);
+    auto const res = lookupClsMethod(f, cls, meth, obj, ctx, true);
 
     ar->m_func = f;
 
     if (res == LookupResult::MethodFoundNoThis ||
         res == LookupResult::MagicCallStaticFound) {
-      if (!f->isStaticInProlog()) {
+      if (!f->isStaticInPrologue()) {
         raise_missing_this(f);
+      }
+      if (forward && ctx) {
+        if (fp->hasThis()) {
+          cls = fp->getThis()->getVMClass();
+        } else {
+          cls = fp->getClass();
+        }
       }
       ar->setClass(cls);
     } else {
@@ -179,11 +181,18 @@ void cgLookupClsMethod(IRLS& env, const IRInstruction* inst) {
   auto const args = argGroup(env, inst)
     .ssa(0)
     .ssa(1)
-    .addr(sp, cellsToBytes(extra->offset.offset))
+    .addr(sp, cellsToBytes(extra->calleeAROffset.offset))
     .ssa(3);
 
-  cgCallHelper(vmain(env), env, CallSpec::direct(lookupClsMethodHelper),
-               callDest(env, inst), SyncOptions::Sync, args);
+  if (extra->forward) {
+    cgCallHelper(vmain(env), env,
+                 CallSpec::direct(lookupClsMethodHelper<true>),
+                 callDest(env, inst), SyncOptions::Sync, args);
+  } else {
+    cgCallHelper(vmain(env), env,
+                 CallSpec::direct(lookupClsMethodHelper<false>),
+                 callDest(env, inst), SyncOptions::Sync, args);
+  }
 }
 
 void cgProfileMethod(IRLS& env, const IRInstruction* inst) {
@@ -192,7 +201,7 @@ void cgProfileMethod(IRLS& env, const IRInstruction* inst) {
 
   auto const args = argGroup(env, inst)
     .addr(rvmtl(), safe_cast<int32_t>(extra->handle))
-    .addr(sp, cellsToBytes(extra->spOffset.offset))
+    .addr(sp, cellsToBytes(extra->bcSPOff.offset))
     .ssa(1);
 
   cgCallHelper(vmain(env), env, CallSpec::method(&MethProfile::reportMeth),

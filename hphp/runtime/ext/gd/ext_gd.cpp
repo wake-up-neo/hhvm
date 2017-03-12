@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -41,6 +41,7 @@
 #include <zlib.h>
 #include <set>
 
+#include <folly/portability/Stdlib.h>
 #include <folly/portability/Unistd.h>
 
 /* Section Filters Declarations */
@@ -282,8 +283,6 @@ struct ImageMemoryAlloc final : RequestEventHandler {
     n = (i < n) ? i : n;
   }
 #endif
-
-  void vscan(IMarker&) const override {}
 
 private:
   size_t m_mallocSize;
@@ -727,47 +726,35 @@ static unsigned short php_read2(const req::ptr<File>& stream) {
 
 static unsigned int php_next_marker(const req::ptr<File>& file,
                                     int last_marker,
-                                    int comment_correction,
                                     int ff_read) {
   int a=0, marker;
 
   // get marker byte, swallowing possible padding
-  if (last_marker==M_COM && comment_correction) {
-    // some software does not count the length bytes of COM section
-    // one company doing so is very much envolved in JPEG... so we accept too
-    // by the way: some of those companies changed their code now...
-    comment_correction = 2;
-  } else {
-    last_marker = 0;
-    comment_correction = 0;
+  if (!ff_read) {
+    size_t extraneous = 0;
+
+    while ((marker = file->getc()) != 0xff) {
+      if (marker == EOF) {
+        return M_EOI;/* we hit EOF */
+      }
+      extraneous++;
+    }
+    if (extraneous) {
+      raise_warning("corrupt JPEG data: %zu extraneous bytes before marker",
+                    extraneous);
+    }
   }
-  if (ff_read) {
-    a = 1; /* already read 0xff in filetype detection */
-  }
+  a = 1;
   do {
     if ((marker = file->getc()) == EOF)
     {
       return M_EOI;/* we hit EOF */
-    }
-    if (last_marker==M_COM && comment_correction>0)
-    {
-      if (marker != 0xFF)
-      {
-        marker = 0xff;
-        comment_correction--;
-      } else {
-        last_marker = M_PSEUDO; /* stop skipping non 0xff for M_COM */
-      }
     }
     ++a;
   } while (marker == 0xff);
   if (a < 2)
   {
     return M_EOI; /* at least one 0xff is needed before marker code */
-  }
-  if ( last_marker==M_COM && comment_correction)
-  {
-    return M_EOI; /* ah illegal: char after COM section not 0xFF */
   }
   return (unsigned int)marker;
 }
@@ -817,7 +804,7 @@ struct gfxinfo *php_handle_jpeg(const req::ptr<File>& file, Array& info) {
   unsigned short length, ff_read=1;
 
   for (;;) {
-    marker = php_next_marker(file, marker, 1, ff_read);
+    marker = php_next_marker(file, marker, ff_read);
     ff_read = 0;
     switch (marker) {
     case M_SOF0:
@@ -2756,11 +2743,11 @@ static Variant php_imagettftext_common(int mode, int extended,
                                        const Variant& arg2,
                                        const Variant& arg3,
                                        const Variant& arg4,
-                                       const Variant& arg5 = null_variant,
-                                       const Variant& arg6 = null_variant,
-                                       const Variant& arg7 = null_variant,
-                                       const Variant& arg8 = null_variant,
-                                       const Variant& arg9 = null_variant) {
+                                       const Variant& arg5 = uninit_variant,
+                                       const Variant& arg6 = uninit_variant,
+                                       const Variant& arg7 = uninit_variant,
+                                       const Variant& arg8 = uninit_variant,
+                                       const Variant& arg9 = uninit_variant) {
   gdImagePtr im=nullptr;
   long col = -1, x = -1, y = -1;
   int brect[8];
@@ -3156,7 +3143,7 @@ Variant HHVM_FUNCTION(imagetruecolortopalette, const Resource& image,
   gdImagePtr im = get_valid_image_resource(image);
   if (!im) return false;
 
-  if (ncolors <= 0) {
+  if (ncolors <= 0 || ncolors >= INT_MAX) {
     raise_warning("Number of colors has to be greater than zero");
     return false;
   }
@@ -3939,6 +3926,10 @@ bool HHVM_FUNCTION(imagegammacorrect, const Resource& image,
     double inputgamma, double outputgamma) {
   gdImagePtr im = get_valid_image_resource(image);
   if (!im) return false;
+  if (inputgamma <= 0.0 || outputgamma <= 0.0) {
+    raise_warning("Gamma values should be positive");
+    return false;
+  }
   if (gdImageTrueColor(im))   {
     int x, y, c;
 
@@ -6443,6 +6434,7 @@ static int exif_process_IFD_in_MAKERNOTE(image_info_type *ImageInfo,
       if (value_end - (dir_start+10) < 4) return 0;
       offset_diff = 2 + NumDirEntries*12 + 4 -
                     php_ifd_get32u(dir_start+10, ImageInfo->motorola_intel);
+      if (offset_diff < 0 || offset_diff >= value_len) return 0;
       offset_base = value_ptr + offset_diff;
       break;
     default:
@@ -7365,9 +7357,12 @@ static int exif_process_IFD_in_TIFF(image_info_type *ImageInfo,
                   if (fgot < ImageInfo->Thumbnail.size) {
                     raise_warning("Thumbnail goes IFD boundary or "
                                     "end of file reached");
+                    IM_FREE(ImageInfo->Thumbnail.data);
+                    ImageInfo->Thumbnail.data = nullptr;
+                  } else {
+                    memcpy(ImageInfo->Thumbnail.data, str.c_str(), fgot);
+                    exif_thumbnail_build(ImageInfo);
                   }
-                  memcpy(ImageInfo->Thumbnail.data, str.c_str(), fgot);
-                  exif_thumbnail_build(ImageInfo);
                 }
               }
             }
@@ -7400,9 +7395,12 @@ static int exif_process_IFD_in_TIFF(image_info_type *ImageInfo,
             if (fgot < ImageInfo->Thumbnail.size) {
               raise_warning("Thumbnail goes IFD boundary or "
                               "end of file reached");
+              IM_FREE(ImageInfo->Thumbnail.data);
+              ImageInfo->Thumbnail.data = nullptr;
+            } else {
+              memcpy(ImageInfo->Thumbnail.data, str.c_str(), fgot);
+              exif_thumbnail_build(ImageInfo);
             }
-            memcpy(ImageInfo->Thumbnail.data, str.c_str(), fgot);
-            exif_thumbnail_build(ImageInfo);
           }
         }
         return 1;
@@ -8239,9 +8237,6 @@ struct ExifExtension final : Extension {
   }
 } s_exif_extension;
 
-const StaticString
-  s_GD_BUNDLED("GD_BUNDLED");
-
 struct GdExtension final : Extension {
   GdExtension() : Extension("gd", NO_EXTENSION_VERSION_YET) {}
 
@@ -8455,29 +8450,26 @@ struct GdExtension final : Extension {
     HHVM_RC_INT(IMG_FILTER_SMOOTH, IMAGE_FILTER_SMOOTH);
     HHVM_RC_INT(IMG_FILTER_PIXELATE, IMAGE_FILTER_PIXELATE);
 
-#define IMAGETYPE(cns) Native::registerConstant<KindOfInt64> \
-   (makeStaticString("IMAGETYPE_" #cns), IMAGE_FILETYPE_ ## cns)
-    IMAGETYPE(GIF);
-    IMAGETYPE(JPEG);
-    IMAGETYPE(PNG);
-    IMAGETYPE(SWF);
-    IMAGETYPE(PSD);
-    IMAGETYPE(BMP);
-    IMAGETYPE(TIFF_II);
-    IMAGETYPE(TIFF_MM);
-    IMAGETYPE(JPC);
-    IMAGETYPE(JP2);
-    IMAGETYPE(JPX);
-    IMAGETYPE(JB2);
-    IMAGETYPE(IFF);
-    IMAGETYPE(WBMP);
-    IMAGETYPE(XBM);
-    IMAGETYPE(ICO);
-    IMAGETYPE(UNKNOWN);
-    IMAGETYPE(COUNT);
-    IMAGETYPE(SWC);
+    HHVM_RC_INT(IMAGETYPE_GIF, IMAGE_FILETYPE_GIF);
+    HHVM_RC_INT(IMAGETYPE_JPEG, IMAGE_FILETYPE_JPEG);
+    HHVM_RC_INT(IMAGETYPE_PNG, IMAGE_FILETYPE_PNG);
+    HHVM_RC_INT(IMAGETYPE_SWF, IMAGE_FILETYPE_SWF);
+    HHVM_RC_INT(IMAGETYPE_PSD, IMAGE_FILETYPE_PSD);
+    HHVM_RC_INT(IMAGETYPE_BMP, IMAGE_FILETYPE_BMP);
+    HHVM_RC_INT(IMAGETYPE_TIFF_II, IMAGE_FILETYPE_TIFF_II);
+    HHVM_RC_INT(IMAGETYPE_TIFF_MM, IMAGE_FILETYPE_TIFF_MM);
+    HHVM_RC_INT(IMAGETYPE_JPC, IMAGE_FILETYPE_JPC);
+    HHVM_RC_INT(IMAGETYPE_JP2, IMAGE_FILETYPE_JP2);
+    HHVM_RC_INT(IMAGETYPE_JPX, IMAGE_FILETYPE_JPX);
+    HHVM_RC_INT(IMAGETYPE_JB2, IMAGE_FILETYPE_JB2);
+    HHVM_RC_INT(IMAGETYPE_IFF, IMAGE_FILETYPE_IFF);
+    HHVM_RC_INT(IMAGETYPE_WBMP, IMAGE_FILETYPE_WBMP);
+    HHVM_RC_INT(IMAGETYPE_XBM, IMAGE_FILETYPE_XBM);
+    HHVM_RC_INT(IMAGETYPE_ICO, IMAGE_FILETYPE_ICO);
+    HHVM_RC_INT(IMAGETYPE_UNKNOWN, IMAGE_FILETYPE_UNKNOWN);
+    HHVM_RC_INT(IMAGETYPE_COUNT, IMAGE_FILETYPE_COUNT);
+    HHVM_RC_INT(IMAGETYPE_SWC, IMAGE_FILETYPE_SWC);
     HHVM_RC_INT(IMAGETYPE_JPEG2000, IMAGE_FILETYPE_JPC);
-#undef IMAGETYPE
 
 #ifdef GD_VERSION_STRING
     HHVM_RC_STR(GD_VERSION, GD_VERSION_STRING);
@@ -8501,7 +8493,7 @@ struct GdExtension final : Extension {
     HHVM_RC_INT(PNG_ALL_FILTERS, 0x08 | 0x10 | 0x20 | 0x40 | 0x80);
 #endif
 
-    Native::registerConstant<KindOfBoolean>(s_GD_BUNDLED.get(), true);
+    HHVM_RC_BOOL(GD_BUNDLED, true);
 
     loadSystemlib();
   }

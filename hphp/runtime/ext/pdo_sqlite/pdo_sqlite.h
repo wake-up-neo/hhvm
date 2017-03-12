@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -93,7 +93,6 @@ struct PDOSqliteResource : PDOResource {
                       int argcount);
 
   DECLARE_RESOURCE_ALLOCATION(PDOSqliteResource);
-  void vscan(IMarker&) const override;
 
 private:
 

@@ -14,11 +14,11 @@ from lookup import lookup_litstr
 
 
 #------------------------------------------------------------------------------
-# HPHP::Op -> int8_t table helpers.
+# HPHP::Op -> int16_t table helpers.
 
 def as_idx(op):
-    """Cast an HPHP::Op to a uint8_t."""
-    return op.cast(T('uint8_t'))
+    """Cast an HPHP::Op to a uint16_t."""
+    return op.cast(T('uint16_t'))
 
 @memoized
 def op_table(name):
@@ -31,7 +31,7 @@ def op_table(name):
 
 @memoized
 def iva_imm_types():
-    return [V('HPHP::' + t) for t in ['IVA', 'LA', 'IA']]
+    return [V('HPHP::' + t) for t in ['IVA', 'LA', 'IA', 'CAR', 'CAW']]
 
 @memoized
 def vec_imm_types():
@@ -78,13 +78,14 @@ class HHBC(object):
         encoding."""
 
         pc = pc.cast(T('uint8_t').pointer())
-        raw_val = ~pc.dereference()
+        raw_val = (pc.dereference()).cast(T('size_t'))
 
         if (raw_val == 0xff):
-            byte = ~pc.dereference()
+            pc += 1
+            byte = pc.dereference()
             raw_val += byte
 
-        return raw_val.cast(T('HPHP::Op'))
+        return [raw_val.cast(T('HPHP::Op')), 2 if raw_val >= 0xff else 1]
 
     @staticmethod
     def op_name(op):
@@ -93,12 +94,6 @@ class HHBC(object):
         table_name = 'HPHP::opcodeToName(HPHP::Op)::namesArr'
         table_type = T('char').pointer().pointer()
         return op_table(table_name).cast(table_type)[as_idx(op)]
-
-    @staticmethod
-    def op_size(op):
-        """Return the encoding size of the HPHP::Op `op'."""
-
-        return 1 if op.cast(T('size_t')) < 0xff else 2
 
     ##
     # Opcode immediate info.
@@ -114,8 +109,15 @@ class HHBC(object):
     def imm_type(op, arg):
         """Return the type of the arg'th immediate for HPHP::Op `op'."""
 
-        table_fmt = 'HPHP::immType(HPHP::Op, int)::arg%dTypes'
-        immtype = op_table(table_fmt % arg)[as_idx(op)]
+        op_count = V('HPHP::Op_count')
+
+        table_name = 'HPHP::immType(HPHP::Op, int)::argTypes'
+        # This looks like an int8_t[4][op_count], but in fact, it's actually an
+        # int8_t[op_count][4], as desired.
+        table_type = T('int8_t').array(4 - 1).array(op_count - 1).pointer()
+        table = op_table(table_name).cast(table_type).dereference()
+
+        immtype = table[as_idx(op)][arg]
         return immtype.cast(T('HPHP::ArgType'))
 
     @staticmethod
@@ -128,14 +130,13 @@ class HHBC(object):
         if immtype in iva_imm_types():
             imm = ptr.cast(T('unsigned char').pointer()).dereference()
 
-            if imm & 0x1:
-                iva_type = T('int32_t')
+            if imm & 0x80:
+                raw = ptr.cast(T('uint32_t').pointer()).dereference()
+                info['value'] = ((raw & 0xffffff00) >> 1) | (raw & 0x7f);
+                info['size'] = 4
             else:
-                iva_type = T('unsigned char')
-
-            imm = ptr.cast(iva_type.pointer()).dereference()
-            info['size'] = iva_type.sizeof
-            info['value'] = imm >> 1
+                info['value'] = imm
+                info['size'] = 1
 
         elif immtype in vec_imm_types():
             elm_size = vec_elm_sizes()[vec_imm_types().index(immtype)]
@@ -161,6 +162,27 @@ class HHBC(object):
                 info['size'] = 1
 
             info['value'] = str(tag)[len('HPHP::RepoAuthType::Tag::'):]
+
+        elif immtype == V('HPHP::LAR'):
+            first = ptr.cast(T('unsigned char').pointer()).dereference()
+            if first & 0x1:
+                first_type = T('int32_t')
+            else:
+                first_type = T('unsigned char')
+
+            count = (ptr.cast(T('unsigned char').pointer())
+                     + first_type.sizeof).dereference()
+            if count & 0x1:
+                count_type = T('int32_t')
+            else:
+                count_type = T('unsigned char')
+
+            first = ptr.cast(first_type.pointer()).dereference()
+            count = (ptr.cast(T('unsigned char').pointer())
+                     + first_type.sizeof).cast(count_type.pointer()).dereference()
+
+            info['size'] = first_type.sizeof + count_type.sizeof
+            info['value'] = 'L:' + str(first >> 1) + '+' + str(count >> 1)
 
         else:
             table_name = 'HPHP::immSize(unsigned char const*, int)::argTypeToSizes'
@@ -189,13 +211,12 @@ class HHBC(object):
     #
     @staticmethod
     def instr_info(bc):
-        op = HHBC.decode_op(bc)
+        op, instrlen = HHBC.decode_op(bc)
 
         if op <= V('HPHP::OpLowInvalid') or op >= V('HPHP::OpHighInvalid'):
-            print('Invalid Op %d @ %p' % (op, bc))
-            return 1
+            print('hhx: Invalid Op %d @ 0x%x' % (op, bc))
+            return None
 
-        instrlen = HHBC.op_size(op)
         imms = []
 
         for i in xrange(0, int(HHBC.num_imms(op))):
@@ -257,6 +278,10 @@ remains where it left off after the previous call.
 
         for i in xrange(0, self.count):
             instr = HHBC.instr_info(self.bcpos)
+            if instr is None:
+                print('hhx: Bytecode dump failed')
+                break
+
             name = HHBC.op_name(instr['op']).string()
 
             start_addr = bcstart.cast(T('void').pointer())

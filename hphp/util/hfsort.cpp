@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -60,6 +60,11 @@ TargetId TargetGraph::addTarget(uint32_t size, uint32_t samples) {
   return id;
 }
 
+void TargetGraph::setSamples(TargetId id, uint32_t samples) {
+  assertx(id < targets.size());
+  targets[id].samples = samples;
+}
+
 const Arc& TargetGraph::incArcWeight(TargetId src, TargetId dst, double w) {
   auto res = arcs.emplace(src, dst, w);
   if (!res.second) {
@@ -71,10 +76,22 @@ const Arc& TargetGraph::incArcWeight(TargetId src, TargetId dst, double w) {
   return *res.first;
 }
 
+// Normalize incoming arc weights and compute avgCallOffset for each node.
+void TargetGraph::normalizeArcWeights() {
+  for (TargetId f = 0; f < targets.size(); f++) {
+    auto& func = targets[f];
+    for (auto src : func.preds) {
+      auto& arc = *arcs.find(Arc(src, f));
+      arc.normalizedWeight = arc.weight / func.samples;
+      arc.avgCallOffset = arc.avgCallOffset / arc.weight;
+      assert(arc.avgCallOffset < targets[src].size);
+    }
+  }
+}
+
 Cluster::Cluster(TargetId id, const Target& f) {
   targets.push_back(id);
   size = f.size;
-  arcWeight = 0;
   samples = f.samples;
   frozen = false;
   HFTRACE(1, "new Cluster: %s\n", toString().c_str());
@@ -82,6 +99,10 @@ Cluster::Cluster(TargetId id, const Target& f) {
 
 std::string Cluster::toString() const {
   return folly::sformat("funcs = [{}]", folly::join(", ", targets));
+}
+
+double Cluster::density() const {
+  return (double)samples / size;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -111,11 +132,9 @@ void mergeInto(Cluster& into, Cluster&& other, const double aw = 0) {
   into.targets.insert(into.targets.end(), other.targets.begin(), other.targets.end());
   into.size += other.size;
   into.samples += other.samples;
-  into.arcWeight += (other.arcWeight + aw);
 
   other.size = 0;
   other.samples = 0;
-  other.arcWeight = 0;
   other.targets.clear();
 }
 }

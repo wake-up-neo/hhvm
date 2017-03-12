@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -34,23 +34,27 @@ std::string show(SrcKey sk) {
   if (unit->filepath()->data() && unit->filepath()->size()) {
     filepath = unit->filepath()->data();
   }
-  return folly::format("{}:{} in {}(id 0x{:#x})@{: >6}{}",
-                       filepath, unit->getLineNumber(sk.offset()),
-                       func->isPseudoMain() ? "pseudoMain"
-                                            : func->fullName()->data(),
-                       (uint32_t)sk.funcID(), sk.offset(),
-                       sk.resumed() ? "r" : "").str();
+  return folly::sformat("{}:{} in {}(id 0x{:#x})@{: >6}{}{}",
+                        filepath, unit->getLineNumber(sk.offset()),
+                        func->isPseudoMain() ? "pseudoMain"
+                                             : func->fullName()->data(),
+                        (uint32_t)sk.funcID(), sk.offset(),
+                        sk.resumed()  ? "r" : "",
+                        sk.hasThis()  ? "t" : "",
+                        sk.prologue() ? "p" : "");
 }
 
 std::string showShort(SrcKey sk) {
   if (!sk.valid()) return "<invalid SrcKey>";
-  return folly::format(
-    "{}(id {:#x})@{}{}",
+  return folly::sformat(
+    "{}(id {:#x})@{}{}{}{}",
     sk.func()->fullName(),
     sk.funcID(),
     sk.offset(),
-    sk.resumed() ? "r" : ""
-  ).str();
+    sk.resumed()  ? "r" : "",
+    sk.hasThis()  ? "t" : "",
+    sk.prologue() ? "p" : ""
+  );
 }
 
 void sktrace(SrcKey sk, const char *fmt, ...) {

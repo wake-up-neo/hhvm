@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -39,6 +39,8 @@ SatelliteServerInfo::SatelliteServerInfo(const IniSetting::Map& ini,
   m_name = hdf.exists() && !hdf.isEmpty() ? hdf.getName() : ini_key;
   m_name = hdf.getName();
   m_port = Config::GetUInt16(ini, hdf, "Port", 0, false);
+  m_serverIP = Config::GetString(ini, hdf, "IP",
+                                 RuntimeOption::ServerIP, false);
   m_threadCount = Config::GetInt32(ini, hdf, "ThreadCount", 5, false);
   m_maxRequest = Config::GetInt32(ini, hdf, "MaxRequest", 500, false);
   m_maxDuration = Config::GetInt32(ini, hdf, "MaxDuration", 120, false);
@@ -51,6 +53,15 @@ SatelliteServerInfo::SatelliteServerInfo(const IniSetting::Map& ini,
   m_passwords = Config::GetSet(ini, hdf, "Passwords", m_passwords, false);
   m_alwaysReset = Config::GetBool(ini, hdf, "AlwaysReset", false, false);
   m_functions = Config::GetSet(ini, hdf, "Functions", m_functions, false);
+
+  std::string method  = Config::GetString(ini, hdf, "Method", "", false);
+  if (method == "POST") {
+    m_method = Transport::Method::POST;
+  } else if (method == "GET") {
+    m_method = Transport::Method::GET;
+  } else {
+    m_method = Transport::Method::AUTO;
+  }
 
   std::string type = Config::GetString(ini, hdf, "Type", "", false);
   if (type == "InternalPageServer") {
@@ -90,7 +101,7 @@ struct InternalPageServer : SatelliteServer {
   explicit InternalPageServer(std::shared_ptr<SatelliteServerInfo> info)
     : m_allowedURLs(info->getURLs()) {
     m_server = ServerFactoryRegistry::createServer
-      (RuntimeOption::ServerType, RuntimeOption::ServerIP, info->getPort(),
+      (RuntimeOption::ServerType, info->getServerIP(), info->getPort(),
        info->getThreadCount());
     m_server->setRequestHandlerFactory<HttpRequestHandler>(
       info->getTimeoutSeconds().count());
@@ -135,7 +146,7 @@ private:
 struct RPCServer : SatelliteServer {
   explicit RPCServer(std::shared_ptr<SatelliteServerInfo> info) {
     m_server = ServerFactoryRegistry::createServer
-      (RuntimeOption::ServerType, RuntimeOption::ServerIP, info->getPort(),
+      (RuntimeOption::ServerType, info->getServerIP(), info->getPort(),
        info->getThreadCount());
     m_server->setRequestHandlerFactory([info] {
         auto handler = make_unique<RPCRequestHandler>(

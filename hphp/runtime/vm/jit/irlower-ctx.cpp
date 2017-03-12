@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -62,12 +62,6 @@ void cgConvClsToCctx(IRLS& env, const IRInstruction* inst) {
   auto const cls = srcLoc(env, inst, 0).reg();
   auto& v = vmain(env);
   v << orqi{ActRec::kHasClassBit, cls, dst, v.makeReg()};
-}
-
-void cgCastCtxThis(IRLS& env, const IRInstruction* inst) {
-  auto& v = vmain(env);
-  v << copy{srcLoc(env, inst, 0).reg(),
-            dstLoc(env, inst, 0).reg()};
 }
 
 void cgCheckCtxThis(IRLS& env, const IRInstruction* inst) {

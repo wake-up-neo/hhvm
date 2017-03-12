@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -110,7 +110,7 @@ void XMLReader::close() {
 
 Variant HHVM_METHOD(XMLReader, open,
                  const String& uri,
-                 const Variant& encoding /*= null_variant*/,
+                 const Variant& encoding /*= uninit_variant*/,
                  int64_t options /*= 0*/) {
   auto* data = Native::data<XMLReader>(this_);
   const String& str_encoding = encoding.isNull()
@@ -160,7 +160,7 @@ Variant HHVM_METHOD(XMLReader, open,
 
 bool HHVM_METHOD(XMLReader, XML,
                  const String& source,
-                 const Variant& encoding /*= null_variant*/,
+                 const Variant& encoding /*= uninit_variant*/,
                  int64_t options /*= 0*/) {
   auto* data = Native::data<XMLReader>(this_);
   const String& str_encoding = encoding.isNull()
@@ -235,7 +235,7 @@ bool HHVM_METHOD(XMLReader, read) {
 }
 
 bool HHVM_METHOD(XMLReader, next,
-                 const Variant& localname /*= null_variant*/) {
+                 const Variant& localname /*= uninit_variant*/) {
   auto* data = Native::data<XMLReader>(this_);
   const String& str_localname = localname.isNull()
                               ? null_string
@@ -662,9 +662,6 @@ Variant HHVM_METHOD(XMLReader, __get,
     case KindOfResource:
     case KindOfRef:
       return init_null();
-
-    case KindOfClass:
-      break;
   }
   not_reached();
 }

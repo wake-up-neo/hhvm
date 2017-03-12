@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -52,17 +52,19 @@ FuncEmitter::FuncEmitter(UnitEmitter& ue, int sn, Id id, const StringData* n)
   , name(n)
   , top(false)
   , maxStackCells(0)
-  , returnType(folly::none)
+  , hniReturnType(folly::none)
   , retUserType(nullptr)
   , docComment(nullptr)
   , originalFilename(nullptr)
   , memoizePropName(nullptr)
+  , memoizeGuardPropName(nullptr)
   , memoizeSharedPropIndex(0)
   , m_numLocals(0)
   , m_numUnnamedLocals(0)
   , m_activeUnnamedLocals(0)
   , m_numIterators(0)
   , m_nextFreeIterator(0)
+  , m_numClsRefSlots(0)
   , m_ehTabSorted(false)
 {}
 
@@ -75,17 +77,19 @@ FuncEmitter::FuncEmitter(UnitEmitter& ue, int sn, const StringData* n,
   , name(n)
   , top(false)
   , maxStackCells(0)
-  , returnType(folly::none)
+  , hniReturnType(folly::none)
   , retUserType(nullptr)
   , docComment(nullptr)
   , originalFilename(nullptr)
   , memoizePropName(nullptr)
+  , memoizeGuardPropName(nullptr)
   , memoizeSharedPropIndex(0)
   , m_numLocals(0)
   , m_numUnnamedLocals(0)
   , m_activeUnnamedLocals(0)
   , m_numIterators(0)
   , m_nextFreeIterator(0)
+  , m_numClsRefSlots(0)
   , m_ehTabSorted(false)
 {}
 
@@ -141,8 +145,7 @@ static std::vector<EHEnt> toFixed(const std::vector<EHEntEmitter>& vec) {
     e.m_past = ehe.m_past;
     e.m_iterId = ehe.m_iterId;
     e.m_parentIndex = ehe.m_parentIndex;
-    e.m_fault = ehe.m_fault;
-    e.m_catches = ehe.m_catches;
+    e.m_handler = ehe.m_handler;
     ret.emplace_back(std::move(e));
   }
   return ret;
@@ -156,10 +159,17 @@ Func* FuncEmitter::create(Unit& unit, PreClass* preClass /* = NULL */) const {
   if (preClass && preClass->attrs() & AttrInterface) {
     attrs |= AttrAbstract;
   }
-  if (attrs & AttrPersistent &&
-      ((RuntimeOption::EvalJitEnableRenameFunction && !isGenerated) ||
-       (!RuntimeOption::RepoAuthoritative && SystemLib::s_inited) ||
-       attrs & AttrInterceptable)) {
+  if (!RuntimeOption::RepoAuthoritative) {
+    if (RuntimeOption::EvalJitEnableRenameFunction) {
+      attrs |= AttrInterceptable;
+    } else {
+      attrs = Attr(attrs & ~AttrInterceptable);
+    }
+  }
+  if (attrs & AttrPersistent && !preClass &&
+      (RuntimeOption::EvalJitEnableRenameFunction ||
+       attrs & AttrInterceptable ||
+       (!RuntimeOption::RepoAuthoritative && SystemLib::s_inited))) {
     if (attrs & AttrBuiltin) {
       SystemLib::s_anyNonPersistentBuiltins = true;
     }
@@ -169,15 +179,20 @@ Func* FuncEmitter::create(Unit& unit, PreClass* preClass /* = NULL */) const {
     // In non-RepoAuthoritative mode, any function could get a VarEnv because
     // of evalPHPDebugger.
     attrs |= AttrMayUseVV;
-  } else if (RuntimeOption::EvalJitEnableRenameFunction &&
-      !name->empty() &&
-      !Func::isSpecial(name) &&
-      !isClosureBody) {
+  } else if ((attrs & AttrInterceptable) &&
+             !name->empty() &&
+             !Func::isSpecial(name) &&
+             !isClosureBody) {
     // intercepted functions need to pass all args through
     // to the interceptee
     attrs |= AttrMayUseVV;
   }
-  if (isVariadic()) { attrs |= AttrVariadicParam; }
+  if (isVariadic()) {
+    attrs |= AttrVariadicParam;
+    if (isVariadicByRef()) {
+      attrs |= AttrVariadicByRef;
+    }
+  }
 
   if (!containsCalls) { attrs |= AttrPhpLeafFn; }
 
@@ -189,7 +204,8 @@ Func* FuncEmitter::create(Unit& unit, PreClass* preClass /* = NULL */) const {
   bool const needsExtendedSharedData =
     isNative ||
     line2 - line1 >= Func::kSmallDeltaLimit ||
-    past - base >= Func::kSmallDeltaLimit;
+    past - base >= Func::kSmallDeltaLimit ||
+    m_numClsRefSlots > 3;
 
   f->m_shared.reset(
     needsExtendedSharedData
@@ -208,6 +224,8 @@ Func* FuncEmitter::create(Unit& unit, PreClass* preClass /* = NULL */) const {
     ex->m_line2 = line2;
     ex->m_past = past;
     ex->m_returnByValue = false;
+    ex->m_isMemoizeWrapper = false;
+    ex->m_actualNumClsRefSlots = m_numClsRefSlots;
   }
 
   std::vector<Func::ParamInfo> fParams;
@@ -219,7 +237,6 @@ Func* FuncEmitter::create(Unit& unit, PreClass* preClass /* = NULL */) const {
     f->appendParam(params[i].byRef, pi, fParams);
   }
 
-  f->shared()->m_returnType = returnType;
   f->shared()->m_localNames.create(m_localNames);
   f->shared()->m_numLocals = m_numLocals;
   f->shared()->m_numIterators = m_numIterators;
@@ -236,9 +253,15 @@ Func* FuncEmitter::create(Unit& unit, PreClass* preClass /* = NULL */) const {
   f->shared()->m_retUserType = retUserType;
   f->shared()->m_originalFilename = originalFilename;
   f->shared()->m_isGenerated = isGenerated;
+  f->shared()->m_repoReturnType = repoReturnType;
+  f->shared()->m_repoAwaitedReturnType = repoAwaitedReturnType;
+  f->shared()->m_isMemoizeWrapper = isMemoizeWrapper;
+  f->shared()->m_numClsRefSlots = m_numClsRefSlots;
 
   if (isNative) {
     auto const ex = f->extShared();
+
+    ex->m_hniReturnType = hniReturnType;
 
     auto const& info = Native::GetBuiltinFunction(
       name,
@@ -294,10 +317,13 @@ void FuncEmitter::serdeMetaData(SerDe& sd) {
     (base)
     (past)
     (attrs)
-    (returnType)
+    (hniReturnType)
+    (repoReturnType)
+    (repoAwaitedReturnType)
     (docComment)
     (m_numLocals)
     (m_numIterators)
+    (m_numClsRefSlots)
     (maxStackCells)
     (isClosureBody)
     (isAsync)
@@ -305,6 +331,7 @@ void FuncEmitter::serdeMetaData(SerDe& sd) {
     (isPairGenerator)
     (containsCalls)
     (isNative)
+    (isMemoizeWrapper)
 
     (params)
     (m_localNames)
@@ -315,6 +342,8 @@ void FuncEmitter::serdeMetaData(SerDe& sd) {
     (retTypeConstraint)
     (retUserType)
     (originalFilename)
+
+    (dynCallWrapperId)
     ;
 }
 
@@ -427,7 +456,7 @@ void FuncEmitter::sortFPITab(bool load) {
     fpitab[i].m_parentIndex = -1;
     fpitab[i].m_fpiDepth = 1;
     for (int j = i - 1; j >= 0; j--) {
-      if (fpitab[j].m_fcallOff > fpitab[i].m_fcallOff) {
+      if (fpitab[j].m_fpiEndOff >= fpitab[i].m_fpiEndOff) {
         fpitab[i].m_parentIndex = j;
         fpitab[i].m_fpiDepth = fpitab[j].m_fpiDepth + 1;
         break;
@@ -438,6 +467,7 @@ void FuncEmitter::sortFPITab(bool load) {
       // the AR itself. Fix it here.
       fpitab[i].m_fpOff += m_numLocals
         + m_numIterators * kNumIterCells
+        + clsRefCountToCells(m_numClsRefSlots)
         + (fpitab[i].m_fpiDepth) * kNumActRecCells;
     }
   }
@@ -480,6 +510,8 @@ void FuncEmitter::setEHTabIsSorted() {
  *      Effectively forces functions to generate an ActRec
  *  "NoInjection": Do not include this frame in backtraces
  *  "ZendCompat": Use zend compat wrapper
+ *  "ReadsCallerFrame": Function might read from the caller's frame
+ *  "WritesCallerFrame": Function might write to the caller's frame
  *
  *  e.g.   <<__Native("ActRec")>> function foo():mixed;
  */
@@ -491,7 +523,9 @@ static const StaticString
   s_noinjection("NoInjection"),
   s_zendcompat("ZendCompat"),
   s_numargs("NumArgs"),
-  s_opcodeimpl("OpCodeImpl");
+  s_opcodeimpl("OpCodeImpl"),
+  s_readsCallerFrame("ReadsCallerFrame"),
+  s_writesCallerFrame("WritesCallerFrame");
 
 int FuncEmitter::parseNativeAttributes(Attr& attrs_) const {
   int ret = Native::AttrNone;
@@ -522,6 +556,10 @@ int FuncEmitter::parseNativeAttributes(Attr& attrs_) const {
         attrs_ |= AttrNumArgs;
       } else if (userAttrStrVal.get()->isame(s_opcodeimpl.get())) {
         ret |= Native::AttrOpCodeImpl;
+      } else if (userAttrStrVal.get()->isame(s_readsCallerFrame.get())) {
+        attrs_ |= AttrReadsCallerFrame;
+      } else if (userAttrStrVal.get()->isame(s_writesCallerFrame.get())) {
+        attrs_ |= AttrWritesCallerFrame;
       }
     }
   }

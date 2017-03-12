@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -39,6 +39,7 @@
 #include "hphp/runtime/vm/jit/arg-group.h"
 #include "hphp/runtime/vm/jit/bc-marker.h"
 #include "hphp/runtime/vm/jit/call-spec.h"
+#include "hphp/runtime/vm/jit/code-gen-cf.h"
 #include "hphp/runtime/vm/jit/code-gen-helpers.h"
 #include "hphp/runtime/vm/jit/extra-data.h"
 #include "hphp/runtime/vm/jit/fixup.h"
@@ -47,7 +48,6 @@
 #include "hphp/runtime/vm/jit/ssa-tmp.h"
 #include "hphp/runtime/vm/jit/tc.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
-#include "hphp/runtime/vm/jit/translator-runtime.h"
 #include "hphp/runtime/vm/jit/type.h"
 #include "hphp/runtime/vm/jit/unique-stubs.h"
 #include "hphp/runtime/vm/jit/vasm-gen.h"
@@ -99,6 +99,7 @@ void cgCall(IRLS& env, const IRInstruction* inst) {
     if (do_assert) {
       assertx(argc == callee->numLocals());
       assertx(callee->numIterators() == 0);
+      assertx(callee->numClsRefSlots() == 0);
 
       auto addr = callee->getEntry();
       while (peek_op(addr) == Op::AssertRATL) {
@@ -135,7 +136,6 @@ void cgCall(IRLS& env, const IRInstruction* inst) {
     auto const done = v.makeBlock();
     v << vinvoke{CallSpec::direct(builtinFuncPtr), v.makeVcallArgs({{rvmfp()}}),
                  v.makeTuple({}), {done, catchBlock}, Fixup(0, argc)};
-    env.catch_calls[inst->taken()] = CatchCall::CPP;
 
     v = done;
     // The native implementation already put the return value on the stack for
@@ -144,20 +144,26 @@ void cgCall(IRLS& env, const IRInstruction* inst) {
     // register so the trace we are returning to has it where it expects.
     // TODO(#1273094): We should probably modify the actual builtins to return
     // values via registers using the C ABI and do a reg-to-reg move.
-    loadTV(v, inst->dst(), dstLoc(env, inst, 0), rvmfp()[AROFF(m_r)], true);
+    loadTV(v, inst->dst(), dstLoc(env, inst, 0), rvmfp()[kArRetOff], true);
     v << load{rvmfp()[AROFF(m_sfp)], rvmfp()};
     emitRB(v, Trace::RBTypeFuncExit, callee->fullName()->data());
     return;
   }
 
-  v << lea{calleeAR, rvmfp()};
-
   if (RuntimeOption::EvalHHIRGenerateAsserts) {
     v << syncvmsp{v.cns(0x42)};
 
     constexpr uint64_t kUninitializedRIP = 0xba5eba11acc01ade;
-    emitImmStoreq(v, kUninitializedRIP, rvmfp()[AROFF(m_savedRip)]);
+    emitImmStoreq(v, kUninitializedRIP, calleeAR + AROFF(m_savedRip));
   }
+
+  // A few vasm passes depend on the particular instruction sequence here:
+  //  - vasm-copy expects this lea{} to be immediately followed by the
+  //    callphp{} below.
+  //  - vasm-prof-branch requires that this lea{} fall through straight to the
+  //    callphp{}, with no intervening control flow (though it doesn't care if
+  //    they're contiguous).
+  v << lea{calleeAR, rvmfp()};
 
   // Emit a smashable call that initially calls a recyclable service request
   // stub.  The stub and the eventual targets take rvmfp() as an argument,
@@ -168,11 +174,16 @@ void cgCall(IRLS& env, const IRInstruction* inst) {
 
   auto const done = v.makeBlock();
   v << callphp{target, php_call_regs(), {{done, catchBlock}}};
-  env.catch_calls[inst->taken()] = CatchCall::PHP;
   v = done;
 
   auto const dst = dstLoc(env, inst, 0);
-  v << defvmret{dst.reg(0), dst.reg(1)};
+  auto const type = inst->dst()->type();
+  if (!type.admitsSingleVal()) {
+    v << defvmretdata{dst.reg(0)};
+  }
+  if (type.needsReg()) {
+    v << defvmrettype{dst.reg(1)};
+  }
 }
 
 void cgCallArray(IRLS& env, const IRInstruction* inst) {
@@ -197,22 +208,37 @@ void cgCallArray(IRLS& env, const IRInstruction* inst) {
   auto const done = v.makeBlock();
   v << vcallarray{target, fcall_array_regs(), args,
                   {done, label(env, inst->taken())}};
-  env.catch_calls[inst->taken()] = CatchCall::PHP;
   v = done;
 
   auto const dst = dstLoc(env, inst, 0);
-  v << defvmret{dst.reg(0), dst.reg(1)};
+  auto const type = inst->dst()->type();
+  if (!type.admitsSingleVal()) {
+    v << defvmretdata{dst.reg(0)};
+  }
+  if (type.needsReg()) {
+    v << defvmrettype{dst.reg(1)};
+  }
 }
 
 void cgCallBuiltin(IRLS& env, const IRInstruction* inst) {
   auto const extra = inst->extra<CallBuiltin>();
   auto const callee = extra->callee;
-  auto const returnType = inst->typeParam();
-  auto const funcReturnType = callee->returnType();
+  auto const funcReturnType = callee->hniReturnType();
   auto const returnByValue = callee->isReturnByValue();
 
   auto const dstData = dstLoc(env, inst, 0).reg(0);
   auto const dstType = dstLoc(env, inst, 0).reg(1);
+
+  auto returnType = inst->dst()->type();
+  // Subtract out the null possibility from the return type if it would be a
+  // reference type otherwise. Don't do this if the type is nothing but a null
+  // (which would give us TBottom. This makes it easier to test what kind of
+  // return we need to generate below.
+  if (returnType.maybe(TNull) && !(returnType <= TNull)) {
+    if ((returnType - TNull).isReferenceType()) {
+      returnType -= TNull;
+    }
+  }
 
   auto& v = vmain(env);
 
@@ -245,8 +271,7 @@ void cgCallBuiltin(IRLS& env, const IRInstruction* inst) {
       // Pass the address of tvBuiltinReturn to the native function as the
       // location where it can construct the return Array, String, Object, or
       // Variant.
-      args.addr(rvmtl(), returnOffset);
-      args.indirect();
+      args.indRet(rvmtl(), returnOffset);
     }
   }
 
@@ -376,7 +401,6 @@ void cgNativeImpl(IRLS& env, const IRInstruction* inst) {
     {label(env, inst->next()), label(env, inst->taken())},
     makeFixup(inst->marker(), SyncOptions::Sync)
   };
-  env.catch_calls[inst->taken()] = CatchCall::CPP;
 }
 
 static void traceCallback(ActRec* fp, Cell* sp, Offset bcOff) {
@@ -405,6 +429,97 @@ void cgDbgTraceCall(IRLS& env, const IRInstruction* inst) {
 void cgEnterFrame(IRLS& env, const IRInstruction* inst) {
   auto const fp = srcLoc(env, inst, 0).reg();
   vmain(env) << phplogue{fp};
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void cgCheckRefs(IRLS& env, const IRInstruction* inst)  {
+  auto const func = srcLoc(env, inst, 0).reg();
+  auto const nparams = srcLoc(env, inst, 1).reg();
+
+  auto const extra = inst->extra<CheckRefs>();
+  auto const mask64 = extra->mask;
+  auto const vals64 = extra->vals;
+  assertx(mask64);
+  assertx((vals64 & mask64) == vals64);
+
+  auto& v = vmain(env);
+
+  auto const thenBody = [&] (Vout& v) {
+    auto const sf = v.makeReg();
+
+    auto bitsOff = sizeof(uint64_t) * (extra->firstBit / 64);
+    auto bitsPtr = v.makeReg();
+    auto cond = CC_NE;
+
+    if (extra->firstBit == 0) {
+      bitsOff = Func::refBitValOff();
+      bitsPtr = func;
+    } else {
+      v << load{func[Func::sharedOff()], bitsPtr};
+      bitsOff -= sizeof(uint64_t);
+    }
+
+    if (vals64 == 0 || (mask64 & (mask64 - 1)) == 0) {
+      // If vals64 is zero, or we're testing a single bit, we can get away with
+      // a single test, rather than mask-and-compare.  The use of testbim{} and
+      // testlim{} here is little-endian specific but it's "ok" for now as long
+      // as nothing else is read or written using the same pointer.
+      if (mask64 <= 0xff) {
+        v << testbim{(int8_t)mask64, bitsPtr[bitsOff], sf};
+      } else if (mask64 <= 0xffffffff) {
+        v << testlim{(int32_t)mask64, bitsPtr[bitsOff], sf};
+      } else {
+        v << testqm{v.cns(mask64), bitsPtr[bitsOff], sf};
+      }
+      if (vals64) cond = CC_E;
+    } else {
+      auto const bits = v.makeReg();
+      v << load{bitsPtr[bitsOff], bits};
+
+      auto const truncBits = v.makeReg();
+      auto const maskedBits = v.makeReg();
+
+      if (mask64 <= 0xff && vals64 <= 0xff) {
+        v << movtqb{bits, truncBits};
+        v << andbi{(int8_t)mask64, truncBits, maskedBits, v.makeReg()};
+        v << cmpbi{(int8_t)vals64, maskedBits, sf};
+      } else if (mask64 <= 0xffffffff && vals64 <= 0xffffffff) {
+        v << movtql{bits, truncBits};
+        v << andli{(int32_t)mask64, truncBits, maskedBits, v.makeReg()};
+        v << cmpli{(int32_t)vals64, maskedBits, sf};
+      } else {
+        v << andq{v.cns(mask64), bits, maskedBits, v.makeReg()};
+        v << cmpq{v.cns(vals64), maskedBits, sf};
+      }
+    }
+    fwdJcc(v, env, cond, sf, inst->taken());
+  };
+
+  if (extra->firstBit == 0) {
+    assertx(inst->src(1)->hasConstVal());
+    // This is the first 64 bits.  No need to check nparams.
+    thenBody(v);
+  } else {
+    // Check number of args...
+    auto const sf = v.makeReg();
+    v << cmpqi{extra->firstBit, nparams, sf};
+
+    if (vals64 != 0 && vals64 != mask64) {
+      // If we're beyond nparams, then either all params are refs, or all
+      // params are non-refs, so if vals64 isn't 0 and isnt mask64, there's no
+      // possibility of a match.
+      fwdJcc(v, env, CC_LE, sf, inst->taken());
+      thenBody(v);
+    } else {
+      ifThenElse(v, CC_NLE, sf, thenBody, [&] (Vout& v) {
+        // If not special builtin...
+        auto const sf = v.makeReg();
+        v << testlim{AttrVariadicByRef, func[Func::attrsOff()], sf};
+        fwdJcc(v, env, vals64 ? CC_Z : CC_NZ, sf, inst->taken());
+      });
+    }
+  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////

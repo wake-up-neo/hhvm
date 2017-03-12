@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -143,7 +143,7 @@ struct PreClassEmitter {
   typedef IndexedStringMap<Prop, true, Slot> PropMap;
   typedef IndexedStringMap<Const, true, Slot> ConstMap;
 
-  PreClassEmitter(UnitEmitter& ue, Id id, const StringData* n,
+  PreClassEmitter(UnitEmitter& ue, Id id, const std::string& name,
                   PreClass::Hoistable hoistable);
   ~PreClassEmitter();
 
@@ -228,6 +228,9 @@ struct PreClassEmitter {
     return std::make_pair(m_line1, m_line2);
   }
 
+  bool areMemoizeCacheKeysAllocated() const {
+    return m_memoizeInstanceSerial > 0;
+  }
   int getNextMemoizeCacheKey() {
     return m_memoizeInstanceSerial++;
   }
@@ -251,8 +254,6 @@ struct PreClassEmitter {
   PreClass::Hoistable m_hoistable;
   BuiltinCtorFunction m_instanceCtor{nullptr};
   BuiltinDtorFunction m_instanceDtor{nullptr};
-  uint32_t m_builtinObjSize{0};
-  int32_t m_builtinODOffset{0};
   int32_t m_numDeclMethods{-1};
   Slot m_ifaceVtableSlot{kInvalidSlot};
   int m_memoizeInstanceSerial{0};
